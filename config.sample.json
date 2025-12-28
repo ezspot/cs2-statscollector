@@ -1,0 +1,19 @@
+{
+  "DatabaseHost": "127.0.0.1",
+  "DatabasePort": 3306,
+  "DatabaseName": "cs2_statscollector",
+  "DatabaseUsername": "cs2_statscollector",
+  "DatabasePassword": "your_password_here",
+  "DatabaseSslMode": "Required",
+  "FlushConcurrency": 4,
+  "PersistenceChannelCapacity": 1000,
+  "AutoSaveSeconds": 60,
+  "TradeWindowSeconds": 5,
+  "TradeDistanceThreshold": 1000.0,
+  "ClutchSettings": {
+    "BaseMultiplier": 1.0,
+    "DifficultyWeight": 0.2
+  },
+  "DeathmatchMode": false,
+  "LogLevel": "Information"
+}

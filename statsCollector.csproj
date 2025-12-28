@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>12.0</LangVersion>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Authors>Anders Giske Hagen</Authors>
+    <Copyright>Copyright © 2025 Anders Giske Hagen</Copyright>
+    <RepositoryUrl>https://github.com/ezspot/cs2-statscollector</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/ezspot/cs2-statscollector</PackageProjectUrl>
+    <Company>Anders 'spot' Hagen</Company>
+    <Description>Comprehensive CS2 stats collection to MySQL</Description>
+    <Version>1.0.0</Version>
+    <SuppressTrimAnalysisWarnings>true</SuppressTrimAnalysisWarnings>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.340" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="9.0.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="9.0.0" />
+    <PackageReference Include="Polly" Version="8.6.5" />
+    <PackageReference Include="MySqlConnector" Version="2.5.0" />
+  </ItemGroup>
+</Project>
