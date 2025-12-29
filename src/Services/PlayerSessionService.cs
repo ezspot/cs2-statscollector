@@ -16,9 +16,9 @@ public interface IPlayerSessionService
     void MutatePlayer(ulong steamId, Action<PlayerStats> mutation);
     T WithPlayer<T>(ulong steamId, Func<PlayerStats, T> accessor, T defaultValue = default!);
     void ForEachPlayer(Action<PlayerStats> action);
-    PlayerSnapshot[] CaptureSnapshots();
+    PlayerSnapshot[] CaptureSnapshots(int? matchId = null);
     IReadOnlyCollection<ulong> GetActiveSteamIds();
-    bool TryGetSnapshot(ulong steamId, out PlayerSnapshot snapshot);
+    bool TryGetSnapshot(ulong steamId, out PlayerSnapshot snapshot, int? matchId = null);
 }
 
 public sealed class PlayerSessionService : IPlayerSessionService
@@ -96,23 +96,22 @@ public sealed class PlayerSessionService : IPlayerSessionService
         }
     }
 
-    public PlayerSnapshot[] CaptureSnapshots() => _playerStats.Values.Select(ps => ps.ToSnapshot()).ToArray();
+    public PlayerSnapshot[] CaptureSnapshots(int? matchId = null)
+    {
+        return _playerStats.Values.Select(s => s.ToSnapshot(matchId)).ToArray();
+    }
 
     public IReadOnlyCollection<ulong> GetActiveSteamIds() => _playerStats.Keys.ToArray();
 
-    public bool TryGetSnapshot(ulong steamId, out PlayerSnapshot snapshot)
+    public bool TryGetSnapshot(ulong steamId, out PlayerSnapshot snapshot, int? matchId = null)
     {
-        snapshot = default!;
-        if (!_playerStats.TryGetValue(steamId, out var stats))
+        if (_playerStats.TryGetValue(steamId, out var stats))
         {
-            return false;
-        }
-
-        lock (stats.SyncRoot)
-        {
-            snapshot = stats.ToSnapshot();
+            snapshot = stats.ToSnapshot(matchId);
             return true;
         }
+        snapshot = null!;
+        return false;
     }
 
     public void Clear() => _playerStats.Clear();

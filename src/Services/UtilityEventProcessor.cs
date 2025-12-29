@@ -25,6 +25,7 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
     private readonly IPlayerSessionService _playerSessions;
     private readonly ILogger<UtilityEventProcessor> _logger;
     private readonly IPositionPersistenceService _positionPersistence;
+    private readonly IMatchTrackingService _matchTracker;
 
     private DateTime _roundStartUtc;
     private int _currentRoundNumber;
@@ -32,11 +33,13 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
     public UtilityEventProcessor(
         IPlayerSessionService playerSessions, 
         ILogger<UtilityEventProcessor> logger,
-        IPositionPersistenceService positionPersistence)
+        IPositionPersistenceService positionPersistence,
+        IMatchTrackingService matchTracker)
     {
         _playerSessions = playerSessions;
         _logger = logger;
         _positionPersistence = positionPersistence;
+        _matchTracker = matchTracker;
     }
 
     public void SetRoundContext(int roundNumber, DateTime roundStartUtc)
@@ -120,7 +123,9 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
 
                 if (player.PlayerPawn.Value != null)
                 {
+                    var matchId = _matchTracker?.CurrentMatch?.MatchId;
                     _ = _positionPersistence.EnqueueAsync(new UtilityPositionEvent(
+                        matchId,
                         player.SteamID,
                         player.PlayerPawn.Value.AbsOrigin?.X ?? 0,
                         player.PlayerPawn.Value.AbsOrigin?.Y ?? 0,

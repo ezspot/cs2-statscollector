@@ -233,11 +233,12 @@ public sealed class PlayerStats
 
     public decimal FlashEffectivenessRate => FlashesThrown > 0 ? (decimal)EnemiesFlashed / FlashesThrown : 0m;
 
-    public PlayerSnapshot ToSnapshot()
+    public PlayerSnapshot ToSnapshot(int? matchId = null)
     {
         lock (SyncRoot)
         {
             return new PlayerSnapshot(
+                matchId,
                 RoundNumber,
                 RoundStartUtc,
                 AliveOnTeamAtRoundStart,

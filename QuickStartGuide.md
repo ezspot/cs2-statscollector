@@ -25,17 +25,15 @@ Get up and running fast with enterprise-grade CS2 stats collection. For full det
   "LogLevel": "Information"
 }
 ```
-4) Execute `database/init.sql` on your MySQL server to create the schema.
+4) Execute `database/init.sql` on your MySQL server to create the schema and optimized views.
 5) Start the server. The plugin will connect and begin tracking.  
    Verify with: `css_plugins list`
 
-## Build from source
-1) Install .NET 8 SDK.  
-2) From repo root, run:  
-   - `dotnet restore`  
-   - `dotnet build`  
-   - (Release publish) `dotnet publish -c Release -o out`  
-3) Copy the built plugin from `out/` to `game/csgo/addons/counterstrikesharp/plugins/statsCollector/`.
+## Verify Relational Data (Late 2025)
+- **Matches**: `SELECT * FROM matches;` (Check for 'IN_PROGRESS' or 'COMPLETED' status)
+- **Player Profiles**: `SELECT * FROM view_player_profile;` (Aggregated summary)
+- **Leaderboard**: `SELECT * FROM view_global_leaderboard LIMIT 10;`
+- **Heatmaps**: `SELECT * FROM kill_positions WHERE match_id = 1;` (Spatial data)
 
 ## Verify (Late 2025 Tracing)
 - **Console**: Look for "statsCollector plugin loaded successfully with full observability".
@@ -43,13 +41,20 @@ Get up and running fast with enterprise-grade CS2 stats collection. For full det
 - **DB**: Check `player_advanced_analytics` for Rating 2.0 snapshots.
 - **Heatmaps**: Check `kill_positions` and `utility_positions` for spatial data.
 
-## Environment overrides (optional)
-Prefix with `STATSCOLLECTOR_`, e.g. `STATSCOLLECTOR_DATABASE_PASSWORD`.
+## Build from source
+1) Install .NET 8 SDK.  
+2) From repo root, run: `dotnet publish -c Release -o out`  
+3) Copy the built plugin from `out/` to your server.
 
-## Troubleshooting (quick)
+## Troubleshooting
+- **No data in views**: Views like `view_global_leaderboard` have a 10-round activity threshold by default.
+- **DB Errors**: Check `logs/statscollector-*.log` for "Failed to persist batch".
 - DB connection failed: confirm MySQL is running, credentials, firewall, SSL mode.  
 - Plugin won’t load: check CounterStrikeSharp install, .NET runtime, permissions, logs.  
 - Stats not saving: DB perms, AutoSaveSeconds reasonable, check console errors.
+
+## Environment overrides (optional)
+Prefix with `STATSCOLLECTOR_`, e.g. `STATSCOLLECTOR_DATABASE_PASSWORD`.
 
 ## Resources
 - README.md (full guide)

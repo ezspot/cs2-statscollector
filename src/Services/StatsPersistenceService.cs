@@ -159,6 +159,15 @@ public sealed class StatsPersistenceService : IStatsPersistenceService
         try
         {
             await _repository.UpsertPlayersAsync(snapshots, cancellationToken).ConfigureAwait(false);
+            
+            // Also update match-level summaries if we have match context
+            var matchSnapshots = snapshots.Where(s => s.MatchId.HasValue).ToList();
+            if (matchSnapshots.Count > 0)
+            {
+                await _repository.UpsertMatchSummariesAsync(matchSnapshots, cancellationToken).ConfigureAwait(false);
+                await _repository.UpsertMatchWeaponStatsAsync(matchSnapshots, cancellationToken).ConfigureAwait(false);
+            }
+
             _logger.LogDebug("Successfully persisted batch of {Count} snapshots", snapshots.Count);
         }
         catch (Exception ex)

@@ -6,6 +6,7 @@ namespace statsCollector.Domain;
 
 public sealed record PlayerSnapshot
 (
+    int? MatchId,
     int RoundNumber,
     DateTime RoundStartUtc,
     int AliveOnTeamAtRoundStart,

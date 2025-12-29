@@ -43,6 +43,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
     private IEconomyEventProcessor? _economyProcessor;
     private IPositionPersistenceService? _positionPersistence;
     private IStatsPersistenceService? _statsPersistence;
+    private IMatchTrackingService? _matchTracker;
 
     private CounterStrikeSharp.API.Modules.Timers.Timer? _autoSaveTimer;
 
@@ -137,6 +138,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             });
 
             services.AddSingleton<IConnectionFactory, ConnectionFactory>();
+            services.AddSingleton<IMatchTrackingService, MatchTrackingService>();
             services.AddSingleton<IPlayerSessionService, PlayerSessionService>();
             services.AddTransient<IStatsRepository, StatsRepository>();
             services.AddTransient<ICombatEventProcessor, CombatEventProcessor>();
@@ -156,13 +158,25 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             _utilityProcessor = _serviceProvider.GetRequiredService<IUtilityEventProcessor>();
             _bombProcessor = _serviceProvider.GetRequiredService<IBombEventProcessor>();
             _economyProcessor = _serviceProvider.GetRequiredService<IEconomyEventProcessor>();
+            _matchTracker = _serviceProvider.GetRequiredService<IMatchTrackingService>();
             _statsPersistence = _serviceProvider.GetRequiredService<IStatsPersistenceService>();
             _positionPersistence = _serviceProvider.GetRequiredService<IPositionPersistenceService>();
             
             _statsPersistence.StartAsync(_cancellationTokenSource.Token).GetAwaiter().GetResult();
             _positionPersistence.StartAsync(_cancellationTokenSource.Token).GetAwaiter().GetResult();
 
+            // Initialize match tracking if server is already running
+            if (hotReload && Server.MapName != null)
+            {
+                _matchTracker?.StartMatchAsync(Server.MapName).GetAwaiter().GetResult();
+            }
+
             // Register listeners
+            RegisterListener<Listeners.OnMapStart>(mapName =>
+            {
+                _matchTracker?.StartMatchAsync(mapName);
+            });
+
             RegisterListener<Listeners.OnClientAuthorized>((slot, steamId) =>
             {
                 var player = Utilities.GetPlayerFromSlot(slot);
@@ -197,6 +211,12 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         {
             _autoSaveTimer?.Kill();
             SaveAllStatsAsync().GetAwaiter().GetResult();
+
+            if (_matchTracker?.CurrentMatch != null)
+            {
+                _matchTracker.EndMatchAsync(_matchTracker.CurrentMatch.MatchId, CancellationToken.None).GetAwaiter().GetResult();
+            }
+
             _statsPersistence?.StopAsync(TimeSpan.FromSeconds(10), CancellationToken.None).GetAwaiter().GetResult();
             _positionPersistence?.StopAsync(TimeSpan.FromSeconds(5), CancellationToken.None).GetAwaiter().GetResult();
 
@@ -217,10 +237,11 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
     private async Task SaveAllStatsAsync()
     {
         if (_playerSessions == null || _statsPersistence == null) return;
-        var snapshots = _playerSessions.CaptureSnapshots();
+        var matchId = _matchTracker?.CurrentMatch?.MatchId;
+        var snapshots = _playerSessions.CaptureSnapshots(matchId);
         if (snapshots.Length > 0)
         {
-            _logger.LogInformation("Saving {Count} player snapshots on unload...", snapshots.Length);
+            _logger.LogInformation("Saving {Count} player snapshots (MatchID: {MatchId})...", snapshots.Length, matchId);
             await _statsPersistence.EnqueueAsync(snapshots, CancellationToken.None);
         }
     }
@@ -260,7 +281,8 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
     private async Task SavePlayerStatsOnDisconnectAsync(CCSPlayerController player)
     {
         if (_playerSessions == null || _statsRepository == null) return;
-        if (_playerSessions.TryGetSnapshot(player.SteamID, out var snapshot))
+        var matchId = _matchTracker?.CurrentMatch?.MatchId;
+        if (_playerSessions.TryGetSnapshot(player.SteamID, out var snapshot, matchId))
         {
             await _statsRepository.UpsertPlayerAsync(snapshot, _cancellationTokenSource.Token);
             _playerSessions.TryRemovePlayer(player.SteamID, out _);
@@ -440,6 +462,11 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         _combatProcessor?.ResetRoundStats();
         _bombProcessor?.ResetBombState();
 
+        if (_matchTracker?.CurrentMatch != null)
+        {
+            _matchTracker.StartRoundAsync(_matchTracker.CurrentMatch.MatchId, _currentRoundNumber);
+        }
+
         _playerSessions?.ForEachPlayer(stats =>
         {
             stats.RoundNumber = _currentRoundNumber;
@@ -470,6 +497,12 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         });
 
         _bombProcessor?.HandleRoundEnd(@event);
+        
+        if (_matchTracker?.CurrentRoundId != null)
+        {
+            _matchTracker.EndRoundAsync(_matchTracker.CurrentRoundId.Value, winningTeamInt, @event.GetIntValue("reason", 0));
+        }
+
         _ = SaveStatsAtRoundEndAsync();
         return HookResult.Continue;
     }
@@ -477,7 +510,8 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
     private async Task SaveStatsAtRoundEndAsync()
     {
         if (_playerSessions == null || _statsPersistence == null) return;
-        var snapshots = _playerSessions.CaptureSnapshots();
+        var matchId = _matchTracker?.CurrentMatch?.MatchId;
+        var snapshots = _playerSessions.CaptureSnapshots(matchId);
         if (snapshots.Length > 0) await _statsPersistence.EnqueueAsync(snapshots, _cancellationTokenSource.Token);
     }
     #endregion

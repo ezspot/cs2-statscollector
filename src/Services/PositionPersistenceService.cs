@@ -13,27 +13,30 @@ using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public record PositionEvent;
+public record PositionEvent(int? MatchId);
 
 public record KillPositionEvent(
+    int? MatchId,
     ulong KillerSteamId, 
     ulong VictimSteamId, 
     float KillerX, float KillerY, float KillerZ,
     float VictimX, float VictimY, float VictimZ,
     string Weapon, bool IsHeadshot, bool IsWallbang,
     float Distance, int KillerTeam, int VictimTeam,
-    string MapName, int RoundNumber, int RoundTime) : PositionEvent;
+    string MapName, int RoundNumber, int RoundTime) : PositionEvent(MatchId);
 
 public record DeathPositionEvent(
+    int? MatchId,
     ulong SteamId, float X, float Y, float Z,
     string CauseOfDeath, bool IsHeadshot, int Team,
-    string MapName, int RoundNumber, int RoundTime) : PositionEvent;
+    string MapName, int RoundNumber, int RoundTime) : PositionEvent(MatchId);
 
 public record UtilityPositionEvent(
+    int? MatchId,
     ulong SteamId, float ThrowX, float ThrowY, float ThrowZ,
     float LandX, float LandY, float LandZ,
     int UtilityType, int OpponentsAffected, int TeammatesAffected,
-    int Damage, string MapName, int RoundNumber, int RoundTime) : PositionEvent;
+    int Damage, string MapName, int RoundNumber, int RoundTime) : PositionEvent(MatchId);
 
 public interface IPositionPersistenceService : IAsyncDisposable
 {
@@ -163,9 +166,21 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
 
                     try
                     {
-                        if (killBatch.Count > 0) await _repository.BulkTrackKillPositionsAsync(killBatch, cancellationToken).ConfigureAwait(false);
-                        if (deathBatch.Count > 0) await _repository.BulkTrackDeathPositionsAsync(deathBatch, cancellationToken).ConfigureAwait(false);
-                        if (utilityBatch.Count > 0) await _repository.BulkTrackUtilityPositionsAsync(utilityBatch, cancellationToken).ConfigureAwait(false);
+                        if (killBatch.Count > 0) 
+                        {
+                            var matchId = killBatch[0].MatchId;
+                            await _repository.BulkTrackKillPositionsAsync(matchId, killBatch, cancellationToken).ConfigureAwait(false);
+                        }
+                        if (deathBatch.Count > 0) 
+                        {
+                            var matchId = deathBatch[0].MatchId;
+                            await _repository.BulkTrackDeathPositionsAsync(matchId, deathBatch, cancellationToken).ConfigureAwait(false);
+                        }
+                        if (utilityBatch.Count > 0) 
+                        {
+                            var matchId = utilityBatch[0].MatchId;
+                            await _repository.BulkTrackUtilityPositionsAsync(matchId, utilityBatch, cancellationToken).ConfigureAwait(false);
+                        }
                         
                         _logger.LogDebug("Successfully persisted position batch");
                     }

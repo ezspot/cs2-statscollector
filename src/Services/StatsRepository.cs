@@ -21,6 +21,8 @@ public interface IStatsRepository
 {
     Task UpsertPlayersAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken);
     Task UpsertPlayerAsync(PlayerSnapshot snapshot, CancellationToken cancellationToken);
+    Task UpsertMatchSummariesAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken);
+    Task UpsertMatchWeaponStatsAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken);
 }
 
 public sealed class StatsRepository : IStatsRepository
@@ -65,6 +67,73 @@ public sealed class StatsRepository : IStatsRepository
 
     public Task UpsertPlayerAsync(PlayerSnapshot snapshot, CancellationToken cancellationToken) =>
         UpsertPlayersAsync([snapshot], cancellationToken);
+
+    public async Task UpsertMatchSummariesAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
+    {
+        var snapshotList = snapshots.Where(s => s.MatchId.HasValue).ToList();
+        if (snapshotList.Count == 0) return;
+
+        await _resiliencePipeline.ExecuteAsync(async ct => 
+        {
+            using var activity = Instrumentation.ActivitySource.StartActivity("UpsertMatchSummariesAsync");
+            Instrumentation.DbOperationsCounter.Add(1, new KeyValuePair<string, object?>("operation", "upsert_match_summaries"));
+
+            const string sql = """
+                INSERT INTO match_player_stats (
+                    match_id, steam_id, kills, deaths, assists, headshots, damage_dealt, mvps, score, rating2, adr, kast
+                ) VALUES (
+                    @MatchId, @SteamId, @Kills, @Deaths, @Assists, @Headshots, @DamageDealt, @Mvps, @Score, @HLTVRating, @AverageDamagePerRound, @KASTPercentage
+                )
+                ON DUPLICATE KEY UPDATE
+                    kills = VALUES(kills), deaths = VALUES(deaths), assists = VALUES(assists),
+                    headshots = VALUES(headshots), damage_dealt = VALUES(damage_dealt),
+                    mvps = VALUES(mvps), score = VALUES(score), rating2 = VALUES(rating2),
+                    adr = VALUES(adr), kast = VALUES(kast);
+                """;
+
+            await using var connection = await _connectionFactory.CreateConnectionAsync(ct);
+            var count = await connection.ExecuteAsync(new CommandDefinition(sql, snapshotList, cancellationToken: ct)).ConfigureAwait(false);
+            _logger.LogInformation("Upserted {Count} match summaries into match_player_stats", count);
+        }, cancellationToken);
+    }
+
+    public async Task UpsertMatchWeaponStatsAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
+    {
+        var snapshotList = snapshots.Where(s => s.MatchId.HasValue).ToList();
+        if (snapshotList.Count == 0) return;
+
+        var weaponData = snapshotList.SelectMany(s => s.WeaponKills.Select(kvp => new
+        {
+            s.MatchId,
+            s.SteamId,
+            Weapon = kvp.Key,
+            Kills = kvp.Value,
+            Shots = s.WeaponShots.GetValueOrDefault(kvp.Key, 0),
+            Hits = s.WeaponHits.GetValueOrDefault(kvp.Key, 0)
+        })).ToList();
+
+        if (weaponData.Count == 0) return;
+
+        await _resiliencePipeline.ExecuteAsync(async ct => 
+        {
+            using var activity = Instrumentation.ActivitySource.StartActivity("UpsertMatchWeaponStatsAsync");
+            Instrumentation.DbOperationsCounter.Add(1, new KeyValuePair<string, object?>("operation", "upsert_match_weapons"));
+
+            const string sql = """
+                INSERT INTO match_weapon_stats (
+                    match_id, steam_id, weapon_name, kills, shots, hits
+                ) VALUES (
+                    @MatchId, @SteamId, @Weapon, @Kills, @Shots, @Hits
+                )
+                ON DUPLICATE KEY UPDATE
+                    kills = VALUES(kills), shots = VALUES(shots), hits = VALUES(hits);
+                """;
+
+            await using var connection = await _connectionFactory.CreateConnectionAsync(ct);
+            var count = await connection.ExecuteAsync(new CommandDefinition(sql, weaponData, cancellationToken: ct)).ConfigureAwait(false);
+            _logger.LogInformation("Upserted {Count} match weapon records into match_weapon_stats", count);
+        }, cancellationToken);
+    }
 
     private async Task UpsertPlayersCoreAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
     {
@@ -178,7 +247,7 @@ public sealed class StatsRepository : IStatsRepository
 
         const string insertAdvancedAnalyticsSql = """
             INSERT INTO player_advanced_analytics (
-                steam_id, calculated_at, name, rating2, kills_per_round, deaths_per_round, impact_score, kast_percentage,
+                match_id, steam_id, calculated_at, name, rating2, kills_per_round, deaths_per_round, impact_score, kast_percentage,
                 average_damage_per_round, utility_impact_score, clutch_success_rate, trade_success_rate, 
                 trade_windows_missed, flash_waste, entry_success_rate,
                 rounds_played, kd_ratio, headshot_percentage, opening_kill_ratio, trade_kill_ratio,
@@ -186,7 +255,7 @@ public sealed class StatsRepository : IStatsRepository
                 average_money_spent_per_round, performance_score, top_weapon_by_kills, survival_rating, utility_score, clutch_points,
                 flash_assisted_kills, wallbang_kills
             ) VALUES (
-                @SteamId, @CalculatedAt, @Name, @Rating2, @KillsPerRound, @DeathsPerRound, @ImpactScore, @KastPercentage,
+                @MatchId, @SteamId, @CalculatedAt, @Name, @Rating2, @KillsPerRound, @DeathsPerRound, @ImpactScore, @KastPercentage,
                 @AverageDamagePerRound, @UtilityImpactScore, @ClutchSuccessRate, @TradeSuccessRate, 
                 @TradeWindowsMissed, @FlashWaste, @EntrySuccessRate,
                 @RoundsPlayed, @KdRatio, @HeadshotPercentage, @OpeningKillRatio, @TradeKillRatio,
@@ -228,6 +297,7 @@ public sealed class StatsRepository : IStatsRepository
             var now = DateTime.UtcNow;
             var advancedData = snapshotList.Select(s => new
             {
+                s.MatchId,
                 s.SteamId,
                 CalculatedAt = now,
                 s.Name,

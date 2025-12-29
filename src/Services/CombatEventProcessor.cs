@@ -49,6 +49,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     private readonly ILogger<CombatEventProcessor> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly IPositionPersistenceService _positionPersistence;
+    private readonly IMatchTrackingService _matchTracker;
 
     private int _currentRoundNumber;
     private DateTime _currentRoundStartUtc;
@@ -71,13 +72,15 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         IOptionsMonitor<PluginConfig> config,
         ILogger<CombatEventProcessor> logger,
         TimeProvider timeProvider,
-        IPositionPersistenceService positionPersistence)
+        IPositionPersistenceService positionPersistence,
+        IMatchTrackingService matchTracker)
     {
         _playerSessions = playerSessions;
         _config = config;
         _logger = logger;
         _timeProvider = timeProvider;
         _positionPersistence = positionPersistence;
+        _matchTracker = matchTracker;
     }
 
     public void SetRoundContext(int roundNumber, DateTime roundStartUtc, int ctAlive, int tAlive)
@@ -136,7 +139,9 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 
                 if (victim.PlayerPawn.Value != null)
                 {
+                    var matchId = _matchTracker?.CurrentMatch?.MatchId;
                     _ = _positionPersistence.EnqueueAsync(new DeathPositionEvent(
+                        matchId,
                         victim.SteamID,
                         victim.PlayerPawn.Value.AbsOrigin?.X ?? 0,
                         victim.PlayerPawn.Value.AbsOrigin?.Y ?? 0,
@@ -215,8 +220,10 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     var attackerPos = attacker.PlayerPawn.Value.AbsOrigin ?? new Vector(0, 0, 0);
                     var victimPosKill = victim.PlayerPawn.Value.AbsOrigin ?? new Vector(0, 0, 0);
                     var killDistance = CalculateDistance(attackerPos, victimPosKill);
+                    var matchId = _matchTracker?.CurrentMatch?.MatchId;
 
                     _ = _positionPersistence.EnqueueAsync(new KillPositionEvent(
+                        matchId,
                         attacker.SteamID,
                         victim.SteamID,
                         attackerPos.X,
