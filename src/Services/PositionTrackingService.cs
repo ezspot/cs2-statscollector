@@ -1,9 +1,17 @@
-using CounterStrikeSharp.API.Core;
-using CounterStrikeSharp.API.Modules.Utils;
-using Microsoft.Extensions.Logging;
-using statsCollector.Infrastructure.Database;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Threading;
 using System.Threading.Tasks;
+using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Modules.Utils;
+using Dapper;
+using Microsoft.Extensions.Logging;
+using statsCollector.Infrastructure;
+using statsCollector.Infrastructure.Database;
+using Polly;
+using Polly.Registry;
 
 namespace statsCollector.Services;
 
@@ -24,6 +32,8 @@ public interface IPositionTrackingService
         int roundTime,
         CancellationToken cancellationToken = default);
 
+    Task BulkTrackKillPositionsAsync(IEnumerable<KillPositionEvent> events, CancellationToken cancellationToken = default);
+
     Task TrackDeathPositionAsync(
         ulong steamId,
         Vector position,
@@ -34,6 +44,8 @@ public interface IPositionTrackingService
         int roundNumber,
         int roundTime,
         CancellationToken cancellationToken = default);
+
+    Task BulkTrackDeathPositionsAsync(IEnumerable<DeathPositionEvent> events, CancellationToken cancellationToken = default);
 
     Task TrackUtilityPositionAsync(
         ulong steamId,
@@ -47,12 +59,26 @@ public interface IPositionTrackingService
         int roundNumber,
         int roundTime,
         CancellationToken cancellationToken = default);
+
+    Task BulkTrackUtilityPositionsAsync(IEnumerable<UtilityPositionEvent> events, CancellationToken cancellationToken = default);
 }
 
-public sealed class PositionTrackingService(
-    IConnectionFactory connectionFactory,
-    ILogger<PositionTrackingService> logger) : IPositionTrackingService
+public sealed class PositionTrackingService : IPositionTrackingService
 {
+    private readonly IConnectionFactory _connectionFactory;
+    private readonly ILogger<PositionTrackingService> _logger;
+    private readonly ResiliencePipeline _resiliencePipeline;
+
+    public PositionTrackingService(
+        IConnectionFactory connectionFactory,
+        ResiliencePipelineProvider<string> pipelineProvider,
+        ILogger<PositionTrackingService> logger)
+    {
+        _connectionFactory = connectionFactory;
+        _logger = logger;
+        _resiliencePipeline = pipelineProvider.GetPipeline("database");
+    }
+
     public async Task TrackKillPositionAsync(
         ulong killerSteamId,
         ulong victimSteamId,
@@ -68,51 +94,49 @@ public sealed class PositionTrackingService(
         int roundTime,
         CancellationToken cancellationToken = default)
     {
-        try
+        var distance = CalculateDistance(killerPos, victimPos);
+        await BulkTrackKillPositionsAsync([new KillPositionEvent(
+            killerSteamId, victimSteamId, 
+            killerPos.X, killerPos.Y, killerPos.Z,
+            victimPos.X, victimPos.Y, victimPos.Z,
+            weapon, isHeadshot, isWallbang,
+            distance, killerTeam, victimTeam,
+            mapName, roundNumber, roundTime)], cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task BulkTrackKillPositionsAsync(IEnumerable<KillPositionEvent> events, CancellationToken cancellationToken = default)
+    {
+        var eventList = events.ToList();
+        if (eventList.Count == 0) return;
+
+        await _resiliencePipeline.ExecuteAsync(async ct => 
         {
-            var distance = CalculateDistance(killerPos, victimPos);
+            using var activity = Instrumentation.ActivitySource.StartActivity("BulkTrackKillPositionsAsync");
+            _logger.LogDebug("Starting bulk track for {Count} kill positions", eventList.Count);
+            try
+            {
+                const string sql = """
+                    INSERT INTO kill_positions 
+                    (killer_steam_id, victim_steam_id, killer_x, killer_y, killer_z, 
+                     victim_x, victim_y, victim_z, weapon_used, is_headshot, is_wallbang,
+                     distance, killer_team, victim_team, map_name, round_number, round_time_seconds)
+                    VALUES 
+                    (@KillerSteamId, @VictimSteamId, @KillerX, @KillerY, @KillerZ,
+                     @VictimX, @VictimY, @VictimZ, @Weapon, @IsHeadshot, @IsWallbang,
+                     @Distance, @KillerTeam, @VictimTeam, @MapName, @RoundNumber, @RoundTime)
+                    """;
 
-            const string sql = @"
-                INSERT INTO kill_positions 
-                (killer_steam_id, victim_steam_id, killer_x, killer_y, killer_z, 
-                 victim_x, victim_y, victim_z, weapon_used, is_headshot, is_wallbang,
-                 distance, killer_team, victim_team, map_name, round_number, round_time_seconds)
-                VALUES 
-                (@KillerSteamId, @VictimSteamId, @KillerX, @KillerY, @KillerZ,
-                 @VictimX, @VictimY, @VictimZ, @Weapon, @IsHeadshot, @IsWallbang,
-                 @Distance, @KillerTeam, @VictimTeam, @MapName, @RoundNumber, @RoundTime)";
-
-            await using var connection = await connectionFactory.CreateConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await using var command = connection.CreateCommand();
-            
-            command.CommandText = sql;
-            command.Parameters.AddWithValue("@KillerSteamId", killerSteamId);
-            command.Parameters.AddWithValue("@VictimSteamId", victimSteamId);
-            command.Parameters.AddWithValue("@KillerX", killerPos.X);
-            command.Parameters.AddWithValue("@KillerY", killerPos.Y);
-            command.Parameters.AddWithValue("@KillerZ", killerPos.Z);
-            command.Parameters.AddWithValue("@VictimX", victimPos.X);
-            command.Parameters.AddWithValue("@VictimY", victimPos.Y);
-            command.Parameters.AddWithValue("@VictimZ", victimPos.Z);
-            command.Parameters.AddWithValue("@Weapon", weapon);
-            command.Parameters.AddWithValue("@IsHeadshot", isHeadshot);
-            command.Parameters.AddWithValue("@IsWallbang", isWallbang);
-            command.Parameters.AddWithValue("@Distance", distance);
-            command.Parameters.AddWithValue("@KillerTeam", killerTeam);
-            command.Parameters.AddWithValue("@VictimTeam", victimTeam);
-            command.Parameters.AddWithValue("@MapName", mapName);
-            command.Parameters.AddWithValue("@RoundNumber", roundNumber);
-            command.Parameters.AddWithValue("@RoundTime", roundTime);
-
-            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            
-            logger.LogTrace("Tracked kill position for {Killer} -> {Victim} at distance {Distance}",
-                killerSteamId, victimSteamId, distance);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to track kill position");
-        }
+                await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+                var count = await connection.ExecuteAsync(new CommandDefinition(sql, eventList, cancellationToken: ct)).ConfigureAwait(false);
+                _logger.LogDebug("Successfully tracked {Count} kill positions", count);
+                Instrumentation.PositionEventsTrackedCounter.Add(count, new KeyValuePair<string, object?>("type", "kill"));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to bulk track kill positions for {Count} events", eventList.Count);
+                throw;
+            }
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task TrackDeathPositionAsync(
@@ -126,37 +150,41 @@ public sealed class PositionTrackingService(
         int roundTime,
         CancellationToken cancellationToken = default)
     {
-        try
-        {
-            const string sql = @"
-                INSERT INTO death_positions 
-                (steam_id, x, y, z, cause_of_death, is_headshot, team, map_name, round_number, round_time_seconds)
-                VALUES 
-                (@SteamId, @X, @Y, @Z, @CauseOfDeath, @IsHeadshot, @Team, @MapName, @RoundNumber, @RoundTime)";
+        await BulkTrackDeathPositionsAsync([new DeathPositionEvent(
+            steamId, position.X, position.Y, position.Z,
+            causeOfDeath, isHeadshot, team,
+            mapName, roundNumber, roundTime)], cancellationToken).ConfigureAwait(false);
+    }
 
-            await using var connection = await connectionFactory.CreateConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await using var command = connection.CreateCommand();
-            
-            command.CommandText = sql;
-            command.Parameters.AddWithValue("@SteamId", steamId);
-            command.Parameters.AddWithValue("@X", position.X);
-            command.Parameters.AddWithValue("@Y", position.Y);
-            command.Parameters.AddWithValue("@Z", position.Z);
-            command.Parameters.AddWithValue("@CauseOfDeath", causeOfDeath);
-            command.Parameters.AddWithValue("@IsHeadshot", isHeadshot);
-            command.Parameters.AddWithValue("@Team", team);
-            command.Parameters.AddWithValue("@MapName", mapName);
-            command.Parameters.AddWithValue("@RoundNumber", roundNumber);
-            command.Parameters.AddWithValue("@RoundTime", roundTime);
+    public async Task BulkTrackDeathPositionsAsync(IEnumerable<DeathPositionEvent> events, CancellationToken cancellationToken = default)
+    {
+        var eventList = events.ToList();
+        if (eventList.Count == 0) return;
 
-            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            
-            logger.LogTrace("Tracked death position for {SteamId}", steamId);
-        }
-        catch (Exception ex)
+        await _resiliencePipeline.ExecuteAsync(async ct => 
         {
-            logger.LogError(ex, "Failed to track death position");
-        }
+            using var activity = Instrumentation.ActivitySource.StartActivity("BulkTrackDeathPositionsAsync");
+            _logger.LogDebug("Starting bulk track for {Count} death positions", eventList.Count);
+            try
+            {
+                const string sql = """
+                    INSERT INTO death_positions 
+                    (steam_id, x, y, z, cause_of_death, is_headshot, team, map_name, round_number, round_time_seconds)
+                    VALUES 
+                    (@SteamId, @X, @Y, @Z, @CauseOfDeath, @IsHeadshot, @Team, @MapName, @RoundNumber, @RoundTime)
+                    """;
+
+                await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+                var count = await connection.ExecuteAsync(new CommandDefinition(sql, eventList, cancellationToken: ct)).ConfigureAwait(false);
+                _logger.LogDebug("Successfully tracked {Count} death positions", count);
+                Instrumentation.PositionEventsTrackedCounter.Add(count, new KeyValuePair<string, object?>("type", "death"));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to bulk track death positions for {Count} events", eventList.Count);
+                throw;
+            }
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task TrackUtilityPositionAsync(
@@ -172,50 +200,48 @@ public sealed class PositionTrackingService(
         int roundTime,
         CancellationToken cancellationToken = default)
     {
-        try
-        {
-            const string sql = @"
-                INSERT INTO utility_positions 
-                (steam_id, throw_x, throw_y, throw_z, land_x, land_y, land_z,
-                 utility_type, opponents_affected, teammates_affected, damage,
-                 map_name, round_number, round_time_seconds)
-                VALUES 
-                (@SteamId, @ThrowX, @ThrowY, @ThrowZ, @LandX, @LandY, @LandZ,
-                 @UtilityType, @OpponentsAffected, @TeammatesAffected, @Damage,
-                 @MapName, @RoundNumber, @RoundTime)";
-
-            await using var connection = await connectionFactory.CreateConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await using var command = connection.CreateCommand();
-            
-            command.CommandText = sql;
-            command.Parameters.AddWithValue("@SteamId", steamId);
-            command.Parameters.AddWithValue("@ThrowX", throwPos.X);
-            command.Parameters.AddWithValue("@ThrowY", throwPos.Y);
-            command.Parameters.AddWithValue("@ThrowZ", throwPos.Z);
-            command.Parameters.AddWithValue("@LandX", landPos.X);
-            command.Parameters.AddWithValue("@LandY", landPos.Y);
-            command.Parameters.AddWithValue("@LandZ", landPos.Z);
-            command.Parameters.AddWithValue("@UtilityType", utilityType);
-            command.Parameters.AddWithValue("@OpponentsAffected", opponentsAffected);
-            command.Parameters.AddWithValue("@TeammatesAffected", teammatesAffected);
-            command.Parameters.AddWithValue("@Damage", damage);
-            command.Parameters.AddWithValue("@MapName", mapName);
-            command.Parameters.AddWithValue("@RoundNumber", roundNumber);
-            command.Parameters.AddWithValue("@RoundTime", roundTime);
-
-            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            
-            logger.LogTrace("Tracked utility position for {SteamId}", steamId);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to track utility position");
-        }
+        await BulkTrackUtilityPositionsAsync([new UtilityPositionEvent(
+            steamId, throwPos.X, throwPos.Y, throwPos.Z,
+            landPos.X, landPos.Y, landPos.Z,
+            utilityType, opponentsAffected, teammatesAffected,
+            damage, mapName, roundNumber, roundTime)], cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Calculate 3D distance between two positions
-    /// </summary>
+    public async Task BulkTrackUtilityPositionsAsync(IEnumerable<UtilityPositionEvent> events, CancellationToken cancellationToken = default)
+    {
+        var eventList = events.ToList();
+        if (eventList.Count == 0) return;
+
+        await _resiliencePipeline.ExecuteAsync(async ct => 
+        {
+            using var activity = Instrumentation.ActivitySource.StartActivity("BulkTrackUtilityPositionsAsync");
+            _logger.LogDebug("Starting bulk track for {Count} utility positions", eventList.Count);
+            try
+            {
+                const string sql = """
+                    INSERT INTO utility_positions 
+                    (steam_id, throw_x, throw_y, throw_z, land_x, land_y, land_z,
+                     utility_type, opponents_affected, teammates_affected, damage,
+                     map_name, round_number, round_time_seconds)
+                    VALUES 
+                    (@SteamId, @ThrowX, @ThrowY, @ThrowZ, @LandX, @LandY, @LandZ,
+                     @UtilityType, @OpponentsAffected, @TeammatesAffected, @Damage,
+                     @MapName, @RoundNumber, @RoundTime)
+                    """;
+
+                await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+                var count = await connection.ExecuteAsync(new CommandDefinition(sql, eventList, cancellationToken: ct)).ConfigureAwait(false);
+                _logger.LogDebug("Successfully tracked {Count} utility positions", count);
+                Instrumentation.PositionEventsTrackedCounter.Add(count, new KeyValuePair<string, object?>("type", "utility"));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to bulk track utility positions for {Count} events", eventList.Count);
+                throw;
+            }
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     private static float CalculateDistance(Vector pos1, Vector pos2)
     {
         var dx = pos2.X - pos1.X;

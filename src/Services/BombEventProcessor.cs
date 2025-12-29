@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
 using Microsoft.Extensions.Logging;
@@ -26,40 +29,45 @@ public interface IBombEventProcessor
     void ResetBombState();
 }
 
-public sealed class BombEventProcessor(
-    IPlayerSessionService playerSessions,
-    ICombatEventProcessor combatProcessor,
-    ILogger<BombEventProcessor> logger) : IBombEventProcessor
+public sealed class BombEventProcessor : IBombEventProcessor
 {
+    private readonly IPlayerSessionService _playerSessions;
+    private readonly ICombatEventProcessor _combatProcessor;
+    private readonly ILogger<BombEventProcessor> _logger;
+    private readonly TimeProvider _timeProvider;
+
     private DateTime? _bombPlantTime;
     private ulong? _planterSteamId;
     private DateTime? _bombDefuseStartTime;
     private ulong? _defuserSteamId;
 
+    public BombEventProcessor(
+        IPlayerSessionService playerSessions,
+        ICombatEventProcessor combatProcessor,
+        ILogger<BombEventProcessor> logger,
+        TimeProvider timeProvider)
+    {
+        _playerSessions = playerSessions;
+        _combatProcessor = combatProcessor;
+        _logger = logger;
+        _timeProvider = timeProvider;
+    }
+
     public void HandleBombBeginplant(EventBombBeginplant @event)
     {
+        using var activity = Instrumentation.ActivitySource.StartActivity("HandleBombBeginplant");
         try
         {
             var player = @event.GetPlayerOrDefault("userid");
-            var site = @event.GetIntValue("site", 0);
-
             if (player is { IsBot: false })
             {
-                _bombPlantTime = DateTime.UtcNow;
+                _bombPlantTime = _timeProvider.GetUtcNow().UtcDateTime;
                 _planterSteamId = player.SteamID;
-
-                playerSessions.MutatePlayer(player.SteamID, stats =>
-                {
-                    stats.BombPlantAttempts++;
-                });
-
-                logger.LogDebug("Player {SteamId} started planting bomb at site {Site}", player.SteamID, site);
+                _playerSessions.MutatePlayer(player.SteamID, stats => stats.BombPlantAttempts++);
+                _logger.LogDebug("Player {SteamId} started planting bomb at site {Site}", player.SteamID, @event.GetIntValue("site", 0));
             }
         }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error handling bomb beginplant event");
-        }
+        catch (Exception ex) { _logger.LogError(ex, "Error handling bomb beginplant event"); }
     }
 
     public void HandleBombAbortplant(EventBombAbortplant @event)
@@ -67,359 +75,152 @@ public sealed class BombEventProcessor(
         try
         {
             var player = @event.GetPlayerOrDefault("userid");
-
             if (player is { IsBot: false })
             {
-                // Reset bomb plant state
                 _bombPlantTime = null;
                 _planterSteamId = null;
-
-                playerSessions.MutatePlayer(player.SteamID, stats =>
-                {
-                    stats.BombPlantAborts++;
-                });
-
-                logger.LogDebug("Player {SteamId} aborted bomb plant", player.SteamID);
+                _playerSessions.MutatePlayer(player.SteamID, stats => stats.BombPlantAborts++);
+                _logger.LogDebug("Player {SteamId} aborted bomb plant", player.SteamID);
             }
         }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error handling bomb abortplant event");
-        }
+        catch (Exception ex) { _logger.LogError(ex, "Error handling bomb abortplant event"); }
     }
 
     public void HandleBombPlanted(EventBombPlanted @event)
     {
+        using var activity = Instrumentation.ActivitySource.StartActivity("HandleBombPlanted");
         try
         {
             var player = @event.GetPlayerOrDefault("userid");
-            var site = @event.GetIntValue("site", 0);
-
             if (player is { IsBot: false })
             {
-                var plantTime = _bombPlantTime.HasValue 
-                    ? (DateTime.UtcNow - _bombPlantTime.Value).TotalSeconds 
+                var plantDuration = _bombPlantTime.HasValue 
+                    ? (_timeProvider.GetUtcNow().UtcDateTime - _bombPlantTime.Value).TotalSeconds 
                     : 0;
 
-                playerSessions.MutatePlayer(player.SteamID, stats =>
+                Instrumentation.BombPlantsCounter.Add(1, new KeyValuePair<string, object?>("site", @event.GetIntValue("site", 0)));
+                Instrumentation.BombPlantDurationsRecorder.Record(plantDuration, new KeyValuePair<string, object?>("site", @event.GetIntValue("site", 0)));
+                _playerSessions.MutatePlayer(player.SteamID, stats =>
                 {
                     stats.BombPlants++;
-                    stats.TotalPlantTime += (int)(plantTime * 1000); // Convert to milliseconds
+                    stats.TotalPlantTime += (int)(plantDuration * 1000);
                 });
 
-                logger.LogDebug("Player {SteamId} planted bomb at site {Site} in {Time}s", 
-                    player.SteamID, site, plantTime);
+                _logger.LogInformation("Bomb planted by {SteamId} at site {Site}", player.SteamID, @event.GetIntValue("site", 0));
             }
         }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error handling bomb planted event");
-        }
+        catch (Exception ex) { _logger.LogError(ex, "Error handling bomb planted event"); }
     }
 
     public void HandleBombDefused(EventBombDefused @event)
     {
+        using var activity = Instrumentation.ActivitySource.StartActivity("HandleBombDefused");
         try
         {
             var player = @event.GetPlayerOrDefault("userid");
-
             if (player is { IsBot: false })
             {
-                var defuseTime = _bombDefuseStartTime.HasValue 
-                    ? (DateTime.UtcNow - _bombDefuseStartTime.Value).TotalSeconds 
+                var defuseDuration = _bombDefuseStartTime.HasValue 
+                    ? (_timeProvider.GetUtcNow().UtcDateTime - _bombDefuseStartTime.Value).TotalSeconds 
                     : 0;
 
-                // Check if this was a clutch defuse using alive counts at the moment
-                var (ctAlive, tAlive) = combatProcessor.GetAliveCounts();
-                var isClutchDefuse = ctAlive == 1 && tAlive >= 2;
+                var (ctAlive, tAlive) = _combatProcessor.GetAliveCounts();
+                var isClutchDefuse = ctAlive == 1 && tAlive >= 1;
 
-                playerSessions.MutatePlayer(player.SteamID, stats =>
+                Instrumentation.BombDefusesCounter.Add(1);
+                Instrumentation.BombDefuseDurationsRecorder.Record(defuseDuration);
+                _playerSessions.MutatePlayer(player.SteamID, stats =>
                 {
                     stats.BombDefuses++;
-                    stats.TotalDefuseTime += (int)(defuseTime * 1000); // Convert to milliseconds
-                    
-                    if (isClutchDefuse)
-                    {
-                        stats.ClutchDefuses++;
-                    }
+                    stats.TotalDefuseTime += (int)(defuseDuration * 1000);
+                    if (isClutchDefuse) stats.ClutchDefuses++;
                 });
 
-                logger.LogDebug("Player {SteamId} defused bomb in {Time}s (Clutch: {Clutch})", 
-                    player.SteamID, defuseTime, isClutchDefuse);
+                _logger.LogInformation("Bomb defused by {SteamId} (Clutch: {Clutch})", player.SteamID, isClutchDefuse);
             }
-
-            // Reset bomb state
-            _bombDefuseStartTime = null;
-            _defuserSteamId = null;
         }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error handling bomb defused event");
-        }
-
-        ResetBombState();
+        catch (Exception ex) { _logger.LogError(ex, "Error handling bomb defused event"); }
+        finally { ResetBombState(); }
     }
 
     public void HandleBombExploded(EventBombExploded @event)
     {
-        try
+        Instrumentation.BombExplosionsCounter.Add(1);
+        if (_bombPlantTime.HasValue)
         {
-            // Reset bomb state when bomb explodes
-            ResetBombState();
-
-            logger.LogDebug("Bomb exploded");
+            Instrumentation.BombExplosionDurationsRecorder.Record((_timeProvider.GetUtcNow().UtcDateTime - _bombPlantTime.Value).TotalSeconds);
         }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error handling bomb exploded event");
-        }
+        _logger.LogInformation("Bomb exploded");
+        ResetBombState();
     }
 
     public void HandleBombDropped(EventBombDropped @event)
     {
-        try
-        {
-            var player = @event.GetPlayerOrDefault("userid");
-
-            if (player is { IsBot: false })
-            {
-                playerSessions.MutatePlayer(player.SteamID, stats =>
-                {
-                    stats.BombDrops++;
-                });
-
-                logger.LogDebug("Player {SteamId} dropped bomb", player.SteamID);
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error handling bomb dropped event");
-        }
+        var player = @event.GetPlayerOrDefault("userid");
+        if (player is { IsBot: false }) _playerSessions.MutatePlayer(player.SteamID, stats => stats.BombDrops++);
     }
 
     public void HandleBombPickup(EventBombPickup @event)
     {
-        try
-        {
-            var player = @event.GetPlayerOrDefault("userid");
-
-            if (player is { IsBot: false })
-            {
-                playerSessions.MutatePlayer(player.SteamID, stats =>
-                {
-                    stats.BombPickups++;
-                });
-
-                logger.LogDebug("Player {SteamId} picked up bomb", player.SteamID);
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error handling bomb pickup event");
-        }
+        var player = @event.GetPlayerOrDefault("userid");
+        if (player is { IsBot: false }) _playerSessions.MutatePlayer(player.SteamID, stats => stats.BombPickups++);
     }
 
     public void HandleBombBegindefuse(EventBombBegindefuse @event)
     {
-        try
+        var player = @event.GetPlayerOrDefault("userid");
+        if (player is { IsBot: false })
         {
-            var player = @event.GetPlayerOrDefault("userid");
+            _bombDefuseStartTime = _timeProvider.GetUtcNow().UtcDateTime;
+            _defuserSteamId = player.SteamID;
             var hasKit = @event.GetBoolValue("haskit", false);
-
-            if (player is { IsBot: false })
+            _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                _bombDefuseStartTime = DateTime.UtcNow;
-                _defuserSteamId = player.SteamID;
-
-                playerSessions.MutatePlayer(player.SteamID, stats =>
-                {
-                    stats.BombDefuseAttempts++;
-                    
-                    if (hasKit)
-                    {
-                        stats.BombDefuseWithKit++;
-                    }
-                    else
-                    {
-                        stats.BombDefuseWithoutKit++;
-                    }
-                });
-
-                logger.LogDebug("Player {SteamId} started defusing bomb (Kit: {HasKit})", player.SteamID, hasKit);
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error handling bomb begindefuse event");
+                stats.BombDefuseAttempts++;
+                if (hasKit) stats.BombDefuseWithKit++;
+                else stats.BombDefuseWithoutKit++;
+            });
         }
     }
 
     public void HandleBombAbortdefuse(EventBombAbortdefuse @event)
     {
-        try
+        var player = @event.GetPlayerOrDefault("userid");
+        if (player is { IsBot: false })
         {
-            var player = @event.GetPlayerOrDefault("userid");
-
-            if (player is { IsBot: false })
-            {
-                // Reset defuse state
-                _bombDefuseStartTime = null;
-                _defuserSteamId = null;
-
-                playerSessions.MutatePlayer(player.SteamID, stats =>
-                {
-                    stats.BombDefuseAborts++;
-                });
-
-                logger.LogDebug("Player {SteamId} aborted bomb defuse", player.SteamID);
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error handling bomb abortdefuse event");
+            _bombDefuseStartTime = null;
+            _defuserSteamId = null;
+            _playerSessions.MutatePlayer(player.SteamID, stats => stats.BombDefuseAborts++);
         }
     }
 
     public void HandleDefuserDropped(EventDefuserDropped @event)
     {
-        try
-        {
-            var player = @event.GetPlayerOrDefault("userid");
-
-            if (player is { IsBot: false })
-            {
-                playerSessions.MutatePlayer(player.SteamID, stats =>
-                {
-                    stats.DefuserDrops++;
-                });
-
-                logger.LogDebug("Player {SteamId} dropped defuser", player.SteamID);
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error handling defuser dropped event");
-        }
+        var player = @event.GetPlayerOrDefault("userid");
+        if (player is { IsBot: false }) _playerSessions.MutatePlayer(player.SteamID, stats => stats.DefuserDrops++);
     }
 
     public void HandleDefuserPickup(EventDefuserPickup @event)
     {
-        try
-        {
-            var player = @event.GetPlayerOrDefault("userid");
-
-            if (player is { IsBot: false })
-            {
-                playerSessions.MutatePlayer(player.SteamID, stats =>
-                {
-                    stats.DefuserPickups++;
-                });
-
-                logger.LogDebug("Player {SteamId} picked up defuser", player.SteamID);
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error handling defuser pickup event");
-        }
+        var player = @event.GetPlayerOrDefault("userid");
+        if (player is { IsBot: false }) _playerSessions.MutatePlayer(player.SteamID, stats => stats.DefuserPickups++);
     }
 
-    public void HandleBombBeep(EventBombBeep @event)
-    {
-        try
-        {
-            // Track bomb beeps for timing analysis
-            logger.LogTrace("Bomb beep event");
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error handling bomb beep event");
-        }
-    }
+    public void HandleBombBeep(EventBombBeep @event) { }
 
     public void HandlePlayerDeath(EventPlayerDeath @event)
     {
-        try
-        {
-            var weapon = @event.GetStringValue("weapon", "unknown") ?? "unknown";
-            
-            // Track bomb-related deaths
-            if (weapon.Contains("bomb"))
-            {
-                var victim = @event.GetPlayerOrDefault("userid");
-                var attacker = @event.GetPlayerOrDefault("attacker");
-                
-                if (victim is { IsBot: false })
-                {
-                    playerSessions.MutatePlayer(victim.SteamID, stats =>
-                    {
-                        stats.BombDeaths++;
-                    });
-                }
+        var weapon = @event.GetStringValue("weapon", "unknown");
+        if (weapon != "planted_c4") return;
 
-                if (attacker is { IsBot: false } && attacker != victim)
-                {
-                    playerSessions.MutatePlayer(attacker.SteamID, stats =>
-                    {
-                        stats.BombKills++;
-                    });
-                }
+        var victim = @event.GetPlayerOrDefault("userid");
+        if (victim is { IsBot: false }) _playerSessions.MutatePlayer(victim.SteamID, stats => stats.BombDeaths++);
 
-                logger.LogDebug("Bomb-related death: {Weapon}", weapon);
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error handling player death event in bomb processor");
-        }
+        var attacker = @event.GetPlayerOrDefault("attacker");
+        if (attacker is { IsBot: false } && attacker != victim) _playerSessions.MutatePlayer(attacker.SteamID, stats => stats.BombKills++);
     }
 
-    public void HandleRoundEnd(EventRoundEnd @event)
-    {
-        try
-        {
-            var reason = @event.GetIntValue("reason", 0);
-            ResetBombState();
-            
-            // Track round outcomes related to bomb
-            // Reason 0 = Target Bombed (T win by bomb)
-            // Reason 1 = Target Saved (CT win by defuse)
-            // Reason 7 = Bomb Defused (CT win by defuse)
-            
-            switch (reason)
-            {
-                case 0: // Target Bombed
-                    logger.LogDebug("Round ended: Target Bombed (T win)");
-                    break;
-                case 1: // Target Saved
-                case 7: // Bomb Defused
-                    logger.LogDebug("Round ended: Bomb Defused (CT win)");
-                    break;
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error handling round end event in bomb processor");
-        }
-    }
+    public void HandleRoundEnd(EventRoundEnd @event) => ResetBombState();
 
-    /// <summary>
-    /// Reset bomb state (called at round start)
-    /// </summary>
-    public void ResetBombState()
-    {
-        try
-        {
-            _bombPlantTime = null;
-            _planterSteamId = null;
-            _bombDefuseStartTime = null;
-            _defuserSteamId = null;
-
-            logger.LogDebug("Bomb state reset");
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error resetting bomb state");
-        }
-    }
+    public void ResetBombState() { _bombPlantTime = null; _planterSteamId = null; _bombDefuseStartTime = null; _defuserSteamId = null; }
 }

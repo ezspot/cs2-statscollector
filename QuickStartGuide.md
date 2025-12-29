@@ -3,8 +3,8 @@
 Get up and running fast. For full details, see README.md.
 
 ## Prerequisites
-- CounterStrikeSharp v180+ under `addons/counterstrikesharp`
-- MySQL 8.0+
+- CounterStrikeSharp v180+
+- MySQL 8.0+ or MariaDB 10.11+
 - .NET 8 runtime
 - CS2 server with admin access
 
@@ -12,7 +12,7 @@ Get up and running fast. For full details, see README.md.
 1) Stop the CS2 server.  
 2) Download the latest release and extract to:  
    `game/csgo/addons/counterstrikesharp/plugins/statsCollector/`  
-3) Create `config.json` in that folder:
+3) Create `config.json` in that folder (see `config.sample.json` for all options):
 ```json
 {
   "DatabaseHost": "127.0.0.1",
@@ -21,12 +21,6 @@ Get up and running fast. For full details, see README.md.
   "DatabaseUsername": "cs2_statscollector",
   "DatabasePassword": "your_password",
   "DatabaseSslMode": "Required",
-  "FlushConcurrency": 4,
-  "PersistenceChannelCapacity": 1000,
-  "AutoSaveSeconds": 60,
-  "TradeWindowSeconds": 5,
-  "TradeDistanceThreshold": 1000.0,
-  "DeathmatchMode": false,
   "LogLevel": "Information"
 }
 ```

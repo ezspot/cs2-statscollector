@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Channels;
@@ -8,6 +10,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Domain;
+using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
@@ -18,152 +21,160 @@ public interface IStatsPersistenceService : IAsyncDisposable
     Task StopAsync(TimeSpan timeout, CancellationToken cancellationToken);
 }
 
-public sealed class StatsPersistenceService(
-    IStatsRepository repository,
-    ILogger<StatsPersistenceService> logger,
-    IOptionsMonitor<PluginConfig> config) : IStatsPersistenceService
+public sealed class StatsPersistenceService : IStatsPersistenceService
 {
-    private readonly Channel<PlayerSnapshot> channel = Channel.CreateBounded<PlayerSnapshot>(new BoundedChannelOptions(Math.Max(50, config.CurrentValue.PersistenceChannelCapacity))
-    {
-        AllowSynchronousContinuations = false,
-        FullMode = BoundedChannelFullMode.Wait,
-        SingleReader = true,
-        SingleWriter = false
-    });
+    private readonly IStatsRepository _repository;
+    private readonly ILogger<StatsPersistenceService> _logger;
+    private readonly IOptionsMonitor<PluginConfig> _config;
+    private readonly Channel<PlayerSnapshot> _channel;
 
-    private Task? processingTask;
-    private CancellationTokenSource? linkedCts;
-    private volatile bool started;
-    private int consecutiveFailures;
-    private DateTime circuitOpenUntilUtc;
-    private readonly TimeSpan circuitOpenDuration = TimeSpan.FromSeconds(30);
-    private const int CircuitBreakThreshold = 5;
+    private Task? _processingTask;
+    private CancellationTokenSource? _linkedCts;
+    private volatile bool _started;
+
+    public StatsPersistenceService(
+        IStatsRepository repository,
+        ILogger<StatsPersistenceService> logger,
+        IOptionsMonitor<PluginConfig> config)
+    {
+        _repository = repository;
+        _logger = logger;
+        _config = config;
+
+        var capacity = Math.Max(100, config.CurrentValue.PersistenceChannelCapacity);
+        _channel = Channel.CreateBounded<PlayerSnapshot>(new BoundedChannelOptions(capacity)
+        {
+            AllowSynchronousContinuations = false,
+            FullMode = BoundedChannelFullMode.DropWrite, // Protect server performance
+            SingleReader = true,
+            SingleWriter = false
+        });
+    }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        if (started) return Task.CompletedTask;
-        started = true;
+        if (_started) return Task.CompletedTask;
+        _started = true;
 
-        linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        processingTask = Task.Run(() => ProcessLoopAsync(linkedCts.Token), linkedCts.Token);
+        _linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _processingTask = Task.Run(() => ProcessLoopAsync(_linkedCts.Token), _linkedCts.Token);
+        
+        _logger.LogInformation("StatsPersistenceService started");
         return Task.CompletedTask;
     }
 
-    public async Task EnqueueAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
+    public Task EnqueueAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
     {
-        if (!started) throw new InvalidOperationException("StatsPersistenceService not started.");
-        if (IsCircuitOpen())
+        if (!_started)
         {
-            logger.LogWarning("Stats persistence circuit open until {UntilUtc}, dropping {Count} snapshots", circuitOpenUntilUtc, snapshots.Count());
-            return;
+            _logger.LogWarning("Attempted to enqueue {Count} snapshots but service is not started", snapshots.Count());
+            return Task.CompletedTask;
         }
 
-        foreach (var snapshot in snapshots)
+        var snapshotList = snapshots.ToList();
+        _logger.LogDebug("Enqueuing {Count} snapshots for persistence", snapshotList.Count);
+
+        foreach (var snapshot in snapshotList)
         {
-            await channel.Writer.WaitToWriteAsync(cancellationToken).ConfigureAwait(false);
-            await channel.Writer.WriteAsync(snapshot, cancellationToken).ConfigureAwait(false);
+            if (_channel.Writer.TryWrite(snapshot))
+            {
+                Instrumentation.StatsEnqueuedCounter.Add(1);
+            }
+            else
+            {
+                Instrumentation.StatsDroppedCounter.Add(1);
+                _logger.LogWarning("Stats snapshot for player {SteamId} ({Name}) dropped: channel full", snapshot.SteamId, snapshot.Name);
+            }
         }
+        return Task.CompletedTask;
     }
 
     public async Task StopAsync(TimeSpan timeout, CancellationToken cancellationToken)
     {
-        if (!started) return;
+        if (!_started) return;
 
-        channel.Writer.Complete();
+        _logger.LogInformation("Stopping StatsPersistenceService...");
+        _channel.Writer.Complete();
 
         using var timeoutCts = new CancellationTokenSource(timeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
         try
         {
-            if (processingTask != null)
+            if (_processingTask != null)
             {
-                await processingTask.WaitAsync(linked.Token).ConfigureAwait(false);
+                await _processingTask.WaitAsync(linked.Token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
         {
-            logger.LogWarning("Stats persistence stop timed out after {TimeoutSeconds}s with {Pending} pending items",
-                timeout.TotalSeconds, channel.Reader.Count);
+            _logger.LogWarning("Stats persistence stop timed out. {Pending} snapshots lost.", _channel.Reader.Count);
+        }
+        finally
+        {
+            _started = false;
         }
     }
 
     private async Task ProcessLoopAsync(CancellationToken cancellationToken)
     {
-        var reader = channel.Reader;
-        while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+        var reader = _channel.Reader;
+        try
         {
-            var batch = new Dictionary<ulong, PlayerSnapshot>();
-            while (reader.TryRead(out var snapshot))
+            while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                batch[snapshot.SteamId] = snapshot; // keep latest per player
-                if (batch.Count >= config.CurrentValue.FlushConcurrency)
+                var batch = new Dictionary<ulong, PlayerSnapshot>();
+                while (reader.TryRead(out var snapshot))
                 {
-                    await FlushBatchAsync(batch.Values.ToArray(), cancellationToken).ConfigureAwait(false);
-                    batch.Clear();
+                    batch[snapshot.SteamId] = snapshot; // Keep latest per player in this batch
+                    if (batch.Count >= _config.CurrentValue.FlushConcurrency)
+                    {
+                        await FlushBatchAsync(batch.Values.ToList(), cancellationToken).ConfigureAwait(false);
+                        batch.Clear();
+                    }
+                }
+
+                if (batch.Count > 0)
+                {
+                    await FlushBatchAsync(batch.Values.ToList(), cancellationToken).ConfigureAwait(false);
                 }
             }
-
-            if (batch.Count > 0)
-            {
-                await FlushBatchAsync(batch.Values.ToArray(), cancellationToken).ConfigureAwait(false);
-            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Normal shutdown
+        }
+        catch (Exception ex)
+        {
+            _logger.LogCritical(ex, "Fatal error in stats persistence loop");
         }
     }
 
-    private async Task FlushBatchAsync(IReadOnlyCollection<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
+    private async Task FlushBatchAsync(List<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
     {
-        if (snapshots.Count == 0) return;
+        using var activity = Instrumentation.ActivitySource.StartActivity("FlushStatsBatch");
+        activity?.SetTag("batch.size", snapshots.Count);
 
-        var maxDegree = Math.Max(1, config.CurrentValue.FlushConcurrency);
-        await Parallel.ForEachAsync(
-            snapshots,
-            new ParallelOptions
-            {
-                MaxDegreeOfParallelism = maxDegree,
-                CancellationToken = cancellationToken
-            },
-            async (snapshot, ct) =>
-            {
-                try
-                {
-                    await repository.UpsertPlayerAsync(snapshot, ct).ConfigureAwait(false);
-                    Interlocked.Exchange(ref consecutiveFailures, 0);
-                }
-                catch (Exception ex)
-                {
-                    var failures = Interlocked.Increment(ref consecutiveFailures);
-                    logger.LogError(ex, "Dead-letter: failed to persist snapshot for {SteamId}/{Name} (failure {FailureCount})",
-                        snapshot.SteamId, snapshot.Name, failures);
+        _logger.LogInformation("Flushing batch of {Count} player snapshots to database...", snapshots.Count);
 
-                    if (failures >= CircuitBreakThreshold)
-                    {
-                        circuitOpenUntilUtc = DateTime.UtcNow.Add(circuitOpenDuration);
-                        logger.LogWarning("Stats persistence circuit opened for {DurationSeconds}s after {FailureCount} failures",
-                            circuitOpenDuration.TotalSeconds, failures);
-                    }
-                }
-            }).ConfigureAwait(false);
+        try
+        {
+            await _repository.UpsertPlayersAsync(snapshots, cancellationToken).ConfigureAwait(false);
+            _logger.LogDebug("Successfully persisted batch of {Count} snapshots", snapshots.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to persist batch of {Count} snapshots. SteamIDs: {SteamIds}", 
+                snapshots.Count, string.Join(", ", snapshots.Select(s => s.SteamId)));
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (linkedCts != null)
+        if (_linkedCts != null) await _linkedCts.CancelAsync().ConfigureAwait(false);
+        if (_processingTask != null)
         {
-            linkedCts.Cancel();
+            try { await _processingTask.ConfigureAwait(false); } catch (OperationCanceledException) { }
         }
-        if (processingTask != null)
-        {
-            try
-            {
-                await processingTask.ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                // Ignore
-            }
-        }
-        linkedCts?.Dispose();
+        _linkedCts?.Dispose();
     }
-
-    private bool IsCircuitOpen() => DateTime.UtcNow < circuitOpenUntilUtc;
 }

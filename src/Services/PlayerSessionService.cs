@@ -2,7 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-
+using Microsoft.Extensions.Logging;
 using CounterStrikeSharp.API.Core;
 using statsCollector.Domain;
 
@@ -24,13 +24,28 @@ public interface IPlayerSessionService
 public sealed class PlayerSessionService : IPlayerSessionService
 {
     private readonly ConcurrentDictionary<ulong, PlayerStats> _playerStats = [];
+    private readonly ILogger<PlayerSessionService> _logger;
+
+    public PlayerSessionService(ILogger<PlayerSessionService> logger)
+    {
+        _logger = logger;
+    }
 
     public PlayerStats EnsurePlayer(ulong steamId, string name)
     {
-        var stats = _playerStats.GetOrAdd(steamId, id => new PlayerStats { SteamId = id });
+        var stats = _playerStats.GetOrAdd(steamId, id => 
+        {
+            _logger.LogInformation("Creating new session for player: {Name} (SteamID: {SteamID})", name, id);
+            return new PlayerStats { SteamId = id };
+        });
+        
         lock (stats.SyncRoot)
         {
-            stats.Name = name;
+            if (stats.Name != name)
+            {
+                _logger.LogDebug("Updating player name in session: {OldName} -> {NewName} (SteamID: {SteamID})", stats.Name, name, steamId);
+                stats.Name = name;
+            }
         }
         return stats;
     }

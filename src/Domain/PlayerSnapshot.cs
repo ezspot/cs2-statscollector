@@ -90,7 +90,8 @@ public sealed record PlayerSnapshot
     int EffectiveMolotovs,
     int MultiKillNades,
     int NadeKills,
-    
+    int TradeWindowsMissed,
+    int FlashWaste,
     int EntryKills,
     int TradeKills,
     int TradedDeaths,

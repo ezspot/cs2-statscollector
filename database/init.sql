@@ -85,15 +85,17 @@ CREATE TABLE IF NOT EXISTS player_stats (
     effective_smokes INT DEFAULT 0,
     effective_he_grenades INT DEFAULT 0,
     effective_molotovs INT DEFAULT 0,
+    flash_waste INT DEFAULT 0,
     multi_kill_nades INT DEFAULT 0,
     nade_kills INT DEFAULT 0,
     entry_kills INT DEFAULT 0,
     trade_kills INT DEFAULT 0,
     traded_deaths INT DEFAULT 0,
-    multi_kills INT DEFAULT 0,
     high_impact_kills INT DEFAULT 0,
     low_impact_kills INT DEFAULT 0,
     trade_opportunities INT DEFAULT 0,
+    trade_windows_missed INT DEFAULT 0,
+    multi_kills INT DEFAULT 0,
     opening_duels_won INT DEFAULT 0,
     opening_duels_lost INT DEFAULT 0,
     noscope_kills INT DEFAULT 0,
@@ -158,6 +160,8 @@ CREATE TABLE IF NOT EXISTS player_advanced_analytics (
     utility_impact_score DECIMAL(5,3) NOT NULL,
     clutch_success_rate DECIMAL(5,2) NOT NULL,
     trade_success_rate DECIMAL(5,2) NOT NULL,
+    trade_windows_missed INT DEFAULT 0,
+    flash_waste INT DEFAULT 0,
     entry_success_rate DECIMAL(5,2) NOT NULL,
     rounds_played INT NOT NULL,
     kd_ratio DECIMAL(5,3) NOT NULL,
@@ -179,4 +183,71 @@ CREATE TABLE IF NOT EXISTS player_advanced_analytics (
     INDEX idx_player_advanced_analytics_calculated_at (calculated_at),
     INDEX idx_player_advanced_analytics_rating2 (rating2 DESC),
     INDEX idx_player_advanced_analytics_performance (performance_score DESC)
+) ENGINE=InnoDB;
+
+-- Kill positions for heatmaps
+CREATE TABLE IF NOT EXISTS kill_positions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    killer_steam_id BIGINT NOT NULL,
+    victim_steam_id BIGINT NOT NULL,
+    killer_x FLOAT NOT NULL,
+    killer_y FLOAT NOT NULL,
+    killer_z FLOAT NOT NULL,
+    victim_x FLOAT NOT NULL,
+    victim_y FLOAT NOT NULL,
+    victim_z FLOAT NOT NULL,
+    weapon_used VARCHAR(100),
+    is_headshot BOOLEAN DEFAULT FALSE,
+    is_wallbang BOOLEAN DEFAULT FALSE,
+    distance FLOAT DEFAULT 0,
+    killer_team INT NOT NULL,
+    victim_team INT NOT NULL,
+    map_name VARCHAR(100) NOT NULL,
+    round_number INT NOT NULL,
+    round_time_seconds INT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_kill_pos_map (map_name),
+    INDEX idx_kill_pos_killer (killer_steam_id),
+    INDEX idx_kill_pos_victim (victim_steam_id)
+) ENGINE=InnoDB;
+
+-- Death positions for heatmaps
+CREATE TABLE IF NOT EXISTS death_positions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    steam_id BIGINT NOT NULL,
+    x FLOAT NOT NULL,
+    y FLOAT NOT NULL,
+    z FLOAT NOT NULL,
+    cause_of_death VARCHAR(100),
+    is_headshot BOOLEAN DEFAULT FALSE,
+    team INT NOT NULL,
+    map_name VARCHAR(100) NOT NULL,
+    round_number INT NOT NULL,
+    round_time_seconds INT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_death_pos_map (map_name),
+    INDEX idx_death_pos_player (steam_id)
+) ENGINE=InnoDB;
+
+-- Utility positions for heatmaps
+CREATE TABLE IF NOT EXISTS utility_positions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    steam_id BIGINT NOT NULL,
+    throw_x FLOAT NOT NULL,
+    throw_y FLOAT NOT NULL,
+    throw_z FLOAT NOT NULL,
+    land_x FLOAT NOT NULL,
+    land_y FLOAT NOT NULL,
+    land_z FLOAT NOT NULL,
+    utility_type INT NOT NULL,
+    opponents_affected INT DEFAULT 0,
+    teammates_affected INT DEFAULT 0,
+    damage INT DEFAULT 0,
+    map_name VARCHAR(100) NOT NULL,
+    round_number INT NOT NULL,
+    round_time_seconds INT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_utility_pos_map (map_name),
+    INDEX idx_utility_pos_player (steam_id),
+    INDEX idx_utility_pos_type (utility_type)
 ) ENGINE=InnoDB;

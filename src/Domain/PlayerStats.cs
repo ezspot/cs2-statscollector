@@ -88,6 +88,7 @@ public sealed class PlayerStats
     public int EffectiveSmokes { get; set; }
     public int EffectiveHEGrenades { get; set; }
     public int EffectiveMolotovs { get; set; }
+    public int FlashWaste { get; set; }
     public int MultiKillNades { get; set; }
     public int NadeKills { get; set; }
 
@@ -97,6 +98,7 @@ public sealed class PlayerStats
     public int HighImpactKills { get; set; }
     public int LowImpactKills { get; set; }
     public int TradeOpportunities { get; set; }
+    public int TradeWindowsMissed { get; set; }
     public int MultiKills { get; set; }
     public int OpeningDuelsWon { get; set; }
     public int OpeningDuelsLost { get; set; }
@@ -312,6 +314,8 @@ public sealed class PlayerStats
                 EffectiveMolotovs,
                 MultiKillNades,
                 NadeKills,
+                TradeWindowsMissed,
+                FlashWaste,
                 EntryKills,
                 TradeKills,
                 TradedDeaths,
