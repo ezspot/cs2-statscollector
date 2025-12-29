@@ -26,6 +26,7 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
     private readonly ILogger<UtilityEventProcessor> _logger;
     private readonly IPositionPersistenceService _positionPersistence;
     private readonly IMatchTrackingService _matchTracker;
+    private readonly IMapDataService _mapData;
 
     private DateTime _roundStartUtc;
     private int _currentRoundNumber;
@@ -34,12 +35,14 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
         IPlayerSessionService playerSessions, 
         ILogger<UtilityEventProcessor> logger,
         IPositionPersistenceService positionPersistence,
-        IMatchTrackingService matchTracker)
+        IMatchTrackingService matchTracker,
+        IMapDataService mapData)
     {
         _playerSessions = playerSessions;
         _logger = logger;
         _positionPersistence = positionPersistence;
         _matchTracker = matchTracker;
+        _mapData = mapData;
     }
 
     public void SetRoundContext(int roundNumber, DateTime roundStartUtc)

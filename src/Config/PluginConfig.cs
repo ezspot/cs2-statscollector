@@ -68,6 +68,9 @@ public sealed class PluginConfig : BasePluginConfig
     [JsonPropertyName("LogLevel")]
     public LogLevel LogLevel { get; set; } = LogLevel.Information;
 
+    [JsonPropertyName("Scrim")]
+    public ScrimConfig Scrim { get; set; } = new();
+
     public string BuildConnectionString()
     {
         var builder = new MySqlConnectionStringBuilder

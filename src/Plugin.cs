@@ -44,6 +44,8 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
     private IPositionPersistenceService? _positionPersistence;
     private IStatsPersistenceService? _statsPersistence;
     private IMatchTrackingService? _matchTracker;
+    private IScrimManager? _scrimManager;
+    private IPauseService? _pauseService;
 
     private CounterStrikeSharp.API.Modules.Timers.Timer? _autoSaveTimer;
 
@@ -147,7 +149,12 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             services.AddTransient<IEconomyEventProcessor, EconomyEventProcessor>();
             services.AddTransient<IPositionTrackingService, PositionTrackingService>();
             services.AddSingleton<IStatsPersistenceService, StatsPersistenceService>();
-            services.AddSingleton<IPositionPersistenceService, PositionPersistenceService>();
+            services.AddSingleton<IPauseService, PauseService>();
+            services.AddSingleton<IScrimPersistenceService, ScrimPersistenceService>();
+            services.AddSingleton<IConfigLoaderService, ConfigLoaderService>();
+            services.AddSingleton<IMapDataService, MapDataService>();
+            services.AddSingleton<IFlashEfficiencyService, FlashEfficiencyService>();
+            services.AddSingleton<IScrimManager, ScrimManager>();
 
             _serviceProvider = services.BuildServiceProvider();
 
@@ -161,6 +168,8 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             _matchTracker = _serviceProvider.GetRequiredService<IMatchTrackingService>();
             _statsPersistence = _serviceProvider.GetRequiredService<IStatsPersistenceService>();
             _positionPersistence = _serviceProvider.GetRequiredService<IPositionPersistenceService>();
+            _scrimManager = _serviceProvider.GetRequiredService<IScrimManager>();
+            _pauseService = _serviceProvider.GetRequiredService<IPauseService>();
             
             _statsPersistence.StartAsync(_cancellationTokenSource.Token).GetAwaiter().GetResult();
             _positionPersistence.StartAsync(_cancellationTokenSource.Token).GetAwaiter().GetResult();
@@ -273,7 +282,11 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             _logger.LogInformation("Player disconnecting: {Name} (SteamID: {SteamID}, IsBot: {IsBot})", 
                 player.PlayerName, player.SteamID, player.IsBot);
             
-            if (!player.IsBot) _ = SavePlayerStatsOnDisconnectAsync(player);
+            if (!player.IsBot)
+            {
+                _scrimManager?.HandleDisconnect(player.SteamID);
+                _ = SavePlayerStatsOnDisconnectAsync(player);
+            }
         }
         return HookResult.Continue;
     }
@@ -488,6 +501,14 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         var winningTeamInt = @event.GetIntValue("winner", 0);
         var winningTeam = winningTeamInt switch { 2 => PlayerTeam.Terrorist, 3 => PlayerTeam.CounterTerrorist, _ => PlayerTeam.Spectator };
 
+        if (_scrimManager?.CurrentState == ScrimState.KnifeRound)
+        {
+            _scrimManager.HandleKnifeRoundEnd(winningTeamInt);
+            return HookResult.Continue;
+        }
+
+        _pauseService?.OnRoundEnd();
+
         _combatProcessor?.UpdateClutchStats(winningTeam);
         _playerSessions?.ForEachPlayer(stats =>
         {
@@ -549,8 +570,148 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
 
         if (_playerSessions != null && _playerSessions.TryGetSnapshot(player.SteamID, out var snapshot))
         {
-            player.PrintToChat($"[statsCollector] K:{snapshot.Kills} D:{snapshot.Deaths} A:{snapshot.Assists} ADR:{snapshot.AverageDamagePerRound:F0} Rating:{snapshot.HLTVRating:F2} Rank:{snapshot.GetPlayerRank()}");
+            player.PrintToChat($" [statsCollector] K:{snapshot.Kills} D:{snapshot.Deaths} A:{snapshot.Assists} ADR:{snapshot.AverageDamagePerRound:F0} Rating:{snapshot.HLTVRating:F2} Rank:{snapshot.GetPlayerRank()}");
         }
+    }
+
+    [ConsoleCommand("css_scrim", "Scrim system admin command")]
+    [CommandHelper(minArgs: 1, usage: "[start|stop|setcaptain|set|ready|unready|vote|pick]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnScrimCommand(CCSPlayerController? player, CommandInfo command)
+    {
+        if (_scrimManager == null) return;
+
+        var subCommand = command.GetArg(1).ToLower();
+
+        // Admin commands
+        if (subCommand is "start" or "stop" or "setcaptain" or "set")
+        {
+            if (player != null && !AdminUtils.HasPermission(player, "@css/root", "@css/admin", "@css/scrimadmin"))
+            {
+                player.PrintToChat(" [Scrim] You do not have permission to use this command.");
+                return;
+            }
+
+            switch (subCommand)
+            {
+                case "start":
+                    _ = _scrimManager.StartScrimAsync();
+                    break;
+                case "stop":
+                    _ = _scrimManager.StopScrimAsync();
+                    break;
+                case "recover":
+                    _ = _scrimManager.RecoverAsync();
+                    break;
+                case "setcaptain":
+                    if (command.ArgCount < 4) return;
+                    var team = int.Parse(command.GetArg(2));
+                    var target = Utilities.GetPlayerFromSteamId(ulong.Parse(command.GetArg(3))); // Simplified target finding
+                    if (target != null) _ = _scrimManager.SetCaptainAsync(team, target.SteamID);
+                    break;
+                case "set":
+                    if (command.ArgCount < 4) return;
+                    _scrimManager.SetOverride(command.GetArg(2), command.GetArg(3));
+                    break;
+            }
+            return;
+        }
+
+        // Player commands
+        if (player == null) return;
+
+        switch (subCommand)
+        {
+            case "ready":
+                _ = _scrimManager.SetReadyAsync(player.SteamID, true);
+                break;
+            case "unready":
+                _ = _scrimManager.SetReadyAsync(player.SteamID, false);
+                break;
+            case "vote":
+                if (command.ArgCount < 3) return;
+                _ = _scrimManager.VoteMapAsync(player.SteamID, command.GetArg(2));
+                break;
+            case "pick":
+                if (command.ArgCount < 3) return;
+                var pickTarget = Utilities.GetPlayerFromSteamId(ulong.Parse(command.GetArg(2))); // Simplified
+                if (pickTarget != null) _ = _scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID);
+                break;
+            case "ct":
+                _ = _scrimManager.SelectSideAsync(player.SteamID, "ct");
+                break;
+            case "t":
+                _ = _scrimManager.SelectSideAsync(player.SteamID, "t");
+                break;
+        }
+    }
+
+    [ConsoleCommand("css_ready", "Player ready command")]
+    public void OnReadyCommand(CCSPlayerController? player, CommandInfo command)
+    {
+        if (player == null) return;
+        _scrimManager?.SetReadyAsync(player.SteamID, true);
+    }
+
+    [ConsoleCommand("css_unready", "Player unready command")]
+    public void OnUnreadyCommand(CCSPlayerController? player, CommandInfo command)
+    {
+        if (player == null) return;
+        _scrimManager?.SetReadyAsync(player.SteamID, false);
+    }
+
+    [ConsoleCommand("css_vote", "Player vote command")]
+    public void OnVoteCommand(CCSPlayerController? player, CommandInfo command)
+    {
+        if (player == null || command.ArgCount < 2) return;
+        _scrimManager?.VoteMapAsync(player.SteamID, command.GetArg(1));
+    }
+
+    [ConsoleCommand("css_pick", "Captain pick command")]
+    public void OnPickCommand(CCSPlayerController? player, CommandInfo command)
+    {
+        if (player == null || command.ArgCount < 2) return;
+        var pickTarget = Utilities.GetPlayerFromSteamId(ulong.Parse(command.GetArg(1))); // Simplified
+        if (pickTarget != null) _scrimManager?.PickPlayerAsync(player.SteamID, pickTarget.SteamID);
+    }
+
+    [ConsoleCommand("css_ct", "Select CT side after knife round")]
+    public void OnCtCommand(CCSPlayerController? player, CommandInfo command)
+    {
+        if (player == null) return;
+        _scrimManager?.SelectSideAsync(player.SteamID, "ct");
+    }
+
+    [ConsoleCommand("css_pause", "Pause the match")]
+    public void OnPauseCommand(CCSPlayerController? player, CommandInfo command)
+    {
+        if (_pauseService == null) return;
+        
+        var type = PauseType.Tactical;
+        if (command.ArgCount > 1)
+        {
+            var arg = command.GetArg(1).ToLower();
+            type = arg switch
+            {
+                "tech" or "technical" => PauseType.Technical,
+                "admin" => PauseType.Admin,
+                _ => PauseType.Tactical
+            };
+        }
+
+        if (type == PauseType.Admin && player != null && !AdminUtils.HasPermission(player, "@css/root", "@css/admin"))
+        {
+            player.PrintToChat(" [Scrim] You do not have permission for admin pauses.");
+            return;
+        }
+
+        _ = _pauseService.RequestPauseAsync(player, type);
+    }
+
+    [ConsoleCommand("css_unpause", "Unpause the match")]
+    public void OnUnpauseCommand(CCSPlayerController? player, CommandInfo command)
+    {
+        if (_pauseService == null) return;
+        _ = _pauseService.RequestUnpauseAsync(player);
     }
     #endregion
 }

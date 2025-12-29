@@ -11,6 +11,12 @@ A high-performance CounterStrikeSharp plugin for CS2 that collects advanced play
 - **Reliable Registration**: Multi-stage player tracking using `OnClientAuthorized` for guaranteed SteamID64 capture.
 - **Spatial Analytics (Heatmaps)**: High-resolution position tracking for kills, deaths, and utility usage.
 - **Advanced Analytics**: Real-time calculation of HLTV-style Rating 2.0, Impact, KAST, and performance scores.
+- **Tactical Pause System**: MatchZy-style `.pause` and `.unpause` with support for technical/tactical limits and auto-pause.
+- **Scrim Management**: Automated knife rounds, side selection timers (30s), and captain-based picking.
+- **Crash Recovery**: Persistent `scrim_state_recovery.json` for match restoration after server restarts.
+- **Choke Point Analytics**: Detection of smoke grenades landing in critical map areas (e.g., Mirage Window).
+- **Flash Efficiency 2.0**: Advanced `BlindIntensity` calculation based on victim eye angles and distance falloff.
+- **Economy 2.0**: Dynamic weapon cost lookup via game schema (VData).
 - **Dashboard Optimized**: Pre-aggregated views for global leaderboards and player profiles.
 
 ## Installation

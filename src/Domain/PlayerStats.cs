@@ -89,6 +89,8 @@ public sealed class PlayerStats
     public int EffectiveHEGrenades { get; set; }
     public int EffectiveMolotovs { get; set; }
     public int FlashWaste { get; set; }
+    public float TotalFlashIntensity { get; set; }
+    public int ChokePointSmokes { get; set; }
     public int MultiKillNades { get; set; }
     public int NadeKills { get; set; }
 

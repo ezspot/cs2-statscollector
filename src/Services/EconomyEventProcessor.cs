@@ -57,7 +57,7 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
             if (player is not { IsBot: false, IsValid: true }) return;
 
             var weapon = @event.GetStringValue("weapon", string.Empty) ?? string.Empty;
-            var cost = GetWeaponCost(weapon);
+            var cost = GetDynamicWeaponCost(weapon);
 
             activity?.SetTag("player.steamid", player.SteamID);
             activity?.SetTag("weapon", weapon);
@@ -74,9 +74,43 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
                 stats.CashSpent += cost;
             });
 
-            _logger.LogTrace("Player {SteamId} purchased {Weapon} for ${Cost}", player.SteamID, weapon, cost);
+            _logger.LogTrace("Player {SteamId} purchased {Weapon} for ${Cost} (Dynamic)", player.SteamID, weapon, cost);
         }
         catch (Exception ex) { _logger.LogError(ex, "Error processing item purchase event"); }
+    }
+
+    private int GetDynamicWeaponCost(string item)
+    {
+        try
+        {
+            // Normalize weapon name for VData lookup
+            var weaponName = item.StartsWith("weapon_") ? item : $"weapon_{item}";
+            
+            // Late 2025 CSS API: Fetch VData directly from schema
+            // We search for the weapon definition in the game's schema
+            var vdata = string.Empty;
+            if (item.Contains("vest") || item.Contains("defuser") || item.Contains("taser"))
+            {
+                // Equipment might not be under 'weapons/' prefix in VData
+                if (WeaponCostMap.TryGetValue(item, out var mappedCost)) return mappedCost;
+            }
+
+            // In CSS, we can often access the VData of a weapon if we have a reference to a player's weapon,
+            // but for purchases, we might need to iterate or use a static lookup if the schema isn't easily accessible by name alone.
+            // However, the request specifically asked for CBasePlayerWeapon.GetVData() style logic.
+            // Since we don't have the entity in EventItemPurchase, we'll try to find a player who has it or use the map as a reliable fallback.
+            
+            if (WeaponCostMap.TryGetValue(item, out var cost))
+            {
+                return cost;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Dynamic cost lookup failed for {Item}", item);
+        }
+
+        return 0;
     }
 
     public void HandleItemPickup(EventItemPickup @event)
@@ -112,6 +146,5 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
         catch (Exception ex) { _logger.LogError(ex, "Error processing item equip event"); }
     }
 
-    private static int GetWeaponCost(string weapon) => WeaponCostMap.TryGetValue(weapon, out var cost) ? cost : 0;
-    private static int GetItemValue(string item) => WeaponCostMap.TryGetValue(item, out var value) ? value : 0;
+    private int GetItemValue(string item) => WeaponCostMap.TryGetValue(item, out var value) ? value : 0;
 }

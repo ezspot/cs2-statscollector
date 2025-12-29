@@ -1,6 +1,11 @@
-# statsCollector Quick Start v1.2.0
+# statsCollector Quick Start v1.3.0
 
 Get up and running fast with enterprise-grade CS2 stats collection. For full details, see README.md.
+
+## New in v1.3.0
+- **Pause System**: `.pause` (tactical/tech/admin), `.unpause`.
+- **Match Recovery**: `.scrim recover` for admins to restore a crashed match.
+- **Side Choice**: Winning captain picks side after knife round (`.ct`/`.t`).
 
 ## Prerequisites
 - CounterStrikeSharp v1.0.340+
