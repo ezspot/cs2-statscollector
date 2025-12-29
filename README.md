@@ -1,26 +1,29 @@
-# statsCollector
+# statsCollector v1.2.0
 
-A comprehensive CounterStrikeSharp plugin for CS2 that collects advanced player statistics with robust architecture. Built with .NET 8+ using dependency injection, async/await, Polly v8 ResiliencePipelines, structured logging (Serilog), and full observability (OpenTelemetry).
+A high-performance CounterStrikeSharp plugin for CS2 that collects advanced player statistics with enterprise-grade architecture. Built for late 2025 standards using .NET 8+, Polly v8 Resilience, and full OpenTelemetry observability.
 
 ## Overview
 statsCollector is an enterprise-grade CounterStrikeSharp plugin for CS2 that records player performance, utility, bomb, and weapon analytics with high-performance async persistence and extensive telemetry.
 
 ## Features
 - **Enterprise Observability**: Full OpenTelemetry (OTEL) integration for traces and metrics.
-- **Structured Logging**: Serilog integration with daily rolling files and console output.
-- **Robust Persistence**: Polly v8 resilience pipelines for database operations.
-- **High Performance**: `System.Threading.Channels` for non-blocking database writes.
+- **Structured Logging**: Serilog integration with daily rolling files and high-resolution tracing.
+- **Robust Persistence**: Polly v8 resilience pipelines with automated retries and circuit breakers for database operations.
+- **High Performance**: `System.Threading.Channels` for non-blocking, backpressure-aware database writes.
+- **Reliable Registration**: Multi-stage player tracking using `OnClientAuthorized` for guaranteed SteamID64 capture.
+- **Spatial Analytics (Heatmaps)**: High-resolution position tracking for kills, deaths, and utility usage.
+- **Advanced Analytics**: Real-time calculation of HLTV-style Rating 2.0, Impact, KAST, and performance scores.
+- **Automated Maintenance**: Configurable auto-save intervals to prevent data loss.
 - Combat: kills, deaths, assists, headshots, damage, accuracy, entry/trade/multi-kills, clutches, **trade windows missed**.
 - Utility: thrown counts, effectiveness, utility damage, flash assists, **flash waste tracking**.
 - Bomb: plants/defuses (with duration telemetry), clutch defuses, bomb-related kills/deaths.
-- **Heatmaps**: Comprehensive position tracking for kills, deaths, and utility usage.
 
 ## Installation
-1. Install CounterStrikeSharp on your CS2 server.
-2. Place the plugin in `addons/counterstrikesharp/plugins/statsCollector`.
-3. Configure `config.json` (DB connection, logging, concurrency).
-4. Run the provided `database/init.sql` on your MySQL server.
-5. Ensure the .NET 8+ runtime is installed on the server.
+1. Install [CounterStrikeSharp](https://docs.cssharp.dev/) on your CS2 server.
+2. Place the plugin files in `game/csgo/addons/counterstrikesharp/plugins/statsCollector`.
+3. Configure `config.json` (see `config.sample.json`).
+4. Execute `database/init.sql` on your MySQL/MariaDB server.
+5. Ensure .NET 8.0 or 9.0 runtime is installed.
 
 ### Minimal config example
 ```json
@@ -45,25 +48,40 @@ statsCollector is an enterprise-grade CounterStrikeSharp plugin for CS2 that rec
 }
 ```
 
-## Data model
-- `players`: steam_id, name, first_seen, last_seen.
-- `player_stats`: aggregated player stats (combat, utility, economy, movement, ratings).
-- `weapon_stats`: per-weapon stats per player.
-- `player_advanced_analytics`: high-resolution snapshot analytics.
-- `kill_positions`: coordinates, weapon, distance, and round context.
-- `death_positions`: death coordinates and cause.
-- `utility_positions`: throw/land coordinates and affected player counts.
+## Configuration
+| Key | Default | Description |
+|-----|---------|-------------|
+| `DatabaseHost` | `127.0.0.1` | MySQL server address |
+| `DatabaseSslMode` | `Required` | SSL security level (None, Preferred, Required, VerifyCA, VerifyFull) |
+| `AutoSaveSeconds` | `60` | Periodic save interval (min 30s) |
+| `FlushConcurrency` | `4` | Number of concurrent DB write tasks |
+| `PersistenceChannelCapacity` | `1000` | In-memory buffer size before dropping events |
+
+## Data Model
+- **`players`**: Core registry with first/last seen timestamps.
+- **`player_stats`**: Lifetime aggregated statistics across 100+ metrics.
+- **`player_advanced_analytics`**: Temporal snapshots of performance (Rating 2.0, Impact, etc.).
+- **`kill_positions` / `death_positions`**: XYZ coordinates with weapon and distance data for heatmaps.
+- **`utility_positions`**: Throw/Land coordinates with impact metrics (opponents/teammates affected).
+- **`weapon_stats`**: Detailed accuracy and lethality metrics per weapon.
 
 ## Architecture
 - **Centralized Instrumentation**: Global `Instrumentation` class for OTEL ActivitySource and Meters.
 - **Resilience**: Polly v8 Pipelines for all DB interactions.
 - **Async Flow**: CS2 event → processor → PlayerSessionService → PlayerSnapshot → Channel → StatsRepository → MySQL.
 
+## Enterprise Best Practices (Late 2025)
+- **Non-blocking I/O**: Game thread never waits for the database.
+- **Resilience**: Database transient failures are handled gracefully by Polly v8.
+- **Observability**: Metrics (Meters) and Traces (ActivitySource) ready for Prometheus/Grafana/Jaeger.
+- **Resource Management**: Proper `IAsyncDisposable` implementation for clean shutdowns.
+
 ## Development
 - Build: `dotnet build`
 - Publish: `dotnet publish -c Release`
 - Requirements: .NET 8 SDK, CounterStrikeSharp SDK, MySQL Connector
 - License: MIT
+
 ## Support
 - Issues: https://github.com/ezspot/cs2-statscollector/issues
 - CounterStrikeSharp docs: https://docs.cssharp.dev/

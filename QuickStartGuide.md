@@ -1,11 +1,11 @@
-# statsCollector Quick Start
+# statsCollector Quick Start v1.2.0
 
-Get up and running fast. For full details, see README.md.
+Get up and running fast with enterprise-grade CS2 stats collection. For full details, see README.md.
 
 ## Prerequisites
-- CounterStrikeSharp v180+
+- CounterStrikeSharp v1.0.340+
 - MySQL 8.0+ or MariaDB 10.11+
-- .NET 8 runtime
+- .NET 8.0 or 9.0 runtime
 - CS2 server with admin access
 
 ## Install
@@ -21,11 +21,13 @@ Get up and running fast. For full details, see README.md.
   "DatabaseUsername": "cs2_statscollector",
   "DatabasePassword": "your_password",
   "DatabaseSslMode": "Required",
+  "AutoSaveSeconds": 60,
   "LogLevel": "Information"
 }
 ```
-4) Start the server. The plugin creates tables automatically.  
-   Reload if needed: `css_plugins reload statsCollector`
+4) Execute `database/init.sql` on your MySQL server to create the schema.
+5) Start the server. The plugin will connect and begin tracking.  
+   Verify with: `css_plugins list`
 
 ## Build from source
 1) Install .NET 8 SDK.  
@@ -35,10 +37,11 @@ Get up and running fast. For full details, see README.md.
    - (Release publish) `dotnet publish -c Release -o out`  
 3) Copy the built plugin from `out/` to `game/csgo/addons/counterstrikesharp/plugins/statsCollector/`.
 
-## Verify
-- Console: look for successful load and DB connection messages.  
-- In-game: play a few rounds, then run `css_stats`.  
-- DB: `SELECT * FROM player_stats LIMIT 5;`
+## Verify (Late 2025 Tracing)
+- **Console**: Look for "statsCollector plugin loaded successfully with full observability".
+- **Logs**: Check `logs/statscollector-*.log` for "Creating new session for player" and "Flushing batch".
+- **DB**: Check `player_advanced_analytics` for Rating 2.0 snapshots.
+- **Heatmaps**: Check `kill_positions` and `utility_positions` for spatial data.
 
 ## Environment overrides (optional)
 Prefix with `STATSCOLLECTOR_`, e.g. `STATSCOLLECTOR_DATABASE_PASSWORD`.
