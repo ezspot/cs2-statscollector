@@ -1,4 +1,4 @@
-# statsCollector v1.2.0
+# statsCollector v1.3.0
 
 A high-performance CounterStrikeSharp plugin for CS2 that collects advanced player statistics with enterprise-grade architecture. Built for late 2025 standards using .NET 8+, Polly v8 Resilience, and full OpenTelemetry observability.
 
