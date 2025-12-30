@@ -169,6 +169,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddSingleton<IConfigLoaderService, ConfigLoaderService>();
         services.AddSingleton<IMapDataService, MapDataService>();
         services.AddSingleton<IFlashEfficiencyService, FlashEfficiencyService>();
+        services.AddSingleton<IRoundBackupService, RoundBackupService>();
         services.AddSingleton<IScrimManager, ScrimManager>();
         services.AddSingleton<IGameEventHandlerService, GameEventHandlerService>();
 

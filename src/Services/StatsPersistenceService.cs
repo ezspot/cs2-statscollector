@@ -8,6 +8,8 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Polly;
+using Polly.Registry;
 using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
@@ -26,6 +28,7 @@ public sealed class StatsPersistenceService : IStatsPersistenceService
     private readonly IStatsRepository _repository;
     private readonly ILogger<StatsPersistenceService> _logger;
     private readonly IOptionsMonitor<PluginConfig> _config;
+    private readonly ResiliencePipelineProvider<string> _resilienceProvider;
     private readonly Channel<PlayerSnapshot> _channel;
 
     private Task? _processingTask;
@@ -35,11 +38,13 @@ public sealed class StatsPersistenceService : IStatsPersistenceService
     public StatsPersistenceService(
         IStatsRepository repository,
         ILogger<StatsPersistenceService> logger,
-        IOptionsMonitor<PluginConfig> config)
+        IOptionsMonitor<PluginConfig> config,
+        ResiliencePipelineProvider<string> resilienceProvider)
     {
         _repository = repository;
         _logger = logger;
         _config = config;
+        _resilienceProvider = resilienceProvider;
 
         var capacity = Math.Max(100, config.CurrentValue.PersistenceChannelCapacity);
         _channel = Channel.CreateBounded<PlayerSnapshot>(new BoundedChannelOptions(capacity)
@@ -154,27 +159,23 @@ public sealed class StatsPersistenceService : IStatsPersistenceService
         using var activity = Instrumentation.ActivitySource.StartActivity("FlushStatsBatch");
         activity?.SetTag("batch.size", snapshots.Count);
 
-        _logger.LogInformation("Flushing batch of {Count} player snapshots to database...", snapshots.Count);
+        var pipeline = _resilienceProvider.GetPipeline("database");
 
-        try
+        await pipeline.ExecuteAsync(async ct =>
         {
-            await _repository.UpsertPlayersAsync(snapshots, cancellationToken).ConfigureAwait(false);
-            
-            // Also update match-level summaries if we have match context
+            _logger.LogInformation("Flushing batch of {Count} player snapshots to database...", snapshots.Count);
+
+            await _repository.UpsertPlayersAsync(snapshots, ct).ConfigureAwait(false);
+
             var matchSnapshots = snapshots.Where(s => s.MatchId.HasValue).ToList();
             if (matchSnapshots.Count > 0)
             {
-                await _repository.UpsertMatchSummariesAsync(matchSnapshots, cancellationToken).ConfigureAwait(false);
-                await _repository.UpsertMatchWeaponStatsAsync(matchSnapshots, cancellationToken).ConfigureAwait(false);
+                await _repository.UpsertMatchSummariesAsync(matchSnapshots, ct).ConfigureAwait(false);
+                await _repository.UpsertMatchWeaponStatsAsync(matchSnapshots, ct).ConfigureAwait(false);
             }
 
             _logger.LogDebug("Successfully persisted batch of {Count} snapshots", snapshots.Count);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to persist batch of {Count} snapshots. SteamIDs: {SteamIds}", 
-                snapshots.Count, string.Join(", ", snapshots.Select(s => s.SteamId)));
-        }
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask DisposeAsync()

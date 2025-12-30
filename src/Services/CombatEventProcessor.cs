@@ -65,6 +65,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     private readonly Dictionary<ulong, DateTime> _lastDeathByPlayer = [];
     private readonly Dictionary<ulong, DateTime> _firstKillTimes = [];
     private readonly Dictionary<ulong, int> _roundKills = [];
+    private readonly Dictionary<ulong, (ulong KillerId, DateTime Time)> _lastKillerOfPlayer = [];
     private readonly Dictionary<ulong, List<(ulong TeammateId, DateTime Expiry)>> _pendingTradeOpportunities = [];
 
     public CombatEventProcessor(
@@ -197,6 +198,11 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 _playersAliveThisRound.Remove(victim.SteamID);
                 _lastTeamDeathTime[victimTeam] = now;
                 _lastDeathByPlayer[victim.SteamID] = now;
+
+                if (attacker is { IsBot: false })
+                {
+                    _lastKillerOfPlayer[victim.SteamID] = (attacker.SteamID, now);
+                }
             }
 
             if (attacker is { IsBot: false } && attacker != victim)
@@ -206,10 +212,19 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 var enemyAlive = attackerTeam == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
                 var teammatesAlive = attackerTeam == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
 
+                // Check for Revenge Kill
+                bool isRevengeKill = false;
+                if (victim != null && _lastKillerOfPlayer.TryGetValue(attacker.SteamID, out var lastKiller) && lastKiller.KillerId == victim.SteamID)
+                {
+                    isRevengeKill = true;
+                    _lastKillerOfPlayer.Remove(attacker.SteamID);
+                }
+
                 Instrumentation.KillsCounter.Add(1, 
                     new KeyValuePair<string, object?>("team", attackerTeam.ToString()), 
                     new KeyValuePair<string, object?>("weapon", weaponName),
-                    new KeyValuePair<string, object?>("map", Server.MapName));
+                    new KeyValuePair<string, object?>("map", Server.MapName),
+                    new KeyValuePair<string, object?>("is_revenge", isRevengeKill));
                 
                 Instrumentation.DamageCounter.Add(damage, 
                     new KeyValuePair<string, object?>("team", attackerTeam.ToString()),
@@ -255,6 +270,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     stats.Headshots += isHeadshot ? 1 : 0;
                     stats.WeaponKills[weaponName] = stats.WeaponKills.GetValueOrDefault(weaponName, 0) + 1;
                     stats.CurrentTeam = attackerTeam;
+
+                    if (isRevengeKill) stats.Revenges++;
 
                     if (!_firstKillTimes.ContainsKey(attacker.SteamID)) { _firstKillTimes[attacker.SteamID] = now; stats.EntryKills++; }
                     _roundKills[attacker.SteamID] = _roundKills.GetValueOrDefault(attacker.SteamID, 0) + 1;
@@ -428,6 +445,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 if (missedCount > 0) _playerSessions.MutatePlayer(kvp.Key, stats => stats.TradeWindowsMissed += missedCount);
             }
             _firstKillTimes.Clear(); _roundKills.Clear(); _playersAliveThisRound.Clear(); _lastDeathByPlayer.Clear(); _pendingTradeOpportunities.Clear();
+            _lastKillerOfPlayer.Clear();
             _lastTeamDeathTime[PlayerTeam.Terrorist] = DateTime.MinValue; _lastTeamDeathTime[PlayerTeam.CounterTerrorist] = DateTime.MinValue;
         }
         catch (Exception ex) { _logger.LogError(ex, "Error resetting round statistics"); }

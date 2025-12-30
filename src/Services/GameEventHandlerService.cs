@@ -19,34 +19,54 @@ public interface IGameEventHandlerService
     void RegisterEvents(BasePlugin plugin);
 }
 
-public sealed class GameEventHandlerService(
-    ILogger<GameEventHandlerService> logger,
-    IPlayerSessionService playerSessions,
-    ICombatEventProcessor combatProcessor,
-    IUtilityEventProcessor utilityProcessor,
-    IBombEventProcessor bombProcessor,
-    IEconomyEventProcessor economyProcessor,
-    IMatchTrackingService matchTracker,
-    IStatsPersistenceService statsPersistence,
-    IStatsRepository statsRepository,
-    IScrimManager scrimManager,
-    IPauseService pauseService,
-    IOptionsMonitor<PluginConfig> configMonitor) : IGameEventHandlerService
+public sealed class GameEventHandlerService : IGameEventHandlerService
 {
-    private readonly ILogger<GameEventHandlerService> _logger = logger;
-    private readonly IPlayerSessionService _playerSessions = playerSessions;
-    private readonly ICombatEventProcessor _combatProcessor = combatProcessor;
-    private readonly IUtilityEventProcessor _utilityProcessor = utilityProcessor;
-    private readonly IBombEventProcessor _bombProcessor = bombProcessor;
-    private readonly IEconomyEventProcessor _economyProcessor = economyProcessor;
-    private readonly IMatchTrackingService _matchTracker = matchTracker;
-    private readonly IStatsPersistenceService _statsPersistence = statsPersistence;
-    private readonly IStatsRepository _statsRepository = statsRepository;
-    private readonly IScrimManager _scrimManager = scrimManager;
-    private readonly IPauseService _pauseService = pauseService;
-    private readonly IOptionsMonitor<PluginConfig> _configMonitor = configMonitor;
+    private readonly ILogger<GameEventHandlerService> _logger;
+    private readonly IPlayerSessionService _playerSessions;
+    private readonly ICombatEventProcessor _combatProcessor;
+    private readonly IUtilityEventProcessor _utilityProcessor;
+    private readonly IBombEventProcessor _bombProcessor;
+    private readonly IEconomyEventProcessor _economyProcessor;
+    private readonly IMatchTrackingService _matchTracker;
+    private readonly IStatsPersistenceService _statsPersistence;
+    private readonly IStatsRepository _statsRepository;
+    private readonly IScrimManager _scrimManager;
+    private readonly IPauseService _pauseService;
+    private readonly IRoundBackupService _roundBackup;
+    private readonly IOptionsMonitor<PluginConfig> _configMonitor;
+    private int _currentRoundNumber = 0;
 
     private PluginConfig _config => _configMonitor.CurrentValue;
+
+    public GameEventHandlerService(
+        ILogger<GameEventHandlerService> logger,
+        IPlayerSessionService playerSessions,
+        ICombatEventProcessor combatProcessor,
+        IUtilityEventProcessor utilityProcessor,
+        IBombEventProcessor bombProcessor,
+        IEconomyEventProcessor economyProcessor,
+        IMatchTrackingService matchTracker,
+        IStatsPersistenceService statsPersistence,
+        IStatsRepository statsRepository,
+        IScrimManager scrimManager,
+        IPauseService pauseService,
+        IRoundBackupService roundBackup,
+        IOptionsMonitor<PluginConfig> configMonitor)
+    {
+        _logger = logger;
+        _playerSessions = playerSessions;
+        _combatProcessor = combatProcessor;
+        _utilityProcessor = utilityProcessor;
+        _bombProcessor = bombProcessor;
+        _economyProcessor = economyProcessor;
+        _matchTracker = matchTracker;
+        _statsPersistence = statsPersistence;
+        _statsRepository = statsRepository;
+        _scrimManager = scrimManager;
+        _pauseService = pauseService;
+        _roundBackup = roundBackup;
+        _configMonitor = configMonitor;
+    }
 
     public void RegisterEvents(BasePlugin plugin)
     {
@@ -93,15 +113,26 @@ public sealed class GameEventHandlerService(
         plugin.RegisterEventHandler<EventRoundEnd>(OnRoundEnd);
 
         // Commands
-        plugin.AddCommand("css_stats", "Show current stats", OnStatsCommand);
-        plugin.AddCommand("css_scrim", "Scrim system admin command", OnScrimCommand);
-        plugin.AddCommand("css_ready", "Player ready command", OnReadyCommand);
-        plugin.AddCommand("css_unready", "Player unready command", OnUnreadyCommand);
-        plugin.AddCommand("css_vote", "Player vote command", OnVoteCommand);
-        plugin.AddCommand("css_pick", "Captain pick command", OnPickCommand);
-        plugin.AddCommand("css_ct", "Select CT side after knife round", OnCtCommand);
-        plugin.AddCommand("css_pause", "Pause the match", OnPauseCommand);
-        plugin.AddCommand("css_unpause", "Unpause the match", OnUnpauseCommand);
+        plugin.AddCommand("css_stats", "Show current stats", (player, info) => { if (ValidatePlayer(player)) OnStatsCommand(player!, info); });
+        plugin.AddCommand("css_scrim", "Scrim system admin command", (player, info) => { if (ValidatePlayer(player)) OnScrimCommand(player!, info); });
+        plugin.AddCommand("css_ready", "Player ready command", (player, info) => { if (ValidatePlayer(player)) OnReadyCommand(player!, info); });
+        plugin.AddCommand("css_unready", "Player unready command", (player, info) => { if (ValidatePlayer(player)) OnUnreadyCommand(player!, info); });
+        plugin.AddCommand("css_vote", "Player vote command", (player, info) => { if (ValidatePlayer(player)) OnVoteCommand(player!, info); });
+        plugin.AddCommand("css_pick", "Captain pick command", (player, info) => { if (ValidatePlayer(player)) OnPickCommand(player!, info); });
+        plugin.AddCommand("css_ct", "Select CT side after knife round", (player, info) => { if (ValidatePlayer(player)) OnCtCommand(player!, info); });
+        plugin.AddCommand("css_pause", "Pause the match", (player, info) => { if (ValidatePlayer(player)) OnPauseCommand(player, info); });
+        plugin.AddCommand("css_unpause", "Unpause the match", (player, info) => { if (ValidatePlayer(player)) OnUnpauseCommand(player, info); });
+        plugin.AddCommand("css_restore", "Restore a previous round", (player, info) => { if (ValidatePlayer(player)) OnRestoreCommand(player!, info); });
+        plugin.AddCommand("css_t", "Select T side", (player, info) => { if (ValidatePlayer(player)) OnTCommand(player!, info); });
+    }
+
+    private bool ValidatePlayer(CCSPlayerController? player)
+    {
+        if (player == null) return true; // Console is allowed
+        if (!player.IsValid) return false;
+        // In CS2, a valid SteamID is required for persistent stats. 0 usually indicates a bot or unauthenticated player.
+        if (player.SteamID == 0) return false;
+        return true;
     }
 
     #region Event Handlers
@@ -271,7 +302,7 @@ public sealed class GameEventHandlerService(
     {
         if (_config.DeathmatchMode) return HookResult.Continue;
         
-        var roundNumber = @event.GetIntValue("round_number", 0);
+        _currentRoundNumber = @event.GetIntValue("round_number", 0);
         var roundStartUtc = DateTime.UtcNow;
 
         var ctAlive = 0;
@@ -282,19 +313,22 @@ public sealed class GameEventHandlerService(
             else if (stats.CurrentTeam == PlayerTeam.Terrorist) tAlive++;
         });
 
-        _combatProcessor.SetRoundContext(roundNumber, roundStartUtc, ctAlive, tAlive);
-        _utilityProcessor.SetRoundContext(roundNumber, roundStartUtc);
+        _combatProcessor.SetRoundContext(_currentRoundNumber, roundStartUtc, ctAlive, tAlive);
+        _utilityProcessor.SetRoundContext(_currentRoundNumber, roundStartUtc);
         _combatProcessor.ResetRoundStats();
         _bombProcessor.ResetBombState();
 
+        // Snapshot at round start for backup/restore (captures starting money and scores)
+        _roundBackup.CreateSnapshot(_currentRoundNumber);
+
         if (_matchTracker.CurrentMatch != null)
         {
-            SafeExecute(() => _matchTracker.StartRoundAsync(_matchTracker.CurrentMatch.MatchId, roundNumber), "StartRoundTracking");
+            SafeExecute(() => _matchTracker.StartRoundAsync(_matchTracker.CurrentMatch.MatchId, _currentRoundNumber), "StartRoundTracking");
         }
 
         _playerSessions.ForEachPlayer(stats =>
         {
-            stats.RoundNumber = roundNumber;
+            stats.RoundNumber = _currentRoundNumber;
             stats.RoundStartUtc = roundStartUtc;
             stats.AliveOnTeamAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
             stats.AliveEnemyAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
@@ -467,6 +501,12 @@ public sealed class GameEventHandlerService(
         SafeExecute(() => _scrimManager.SelectSideAsync(player.SteamID, "ct"), "CtCommand");
     }
 
+    private void OnTCommand(CCSPlayerController? player, CommandInfo command)
+    {
+        if (player == null) return;
+        SafeExecute(() => _scrimManager.SelectSideAsync(player.SteamID, "t"), "TCommand");
+    }
+
     private void OnPauseCommand(CCSPlayerController? player, CommandInfo command)
     {
         var type = PauseType.Tactical;
@@ -493,6 +533,34 @@ public sealed class GameEventHandlerService(
     private void OnUnpauseCommand(CCSPlayerController? player, CommandInfo command)
     {
         SafeExecute(() => _pauseService.RequestUnpauseAsync(player), "UnpauseCommand");
+    }
+
+    private void OnRestoreCommand(CCSPlayerController player, CommandInfo command)
+    {
+        if (!AdminUtils.HasPermission(player, "@css/root", "@css/admin"))
+        {
+            player.PrintToChat(" [statsCollector] You do not have permission to restore rounds.");
+            return;
+        }
+
+        if (command.ArgCount < 2)
+        {
+            var rounds = string.Join(", ", _roundBackup.GetAvailableRounds());
+            player.PrintToChat($" [statsCollector] Usage: .restore <round>. Available rounds: {rounds}");
+            return;
+        }
+
+        if (int.TryParse(command.GetArg(1), out var roundNumber))
+        {
+            if (_roundBackup.RestoreRound(roundNumber))
+            {
+                player.PrintToChat($" [statsCollector] Round {roundNumber} restore initiated.");
+            }
+            else
+            {
+                player.PrintToChat($" [statsCollector] Failed to restore round {roundNumber}.");
+            }
+        }
     }
     #endregion
 }
