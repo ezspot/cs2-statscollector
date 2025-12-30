@@ -1,18 +1,17 @@
-# statsCollector Quick Start v1.6.0
+# statsCollector Quick Start v1.7.0
 
 Get up and running fast with enterprise-grade CS2 stats collection. For full details, see README.md.
 
-## New in v1.6.0
-- **Accurate ADR**: Damage is now tracked via `player_hurt` events for true accuracy.
-- **Bulk SQL Persistence**: Optimized spatial data writes using multi-row INSERTs.
-- **Enhanced Thread Safety**: Main-loop integrity via `Server.NextFrame` and `SyncRoot` locks.
-- **Round Backup System**: `.restore <round>` for admins to roll back match state.
-- **Match Lifecycle**: Now uses `round_announce_match_start` for precise live play tracking.
-- **Advanced Views**: New Leetify-style views for entry and clutch efficiency.
+## New in v1.7.0
+- **Mediator Pattern**: Decoupled event processing for maximum extensibility and performance.
+- **Dedicated Analytics**: All Rating 2.0 and Impact logic moved to a high-performance `AnalyticsService`.
+- **Spatial Optimization**: Native MySQL `POINT` types and `SPATIAL` indexes for advanced heatmap queries.
+- **Series Tracking**: Support for `SeriesUuid` to group multiple matches (BO3/BO5).
+- **Efficient Persistence**: **Dirty Flag** optimization reduces database writes by only flushing changed stats.
 
 ## Prerequisites
 - CounterStrikeSharp v1.0.340+
-- MySQL 8.0+ or MariaDB 10.11+
+- MySQL 8.0+ or MariaDB 10.6+ (Required for `POINT` and `SPATIAL` index support)
 - .NET 8.0 or 9.0 runtime
 - CS2 server with admin access
 

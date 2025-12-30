@@ -11,7 +11,7 @@
     <PackageProjectUrl>https://github.com/ezspot/cs2-statscollector</PackageProjectUrl>
     <Company>Anders 'spot' Hagen</Company>
     <Description>Comprehensive CS2 stats collection to MySQL</Description>
-    <Version>1.6.0</Version>
+    <Version>1.7.0</Version>
     <SuppressTrimAnalysisWarnings>true</SuppressTrimAnalysisWarnings>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>

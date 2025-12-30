@@ -134,161 +134,30 @@ public sealed record PlayerSnapshot
 
     IReadOnlyDictionary<string, int> WeaponKills,
     IReadOnlyDictionary<string, int> WeaponShots,
-    IReadOnlyDictionary<string, int> WeaponHits
-)
-{
-    public decimal TradeSuccessRate => TradeOpportunities > 0 ? (decimal)TradeKills / TradeOpportunities * 100m : 0m;
+    IReadOnlyDictionary<string, int> WeaponHits,
 
-    public decimal KDRatio => Deaths > 0 ? (decimal)Kills / Deaths : Kills;
-
-    public decimal HeadshotPercentage => Kills > 0 ? (decimal)Headshots / Kills * 100m : 0m;
-
-    public decimal AccuracyPercentage => ShotsFired > 0 ? (decimal)ShotsHit / ShotsFired * 100m : 0m;
-
-    public decimal KASTPercentage => RoundsPlayed > 0 ? (decimal)KASTRounds / RoundsPlayed * 100m : 0m;
-
-    public decimal AverageDamagePerRound => RoundsPlayed > 0 ? (decimal)DamageDealt / RoundsPlayed : 0m;
-
-    public decimal AverageKillsPerRound => RoundsPlayed > 0 ? (decimal)Kills / RoundsPlayed : 0m;
-
-    public decimal AverageAssistsPerRound => RoundsPlayed > 0 ? (decimal)Assists / RoundsPlayed : 0m;
-
-    public decimal AverageDeathsPerRound => RoundsPlayed > 0 ? (decimal)Deaths / RoundsPlayed : 0m;
-
-    public decimal SurvivalRating => RoundsPlayed > 0 ? ((decimal)(RoundsPlayed - Deaths) / RoundsPlayed) * 0.154m : 0m;
-
-    public decimal UtilityScore
-    {
-        get
-        {
-            if (RoundsPlayed == 0) return 0m;
-            var damageScore = (UtilityDamageDealt / (decimal)RoundsPlayed) * 0.4m;
-            var blindScore = (TotalBlindTimeInflicted / 1000m / (decimal)RoundsPlayed) * 0.4m;
-            var smokeScore = (EffectiveSmokes / (decimal)RoundsPlayed) * 0.2m;
-            return damageScore + blindScore + smokeScore;
-        }
-    }
-
-    public decimal HLTVRating
-    {
-        get
-        {
-            if (RoundsPlayed == 0) return 0m;
-
-            var killsRating = AverageKillsPerRound * 0.6m;
-            var deathsRating = (0.7m - AverageDeathsPerRound * 0.5m);
-            var impactRating = ImpactRating * 0.3m;
-            var kastRating = (KASTRounds / (decimal)RoundsPlayed) * 0.2m;
-            var survivalRating = SurvivalRating;
-            
-            return Math.Max(0m, killsRating + deathsRating + impactRating + kastRating + survivalRating);
-        }
-    }
-
-    public decimal ImpactRating
-    {
-        get
-        {
-            if (RoundsPlayed == 0) return 0m;
-
-            var multiKillImpact = MultiKills * 0.1m;
-            var clutchImpact = (decimal)ClutchPoints * 0.2m;
-            var openingImpact = EntryKills * 0.15m;
-            var mvpImpact = Mvps * 0.05m;
-
-            return Math.Min(2.0m, multiKillImpact + clutchImpact + openingImpact + mvpImpact);
-        }
-    }
-
-    public decimal AverageMoneySpentPerRound => RoundsPlayed > 0 ? (decimal)MoneySpent / RoundsPlayed : 0m;
-
-    public decimal GrenadeEffectivenessRate
-    {
-        get
-        {
-            var totalEffective = EffectiveFlashes + EffectiveSmokes + EffectiveHEGrenades + EffectiveMolotovs;
-            return GrenadesThrown > 0 ? (decimal)totalEffective / GrenadesThrown * 100m : 0m;
-        }
-    }
-
-    public decimal FlashEffectivenessRate => FlashesThrown > 0 ? (decimal)EnemiesFlashed / FlashesThrown : 0m;
-
-    public decimal UtilityUsagePerRound => RoundsPlayed > 0 ? (decimal)GrenadesThrown / RoundsPlayed : 0m;
-
-    public decimal OpeningKillRatio => (OpeningDuelsWon + OpeningDuelsLost) > 0 
-        ? (decimal)OpeningDuelsWon / (OpeningDuelsWon + OpeningDuelsLost) 
-        : 0m;
-
-    public decimal ClutchSuccessRate => (ClutchesWon + ClutchesLost) > 0 
-        ? (decimal)ClutchesWon / (ClutchesWon + ClutchesLost) 
-        : 0m;
-
-    public decimal TradeKillRatio => (TradeKills + TradedDeaths) > 0 
-        ? (decimal)TradeKills / (TradeKills + TradedDeaths) 
-        : 0m;
-
-    public string GetBestWeaponByKills()
-    {
-        return WeaponKills.OrderByDescending(x => x.Value).FirstOrDefault().Key ?? "None";
-    }
-
-    public decimal GetWeaponAccuracy(string weapon)
-    {
-        var shots = WeaponShots.GetValueOrDefault(weapon, 0);
-        var hits = WeaponHits.GetValueOrDefault(weapon, 0);
-        return shots > 0 ? (decimal)hits / shots * 100m : 0m;
-    }
-
-    public IReadOnlyList<(string Weapon, int Kills)> GetTopWeaponsByKills(int count = 3)
-    {
-        return WeaponKills
-            .OrderByDescending(x => x.Value)
-            .Take(count)
-            .Select(x => (x.Key, x.Value))
-            .ToList();
-    }
-
-    public IReadOnlyDictionary<string, decimal> GetAllWeaponAccuracies()
-    {
-        return WeaponShots.Keys
-            .ToDictionary(
-                weapon => weapon,
-                weapon => GetWeaponAccuracy(weapon)
-            );
-    }
-
-    public decimal PerformanceScore
-    {
-        get
-        {
-            if (RoundsPlayed == 0) return 0m;
-
-            var kdScore = Math.Min(30m, KDRatio * 10m);
-            var adrScore = Math.Min(20m, AverageDamagePerRound / 2m);
-            var kastScore = Math.Min(20m, KASTPercentage / 5m);
-            var mvpScore = Math.Min(15m, (decimal)Mvps / RoundsPlayed * 15m);
-            var impactScoreValue = Math.Min(15m, ImpactRating * 7.5m);
-
-            return kdScore + adrScore + kastScore + mvpScore + impactScoreValue;
-        }
-    }
-
-    public string GetPlayerRank()
-    {
-        var score = PerformanceScore;
-        
-        return score switch
-        {
-            >= 90 => "S+",
-            >= 80 => "S",
-            >= 70 => "A+",
-            >= 60 => "A",
-            >= 50 => "B+",
-            >= 40 => "B",
-            >= 30 => "C+",
-            >= 20 => "C",
-            >= 10 => "D",
-            _ => "F"
-        };
-    }
-}
+    // Calculated metrics added to snapshot for persistence
+    decimal KDRatio,
+    decimal HeadshotPercentage,
+    decimal AccuracyPercentage,
+    decimal KASTPercentage,
+    decimal AverageDamagePerRound,
+    decimal HLTVRating,
+    decimal ImpactRating,
+    decimal UtilityScore,
+    decimal PerformanceScore,
+    string PlayerRank,
+    decimal AverageKillsPerRound,
+    decimal AverageDeathsPerRound,
+    decimal AverageAssistsPerRound,
+    decimal ClutchSuccessRate,
+    decimal TradeKillRatio,
+    decimal OpeningKillRatio,
+    decimal GrenadeEffectivenessRate,
+    decimal FlashEffectivenessRate,
+    decimal UtilityUsagePerRound,
+    decimal AverageMoneySpentPerRound,
+    decimal SurvivalRating,
+    decimal UtilityImpactScore,
+    string TopWeaponByKills
+);

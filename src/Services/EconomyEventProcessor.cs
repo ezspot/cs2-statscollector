@@ -10,11 +10,8 @@ using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public interface IEconomyEventProcessor
+public interface IEconomyEventProcessor : IEventProcessor
 {
-    void HandleItemPurchase(EventItemPurchase @event);
-    void HandleItemPickup(EventItemPickup @event);
-    void HandleItemEquip(EventItemEquip @event);
 }
 
 public sealed class EconomyEventProcessor : IEconomyEventProcessor
@@ -48,7 +45,14 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
         _logger = logger;
     }
 
-    public void HandleItemPurchase(EventItemPurchase @event)
+    public void RegisterEvents(IEventDispatcher dispatcher)
+    {
+        dispatcher.Subscribe<EventItemPurchase>((e, i) => { HandleItemPurchase(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventItemPickup>((e, i) => { HandleItemPickup(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventItemEquip>((e, i) => { HandleItemEquip(e); return HookResult.Continue; });
+    }
+
+    private void HandleItemPurchase(EventItemPurchase @event)
     {
         using var activity = Instrumentation.ActivitySource.StartActivity("HandleItemPurchase");
         try
@@ -116,7 +120,7 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
         return 0;
     }
 
-    public void HandleItemPickup(EventItemPickup @event)
+    private void HandleItemPickup(EventItemPickup @event)
     {
         try
         {
@@ -135,7 +139,7 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
         catch (Exception ex) { _logger.LogError(ex, "Error processing item pickup event"); }
     }
 
-    public void HandleItemEquip(EventItemEquip @event)
+    private void HandleItemEquip(EventItemEquip @event)
     {
         try
         {

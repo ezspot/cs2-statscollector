@@ -91,7 +91,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     private async Task SaveAllStatsAsync()
     {
         var matchId = _matchTracker.CurrentMatch?.MatchId;
-        var snapshots = _playerSessions.CaptureSnapshots(matchId);
+        var snapshots = _playerSessions.CaptureSnapshots(true, matchId);
         if (snapshots.Length > 0)
         {
             await _statsPersistence.EnqueueAsync(snapshots, CancellationToken.None);

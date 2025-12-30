@@ -23,10 +23,8 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
 {
     private readonly ILogger<GameEventHandlerService> _logger;
     private readonly IPlayerSessionService _playerSessions;
-    private readonly ICombatEventProcessor _combatProcessor;
-    private readonly IUtilityEventProcessor _utilityProcessor;
-    private readonly IBombEventProcessor _bombProcessor;
-    private readonly IEconomyEventProcessor _economyProcessor;
+    private readonly IEventDispatcher _dispatcher;
+    private readonly IEnumerable<IEventProcessor> _processors;
     private readonly IMatchTrackingService _matchTracker;
     private readonly IStatsPersistenceService _statsPersistence;
     private readonly IStatsRepository _statsRepository;
@@ -34,6 +32,7 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
     private readonly IPauseService _pauseService;
     private readonly IRoundBackupService _roundBackup;
     private readonly IOptionsMonitor<PluginConfig> _configMonitor;
+    private readonly IAnalyticsService _analytics;
     private int _currentRoundNumber = 0;
 
     private PluginConfig _config => _configMonitor.CurrentValue;
@@ -41,24 +40,20 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
     public GameEventHandlerService(
         ILogger<GameEventHandlerService> logger,
         IPlayerSessionService playerSessions,
-        ICombatEventProcessor combatProcessor,
-        IUtilityEventProcessor utilityProcessor,
-        IBombEventProcessor bombProcessor,
-        IEconomyEventProcessor economyProcessor,
+        IEventDispatcher dispatcher,
+        IEnumerable<IEventProcessor> processors,
         IMatchTrackingService matchTracker,
         IStatsPersistenceService statsPersistence,
         IStatsRepository statsRepository,
         IScrimManager scrimManager,
         IPauseService pauseService,
         IRoundBackupService roundBackup,
-        IOptionsMonitor<PluginConfig> configMonitor)
+        IOptionsMonitor<PluginConfig> configMonitor,
+        IAnalyticsService analytics)
     {
         _logger = logger;
         _playerSessions = playerSessions;
-        _combatProcessor = combatProcessor;
-        _utilityProcessor = utilityProcessor;
-        _bombProcessor = bombProcessor;
-        _economyProcessor = economyProcessor;
+        _dispatcher = dispatcher;
         _matchTracker = matchTracker;
         _statsPersistence = statsPersistence;
         _statsRepository = statsRepository;
@@ -66,49 +61,54 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
         _pauseService = pauseService;
         _roundBackup = roundBackup;
         _configMonitor = configMonitor;
+        _analytics = analytics;
+        _processors = processors;
+
+        // Register all processors for event dispatching
+        foreach (var processor in _processors)
+        {
+            processor.RegisterEvents(_dispatcher);
+        }
     }
 
     public void RegisterEvents(BasePlugin plugin)
     {
-        // Player Lifecycle
+        // Player Lifecycle (Direct handling for core logic)
         plugin.RegisterEventHandler<EventPlayerConnect>(OnPlayerConnect);
         plugin.RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
         plugin.RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
         plugin.RegisterEventHandler<EventPlayerTeam>(OnPlayerTeam);
 
-        // Combat
-        plugin.RegisterEventHandler<EventPlayerDeath>(OnPlayerDeath);
-        plugin.RegisterEventHandler<EventPlayerHurt>(OnPlayerHurt);
-        plugin.RegisterEventHandler<EventWeaponFire>(OnWeaponFire);
-        plugin.RegisterEventHandler<EventBulletImpact>(OnBulletImpact);
-        plugin.RegisterEventHandler<EventRoundMvp>(OnRoundMvp);
-        plugin.RegisterEventHandler<EventPlayerAvengedTeammate>(OnPlayerAvengedTeammate);
-        plugin.RegisterEventHandler<EventPlayerSpawned>(OnPlayerSpawned);
+        // Map events to dispatcher via lambdas to decouple handler logic
+        plugin.RegisterEventHandler<EventPlayerDeath>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventPlayerHurt>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventWeaponFire>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventBulletImpact>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventRoundMvp>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventPlayerAvengedTeammate>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventPlayerSpawned>((e, i) => _dispatcher.Dispatch(e, i));
 
-        // Utility
-        plugin.RegisterEventHandler<EventPlayerBlind>(OnPlayerBlind);
-        plugin.RegisterEventHandler<EventHegrenadeDetonate>(OnHegrenadeDetonate);
-        plugin.RegisterEventHandler<EventFlashbangDetonate>(OnFlashbangDetonate);
-        plugin.RegisterEventHandler<EventSmokegrenadeDetonate>(OnSmokegrenadeDetonate);
-        plugin.RegisterEventHandler<EventMolotovDetonate>(OnMolotovDetonate);
+        plugin.RegisterEventHandler<EventPlayerBlind>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventHegrenadeDetonate>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventFlashbangDetonate>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventSmokegrenadeDetonate>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventMolotovDetonate>((e, i) => _dispatcher.Dispatch(e, i));
 
-        // Economy
-        plugin.RegisterEventHandler<EventItemPurchase>(OnItemPurchase);
-        plugin.RegisterEventHandler<EventItemPickup>(OnItemPickup);
-        plugin.RegisterEventHandler<EventItemEquip>(OnItemEquip);
+        plugin.RegisterEventHandler<EventItemPurchase>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventItemPickup>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventItemEquip>((e, i) => _dispatcher.Dispatch(e, i));
 
-        // Bomb
-        plugin.RegisterEventHandler<EventBombBeginplant>(OnBombBeginplant);
-        plugin.RegisterEventHandler<EventBombAbortplant>(OnBombAbortplant);
-        plugin.RegisterEventHandler<EventBombPlanted>(OnBombPlanted);
-        plugin.RegisterEventHandler<EventBombDefused>(OnBombDefused);
-        plugin.RegisterEventHandler<EventBombExploded>(OnBombExploded);
-        plugin.RegisterEventHandler<EventBombDropped>(OnBombDropped);
-        plugin.RegisterEventHandler<EventBombPickup>(OnBombPickup);
-        plugin.RegisterEventHandler<EventBombBegindefuse>(OnBombBegindefuse);
-        plugin.RegisterEventHandler<EventBombAbortdefuse>(OnBombAbortdefuse);
+        plugin.RegisterEventHandler<EventBombBeginplant>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventBombAbortplant>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventBombPlanted>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventBombDefused>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventBombExploded>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventBombDropped>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventBombPickup>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventBombBegindefuse>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventBombAbortdefuse>((e, i) => _dispatcher.Dispatch(e, i));
 
-        // Round
+        // Round events (Hybrid handling)
         plugin.RegisterEventHandler<EventRoundStart>(OnRoundStart);
         plugin.RegisterEventHandler<EventRoundEnd>(OnRoundEnd);
         plugin.RegisterEventHandler<EventRoundAnnounceMatchStart>(OnRoundAnnounceMatchStart);
@@ -176,11 +176,8 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
             _playerSessions.EnsurePlayer(player.SteamID, player.PlayerName);
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                lock (stats.SyncRoot)
-                {
-                    stats.TotalSpawns++;
-                    stats.PlaytimeSeconds = (int)(DateTime.UtcNow - new DateTime(2020, 1, 1)).TotalSeconds;
-                }
+                stats.TotalSpawns++;
+                stats.PlaytimeSeconds = (int)(DateTime.UtcNow - new DateTime(2020, 1, 1)).TotalSeconds;
             });
         }
         return HookResult.Continue;
@@ -194,116 +191,12 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
             var team = @event.GetIntValue("team", 0);
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                lock (stats.SyncRoot)
-                {
-                    if (team == 2) stats.TRounds++;
-                    else if (team == 3) stats.CtRounds++;
-                }
+                if (team == 2) stats.TRounds++;
+                else if (team == 3) stats.CtRounds++;
             });
         }
         return HookResult.Continue;
     }
-
-    private HookResult OnPlayerDeath(EventPlayerDeath @event, GameEventInfo info)
-    {
-        _combatProcessor.HandlePlayerDeath(@event);
-        _bombProcessor.HandlePlayerDeath(@event);
-        return HookResult.Continue;
-    }
-
-    private HookResult OnPlayerHurt(EventPlayerHurt @event, GameEventInfo info)
-    {
-        _combatProcessor.HandlePlayerHurt(@event);
-        return HookResult.Continue;
-    }
-
-    private HookResult OnWeaponFire(EventWeaponFire @event, GameEventInfo info)
-    {
-        _combatProcessor.HandleWeaponFire(@event);
-        return HookResult.Continue;
-    }
-
-    private HookResult OnBulletImpact(EventBulletImpact @event, GameEventInfo info)
-    {
-        _combatProcessor.HandleBulletImpact(@event);
-        return HookResult.Continue;
-    }
-
-    private HookResult OnRoundMvp(EventRoundMvp @event, GameEventInfo info)
-    {
-        _combatProcessor.HandleRoundMvp(@event);
-        return HookResult.Continue;
-    }
-
-    private HookResult OnPlayerAvengedTeammate(EventPlayerAvengedTeammate @event, GameEventInfo info)
-    {
-        _combatProcessor.HandlePlayerAvengedTeammate(@event);
-        return HookResult.Continue;
-    }
-
-    private HookResult OnPlayerSpawned(EventPlayerSpawned @event, GameEventInfo info)
-    {
-        _combatProcessor.HandlePlayerSpawned(@event);
-        return HookResult.Continue;
-    }
-
-    private HookResult OnPlayerBlind(EventPlayerBlind @event, GameEventInfo info)
-    {
-        _utilityProcessor.HandlePlayerBlind(@event);
-        return HookResult.Continue;
-    }
-
-    private HookResult OnHegrenadeDetonate(EventHegrenadeDetonate @event, GameEventInfo info)
-    {
-        _utilityProcessor.HandleHegrenadeDetonate(@event);
-        return HookResult.Continue;
-    }
-
-    private HookResult OnFlashbangDetonate(EventFlashbangDetonate @event, GameEventInfo info)
-    {
-        _utilityProcessor.HandleFlashbangDetonate(@event);
-        return HookResult.Continue;
-    }
-
-    private HookResult OnSmokegrenadeDetonate(EventSmokegrenadeDetonate @event, GameEventInfo info)
-    {
-        _utilityProcessor.HandleSmokegrenadeDetonate(@event);
-        return HookResult.Continue;
-    }
-
-    private HookResult OnMolotovDetonate(EventMolotovDetonate @event, GameEventInfo info)
-    {
-        _utilityProcessor.HandleMolotovDetonate(@event);
-        return HookResult.Continue;
-    }
-
-    private HookResult OnItemPurchase(EventItemPurchase @event, GameEventInfo info)
-    {
-        _economyProcessor.HandleItemPurchase(@event);
-        return HookResult.Continue;
-    }
-
-    private HookResult OnItemPickup(EventItemPickup @event, GameEventInfo info)
-    {
-        _economyProcessor.HandleItemPickup(@event);
-        return HookResult.Continue;
-    }
-
-    private HookResult OnItemEquip(EventItemEquip @event, GameEventInfo info)
-    {
-        _economyProcessor.HandleItemEquip(@event);
-        return HookResult.Continue;
-    }
-
-    private HookResult OnBombBeginplant(EventBombBeginplant @event, GameEventInfo info) { _bombProcessor.HandleBombBeginplant(@event); return HookResult.Continue; }
-    private HookResult OnBombAbortplant(EventBombAbortplant @event, GameEventInfo info) { _bombProcessor.HandleBombAbortplant(@event); return HookResult.Continue; }
-    private HookResult OnBombPlanted(EventBombPlanted @event, GameEventInfo info) { _bombProcessor.HandleBombPlanted(@event); return HookResult.Continue; }
-    private HookResult OnBombDefused(EventBombDefused @event, GameEventInfo info) { _bombProcessor.HandleBombDefused(@event); return HookResult.Continue; }
-    private HookResult OnBombExploded(EventBombExploded @event, GameEventInfo info) { _bombProcessor.HandleBombExploded(@event); return HookResult.Continue; }
-    private HookResult OnBombDropped(EventBombDropped @event, GameEventInfo info) { _bombProcessor.HandleBombDropped(@event); return HookResult.Continue; }
-    private HookResult OnBombPickup(EventBombPickup @event, GameEventInfo info) { _bombProcessor.HandleBombPickup(@event); return HookResult.Continue; }
-    private HookResult OnBombBegindefuse(EventBombBegindefuse @event, GameEventInfo info) { _bombProcessor.HandleBombBegindefuse(@event); return HookResult.Continue; }
-    private HookResult OnBombAbortdefuse(EventBombAbortdefuse @event, GameEventInfo info) { _bombProcessor.HandleBombAbortdefuse(@event); return HookResult.Continue; }
 
     private HookResult OnRoundAnnounceMatchStart(EventRoundAnnounceMatchStart @event, GameEventInfo info)
     {
@@ -324,17 +217,15 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
         var tAlive = 0;
         _playerSessions.ForEachPlayer(stats =>
         {
-            lock (stats.SyncRoot)
-            {
-                if (stats.CurrentTeam == PlayerTeam.CounterTerrorist) ctAlive++;
-                else if (stats.CurrentTeam == PlayerTeam.Terrorist) tAlive++;
-            }
+            if (stats.CurrentTeam == PlayerTeam.CounterTerrorist) ctAlive++;
+            else if (stats.CurrentTeam == PlayerTeam.Terrorist) tAlive++;
         });
 
-        _combatProcessor.SetRoundContext(_currentRoundNumber, roundStartUtc, ctAlive, tAlive);
-        _utilityProcessor.SetRoundContext(_currentRoundNumber, roundStartUtc);
-        _combatProcessor.ResetRoundStats();
-        _bombProcessor.ResetBombState();
+        var context = new RoundContext(_currentRoundNumber, roundStartUtc, ctAlive, tAlive);
+        foreach (var processor in _processors)
+        {
+            processor.OnRoundStart(context);
+        }
 
         // Snapshot at round start for backup/restore (captures starting money and scores)
         _roundBackup.CreateSnapshot(_currentRoundNumber);
@@ -346,14 +237,19 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
 
         _playerSessions.ForEachPlayer(stats =>
         {
-            lock (stats.SyncRoot)
+            stats.RoundNumber = _currentRoundNumber;
+            stats.RoundStartUtc = roundStartUtc;
+            stats.AliveOnTeamAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
+            stats.AliveEnemyAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
+            
+            var player = Utilities.GetPlayerFromSteamId(stats.SteamId);
+            if (player is { IsValid: true, InGameMoneyServices: not null })
             {
-                stats.RoundNumber = _currentRoundNumber;
-                stats.RoundStartUtc = roundStartUtc;
-                stats.AliveOnTeamAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
-                stats.AliveEnemyAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
-                stats.ResetRoundStats();
+                stats.RoundStartMoney = player.InGameMoneyServices.Account;
+                stats.EquipmentValueStart = stats.EquipmentValue;
             }
+            
+            stats.ResetRoundStats();
         });
 
         return HookResult.Continue;
@@ -374,22 +270,30 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
         }
 
         _pauseService.OnRoundEnd();
-        _combatProcessor.UpdateClutchStats(winningTeam);
+        var winReason = @event.GetIntValue("reason", 0);
+
+        foreach (var processor in _processors)
+        {
+            processor.OnRoundEnd(winningTeamInt, winReason);
+        }
+
         _playerSessions.ForEachPlayer(stats =>
         {
-            lock (stats.SyncRoot)
+            stats.RoundsPlayed++;
+            if (winningTeam != PlayerTeam.Spectator && stats.CurrentTeam == winningTeam) stats.RoundsWon++;
+            if (stats.HadKillThisRound || stats.HadAssistThisRound || stats.SurvivedThisRound || stats.DidTradeThisRound) stats.KASTRounds++;
+            
+            var player = Utilities.GetPlayerFromSteamId(stats.SteamId);
+            if (player is { IsValid: true, InGameMoneyServices: not null })
             {
-                stats.RoundsPlayed++;
-                if (winningTeam != PlayerTeam.Spectator && stats.CurrentTeam == winningTeam) stats.RoundsWon++;
-                if (stats.HadKillThisRound || stats.HadAssistThisRound || stats.SurvivedThisRound || stats.DidTradeThisRound) stats.KASTRounds++;
+                stats.RoundEndMoney = player.InGameMoneyServices.Account;
+                stats.EquipmentValueEnd = stats.EquipmentValue;
             }
         });
-
-        _bombProcessor.HandleRoundEnd(@event);
         
         if (_matchTracker.CurrentRoundId != null)
         {
-            SafeExecute(() => _matchTracker.EndRoundAsync(_matchTracker.CurrentRoundId.Value, winningTeamInt, @event.GetIntValue("reason", 0)), "EndRoundTracking");
+            SafeExecute(() => _matchTracker.EndRoundAsync(_matchTracker.CurrentRoundId.Value, winningTeamInt, winReason), "EndRoundTracking");
         }
 
         SafeExecute(SaveStatsAtRoundEndAsync, "SaveStatsAtRoundEnd");
@@ -399,7 +303,7 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
     private async Task SaveStatsAtRoundEndAsync()
     {
         var matchId = _matchTracker.CurrentMatch?.MatchId;
-        var snapshots = _playerSessions.CaptureSnapshots(matchId);
+        var snapshots = _playerSessions.CaptureSnapshots(true, matchId);
         if (snapshots.Length > 0) await _statsPersistence.EnqueueAsync(snapshots, default);
     }
     #endregion
@@ -413,9 +317,14 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
             return;
         }
 
-        if (_playerSessions.TryGetSnapshot(player.SteamID, out var snapshot))
+        if (_playerSessions.TryGetPlayer(player.SteamID, out var stats))
         {
-            player.PrintToChat($" [statsCollector] K:{snapshot.Kills} D:{snapshot.Deaths} A:{snapshot.Assists} ADR:{snapshot.AverageDamagePerRound:F0} Rating:{snapshot.HLTVRating:F2} Rank:{snapshot.GetPlayerRank()}");
+            var adr = _analytics.CalculateADR(stats);
+            var rating = _analytics.CalculateHLTVRating(stats);
+            var perfScore = _analytics.CalculatePerformanceScore(stats);
+            var rank = _analytics.GetPlayerRank(perfScore);
+            
+            player.PrintToChat($" [statsCollector] K:{stats.Kills} D:{stats.Deaths} A:{stats.Assists} ADR:{adr:F0} Rating:{rating:F2} Rank:{rank}");
         }
     }
 

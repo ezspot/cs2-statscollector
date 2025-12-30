@@ -1,17 +1,16 @@
-# statsCollector v1.6.0
+# statsCollector v1.7.0
 
 A high-performance CounterStrikeSharp plugin for CS2 that collects advanced player statistics with enterprise-grade architecture. Built for late 2025 standards using .NET 8+, Polly v8 Resilience, and full OpenTelemetry observability.
 
 ## Features
-- **Relational Match Tracking**: Automated `matches` and `rounds` management for league-style history.
-- **Accurate ADR Tracking**: Uses `player_hurt` events for precise damage calculation (not capped at 100 like death events).
+- **Relational Match Tracking**: Automated `matches` and `rounds` management with support for `SeriesUuid` (BO3/BO5).
+- **Decoupled Architecture**: Mediator pattern via `IEventDispatcher` for extensible, high-performance event processing.
+- **Dedicated Analytics**: Centralized `AnalyticsService` for precise HLTV Rating 2.0, Impact, KAST, and ADR calculations.
+- **Spatial Analytics (Heatmaps)**: High-resolution tracking using MySQL **POINT** types and **SPATIAL indexes** for optimized geometric queries.
+- **Optimized Persistence**: **Dirty Flag** pattern ensures only changed player data is flushed to the database, minimizing I/O.
+- **Accurate ADR Tracking**: Uses `player_hurt` events for precise damage calculation (not capped at 100).
 - **Enterprise Observability**: Full OpenTelemetry (OTEL) integration for traces and metrics.
-- **Structured Logging**: Serilog integration with daily rolling files and high-resolution tracing.
-- **Robust Persistence**: Polly v8 resilience pipelines with automated retries and circuit breakers.
-- **High Performance**: `System.Threading.Channels` and **Bulk Multi-row INSERTs** for high-throughput spatial tracking.
-- **Thread Safety**: Enterprise-standard locking and `Server.NextFrame` synchronization for main-loop integrity.
-- **Spatial Analytics (Heatmaps)**: High-resolution position tracking for kills, deaths, and utility usage.
-- **Advanced Analytics**: HLTV Rating 2.0, Impact, KAST, and Leetify-style metrics (Clutch win%, Entry success).
+- **Robust Resilience**: Polly v8 pipelines with automated retries and circuit breakers for all database operations.
 - **Tactical Pause System**: MatchZy-style `.pause` and `.unpause` with technical/tactical limits.
 - **Scrim Management**: Automated knife rounds, side selection, and captain-based picking.
 - **Round Backup & Restore**: `.restore <round>` to instantly roll back match state and scores.

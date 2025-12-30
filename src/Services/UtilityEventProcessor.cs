@@ -10,14 +10,8 @@ using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public interface IUtilityEventProcessor
+public interface IUtilityEventProcessor : IEventProcessor
 {
-    void SetRoundContext(int roundNumber, DateTime roundStartUtc);
-    void HandlePlayerBlind(EventPlayerBlind @event);
-    void HandleHegrenadeDetonate(EventHegrenadeDetonate @event);
-    void HandleFlashbangDetonate(EventFlashbangDetonate @event);
-    void HandleSmokegrenadeDetonate(EventSmokegrenadeDetonate @event);
-    void HandleMolotovDetonate(EventMolotovDetonate @event);
 }
 
 public sealed class UtilityEventProcessor : IUtilityEventProcessor
@@ -45,13 +39,22 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
         _mapData = mapData;
     }
 
-    public void SetRoundContext(int roundNumber, DateTime roundStartUtc)
+    public void OnRoundStart(RoundContext context)
     {
-        _currentRoundNumber = roundNumber;
-        _roundStartUtc = roundStartUtc;
+        _currentRoundNumber = context.RoundNumber;
+        _roundStartUtc = context.RoundStartUtc;
     }
 
-    public void HandlePlayerBlind(EventPlayerBlind @event)
+    public void RegisterEvents(IEventDispatcher dispatcher)
+    {
+        dispatcher.Subscribe<EventPlayerBlind>((e, i) => { HandlePlayerBlind(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventHegrenadeDetonate>((e, i) => { HandleHegrenadeDetonate(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventFlashbangDetonate>((e, i) => { HandleFlashbangDetonate(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventSmokegrenadeDetonate>((e, i) => { HandleSmokegrenadeDetonate(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventMolotovDetonate>((e, i) => { HandleMolotovDetonate(e); return HookResult.Continue; });
+    }
+
+    private void HandlePlayerBlind(EventPlayerBlind @event)
     {
         using var activity = Instrumentation.ActivitySource.StartActivity("HandlePlayerBlind");
         try
@@ -113,10 +116,10 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
         }
     }
 
-    public void HandleHegrenadeDetonate(EventHegrenadeDetonate @event) => TrackDetonation(@event, UtilityType.HeGrenade, "hegrenade");
-    public void HandleFlashbangDetonate(EventFlashbangDetonate @event) => TrackDetonation(@event, UtilityType.Flash, "flashbang");
-    public void HandleSmokegrenadeDetonate(EventSmokegrenadeDetonate @event) => TrackDetonation(@event, UtilityType.Smoke, "smokegrenade");
-    public void HandleMolotovDetonate(EventMolotovDetonate @event) => TrackDetonation(@event, UtilityType.Molotov, "molotov");
+    private void HandleHegrenadeDetonate(EventHegrenadeDetonate @event) => TrackDetonation(@event, UtilityType.HeGrenade, "hegrenade");
+    private void HandleFlashbangDetonate(EventFlashbangDetonate @event) => TrackDetonation(@event, UtilityType.Flash, "flashbang");
+    private void HandleSmokegrenadeDetonate(EventSmokegrenadeDetonate @event) => TrackDetonation(@event, UtilityType.Smoke, "smokegrenade");
+    private void HandleMolotovDetonate(EventMolotovDetonate @event) => TrackDetonation(@event, UtilityType.Molotov, "molotov");
 
     private void TrackDetonation(GameEvent @event, UtilityType type, string typeName)
     {

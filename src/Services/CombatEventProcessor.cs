@@ -15,18 +15,8 @@ using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public interface ICombatEventProcessor
+public interface ICombatEventProcessor : IEventProcessor
 {
-    void SetRoundContext(int roundNumber, DateTime roundStartUtc, int ctAlive, int tAlive);
-    void HandlePlayerDeath(EventPlayerDeath @event);
-    void HandlePlayerHurt(EventPlayerHurt @event);
-    void HandleWeaponFire(EventWeaponFire @event);
-    void HandleBulletImpact(EventBulletImpact @event);
-    void HandleRoundMvp(EventRoundMvp @event);
-    void HandlePlayerAvengedTeammate(EventPlayerAvengedTeammate @event);
-    void HandlePlayerSpawned(EventPlayerSpawned @event);
-    void ResetRoundStats();
-    void UpdateClutchStats(PlayerTeam winningTeam);
     (int CtAlive, int TAlive) GetAliveCounts();
 }
 
@@ -84,12 +74,19 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         _matchTracker = matchTracker;
     }
 
-    public void SetRoundContext(int roundNumber, DateTime roundStartUtc, int ctAlive, int tAlive)
+    public void OnRoundStart(RoundContext context)
     {
-        _currentRoundNumber = roundNumber;
-        _currentRoundStartUtc = roundStartUtc;
-        _ctAliveAtStart = ctAlive;
-        _tAliveAtStart = tAlive;
+        _currentRoundNumber = context.RoundNumber;
+        _currentRoundStartUtc = context.RoundStartUtc;
+        _ctAliveAtStart = context.CtAliveAtStart;
+        _tAliveAtStart = context.TAliveAtStart;
+        ResetRoundStats();
+    }
+
+    public void OnRoundEnd(int winnerTeam, int winReason)
+    {
+        var winningTeam = winnerTeam switch { 2 => PlayerTeam.Terrorist, 3 => PlayerTeam.CounterTerrorist, _ => PlayerTeam.Spectator };
+        UpdateClutchStats(winningTeam);
     }
 
     private PlayerTeam GetTeam(CCSPlayerController? player)
@@ -98,7 +95,18 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         return player.TeamNum switch { 2 => PlayerTeam.Terrorist, 3 => PlayerTeam.CounterTerrorist, _ => PlayerTeam.Spectator };
     }
 
-    public void HandlePlayerDeath(EventPlayerDeath @event)
+    public void RegisterEvents(IEventDispatcher dispatcher)
+    {
+        dispatcher.Subscribe<EventPlayerDeath>((e, i) => { HandlePlayerDeath(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventPlayerHurt>((e, i) => { HandlePlayerHurt(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventWeaponFire>((e, i) => { HandleWeaponFire(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventBulletImpact>((e, i) => { HandleBulletImpact(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventRoundMvp>((e, i) => { HandleRoundMvp(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventPlayerAvengedTeammate>((e, i) => { HandlePlayerAvengedTeammate(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventPlayerSpawned>((e, i) => { HandlePlayerSpawned(e); return HookResult.Continue; });
+    }
+
+    private void HandlePlayerDeath(EventPlayerDeath @event)
     {
         using var activity = Instrumentation.ActivitySource.StartActivity("HandlePlayerDeath");
         try
@@ -270,7 +278,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                         stats.CurrentRoundKills++;
                         // stats.DamageDealt += damage; // Removed: damage is now accumulated in HandlePlayerHurt
                         stats.Headshots += isHeadshot ? 1 : 0;
-                        stats.WeaponKills[weaponName] = stats.WeaponKills.GetValueOrDefault(weaponName, 0) + 1;
+                        stats.AddWeaponKill(weaponName);
                         stats.CurrentTeam = attackerTeam;
 
                         if (isRevengeKill) stats.Revenges++;
@@ -326,7 +334,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         }
     }
 
-    public void HandlePlayerHurt(EventPlayerHurt @event)
+    private void HandlePlayerHurt(EventPlayerHurt @event)
     {
         try
         {
@@ -357,7 +365,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     {
                         stats.DamageDealt += damage;
                         stats.DamageArmor += damageArmor;
-                        stats.WeaponHits[weapon] = stats.WeaponHits.GetValueOrDefault(weapon, 0) + 1;
+                        stats.AddWeaponHit(weapon);
                         switch (hitgroup)
                         {
                             case 1: stats.HeadshotsHit++; break;
@@ -375,7 +383,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         catch (Exception ex) { _logger.LogError(ex, "Error handling player hurt event"); }
     }
 
-    public void HandleWeaponFire(EventWeaponFire @event)
+    private void HandleWeaponFire(EventWeaponFire @event)
     {
         try
         {
@@ -387,7 +395,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             {
                 stats.ShotsFired++;
                 stats.CurrentRoundShotsFired++;
-                stats.WeaponShots[weapon] = stats.WeaponShots.GetValueOrDefault(weapon, 0) + 1;
+                stats.AddWeaponShot(weapon);
                 if (GrenadeWeaponNames.Contains(weaponLower))
                 {
                     stats.GrenadesThrown++;
@@ -406,9 +414,9 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         catch (Exception ex) { _logger.LogError(ex, "Error handling weapon fire event"); }
     }
 
-    public void HandleBulletImpact(EventBulletImpact @event) { }
+    private void HandleBulletImpact(EventBulletImpact @event) { }
 
-    public void HandleRoundMvp(EventRoundMvp @event)
+    private void HandleRoundMvp(EventRoundMvp @event)
     {
         try
         {
@@ -426,7 +434,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         catch (Exception ex) { _logger.LogError(ex, "Error handling round MVP event"); }
     }
 
-    public void HandlePlayerAvengedTeammate(EventPlayerAvengedTeammate @event)
+    private void HandlePlayerAvengedTeammate(EventPlayerAvengedTeammate @event)
     {
         try
         {
@@ -436,7 +444,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         catch (Exception ex) { _logger.LogError(ex, "Error handling player avenged teammate event"); }
     }
 
-    public void HandlePlayerSpawned(EventPlayerSpawned @event)
+    private void HandlePlayerSpawned(EventPlayerSpawned @event)
     {
         try
         {

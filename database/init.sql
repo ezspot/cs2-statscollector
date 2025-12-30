@@ -21,11 +21,13 @@ CREATE TABLE IF NOT EXISTS players (
 CREATE TABLE IF NOT EXISTS matches (
     id INT AUTO_INCREMENT PRIMARY KEY,
     match_uuid VARCHAR(36) UNIQUE NOT NULL,
+    series_uuid VARCHAR(36) NULL,
     map_name VARCHAR(100) NOT NULL,
     start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     end_time TIMESTAMP NULL,
     status ENUM('IN_PROGRESS', 'COMPLETED', 'ABORTED') DEFAULT 'IN_PROGRESS',
-    INDEX idx_matches_time (start_time)
+    INDEX idx_matches_time (start_time),
+    INDEX idx_matches_series (series_uuid)
 ) ENGINE=InnoDB;
 
 -- 2. Tables with dependencies
@@ -89,6 +91,11 @@ CREATE TABLE IF NOT EXISTS player_stats (
     items_dropped INT DEFAULT 0,
     cash_earned INT DEFAULT 0,
     cash_spent INT DEFAULT 0,
+    loss_bonus INT DEFAULT 0,
+    round_start_money INT DEFAULT 0,
+    round_end_money INT DEFAULT 0,
+    equipment_value_start INT DEFAULT 0,
+    equipment_value_end INT DEFAULT 0,
     enemies_flashed INT DEFAULT 0,
     teammates_flashed INT DEFAULT 0,
     effective_flashes INT DEFAULT 0,
@@ -241,11 +248,9 @@ CREATE TABLE IF NOT EXISTS kill_positions (
     match_id INT,
     killer_steam_id BIGINT NOT NULL,
     victim_steam_id BIGINT NOT NULL,
-    killer_x FLOAT NOT NULL,
-    killer_y FLOAT NOT NULL,
+    killer_pos POINT NOT NULL SRID 0,
     killer_z FLOAT NOT NULL,
-    victim_x FLOAT NOT NULL,
-    victim_y FLOAT NOT NULL,
+    victim_pos POINT NOT NULL SRID 0,
     victim_z FLOAT NOT NULL,
     weapon_used VARCHAR(100),
     is_headshot BOOLEAN DEFAULT FALSE,
@@ -259,6 +264,8 @@ CREATE TABLE IF NOT EXISTS kill_positions (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (killer_steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
     FOREIGN KEY (victim_steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
+    SPATIAL INDEX idx_kill_pos_killer (killer_pos),
+    SPATIAL INDEX idx_kill_pos_victim (victim_pos),
     INDEX idx_kill_pos_map (map_name)
 ) ENGINE=InnoDB;
 
@@ -266,8 +273,7 @@ CREATE TABLE IF NOT EXISTS death_positions (
     id INT AUTO_INCREMENT PRIMARY KEY,
     match_id INT,
     steam_id BIGINT NOT NULL,
-    x FLOAT NOT NULL,
-    y FLOAT NOT NULL,
+    pos POINT NOT NULL SRID 0,
     z FLOAT NOT NULL,
     cause_of_death VARCHAR(100),
     is_headshot BOOLEAN DEFAULT FALSE,
@@ -277,6 +283,7 @@ CREATE TABLE IF NOT EXISTS death_positions (
     round_time_seconds INT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
+    SPATIAL INDEX idx_death_pos_spatial (pos),
     INDEX idx_death_pos_map (map_name)
 ) ENGINE=InnoDB;
 
@@ -284,11 +291,9 @@ CREATE TABLE IF NOT EXISTS utility_positions (
     id INT AUTO_INCREMENT PRIMARY KEY,
     match_id INT,
     steam_id BIGINT NOT NULL,
-    throw_x FLOAT NOT NULL,
-    throw_y FLOAT NOT NULL,
+    throw_pos POINT NOT NULL SRID 0,
     throw_z FLOAT NOT NULL,
-    land_x FLOAT NOT NULL,
-    land_y FLOAT NOT NULL,
+    land_pos POINT NOT NULL SRID 0,
     land_z FLOAT NOT NULL,
     utility_type INT NOT NULL,
     opponents_affected INT DEFAULT 0,
@@ -299,6 +304,8 @@ CREATE TABLE IF NOT EXISTS utility_positions (
     round_time_seconds INT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
+    SPATIAL INDEX idx_utility_pos_throw (throw_pos),
+    SPATIAL INDEX idx_utility_pos_land (land_pos),
     INDEX idx_utility_pos_map (map_name)
 ) ENGINE=InnoDB;
 

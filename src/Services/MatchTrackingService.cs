@@ -7,11 +7,11 @@ using Dapper;
 
 namespace statsCollector.Services;
 
-public record MatchContext(int MatchId, string MatchUuid, string MapName);
+public record MatchContext(int MatchId, string MatchUuid, string MapName, string? SeriesUuid = null);
 
 public interface IMatchTrackingService
 {
-    Task<MatchContext> StartMatchAsync(string mapName, CancellationToken ct = default);
+    Task<MatchContext> StartMatchAsync(string mapName, string? seriesUuid = null, CancellationToken ct = default);
     Task EndMatchAsync(int matchId, CancellationToken ct = default);
     Task<int> StartRoundAsync(int matchId, int roundNumber, CancellationToken ct = default);
     Task EndRoundAsync(int roundId, int winnerTeam, int winType, CancellationToken ct = default);
@@ -36,16 +36,16 @@ public sealed class MatchTrackingService : IMatchTrackingService
         _logger = logger;
     }
 
-    public async Task<MatchContext> StartMatchAsync(string mapName, CancellationToken ct = default)
+    public async Task<MatchContext> StartMatchAsync(string mapName, string? seriesUuid = null, CancellationToken ct = default)
     {
         var uuid = Guid.NewGuid().ToString();
-        _logger.LogInformation("Starting new match tracking: {Uuid} on {Map}", uuid, mapName);
+        _logger.LogInformation("Starting new match tracking: {Uuid} (Series: {Series}) on {Map}", uuid, seriesUuid ?? "None", mapName);
 
         await using var connection = await _connectionFactory.CreateConnectionAsync(ct);
-        const string sql = "INSERT INTO matches (match_uuid, map_name, status) VALUES (@Uuid, @MapName, 'IN_PROGRESS'); SELECT LAST_INSERT_ID();";
+        const string sql = "INSERT INTO matches (match_uuid, series_uuid, map_name, status) VALUES (@Uuid, @SeriesUuid, @MapName, 'IN_PROGRESS'); SELECT LAST_INSERT_ID();";
         
-        var id = await connection.ExecuteScalarAsync<int>(sql, new { Uuid = uuid, MapName = mapName });
-        _currentMatch = new MatchContext(id, uuid, mapName);
+        var id = await connection.ExecuteScalarAsync<int>(sql, new { Uuid = uuid, SeriesUuid = seriesUuid, MapName = mapName });
+        _currentMatch = new MatchContext(id, uuid, mapName, seriesUuid);
         _currentRoundId = null;
         
         return _currentMatch;

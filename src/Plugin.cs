@@ -140,13 +140,24 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         });
 
         services.AddSingleton<IConnectionFactory, ConnectionFactory>();
+        services.AddSingleton<IEventDispatcher, EventDispatcher>();
+        services.AddSingleton<IAnalyticsService, AnalyticsService>();
         services.AddSingleton<IMatchTrackingService, MatchTrackingService>();
         services.AddSingleton<IPlayerSessionService, PlayerSessionService>();
         services.AddTransient<IStatsRepository, StatsRepository>();
-        services.AddTransient<ICombatEventProcessor, CombatEventProcessor>();
-        services.AddTransient<IUtilityEventProcessor, UtilityEventProcessor>();
-        services.AddTransient<IBombEventProcessor, BombEventProcessor>();
-        services.AddTransient<IEconomyEventProcessor, EconomyEventProcessor>();
+        
+        // Register Event Processors for automated discovery
+        services.AddTransient<IEventProcessor, CombatEventProcessor>();
+        services.AddTransient<IEventProcessor, UtilityEventProcessor>();
+        services.AddTransient<IEventProcessor, BombEventProcessor>();
+        services.AddTransient<IEventProcessor, EconomyEventProcessor>();
+
+        // Specific interface registrations for direct usage if needed
+        services.AddTransient<ICombatEventProcessor>(sp => (ICombatEventProcessor)sp.GetRequiredService<IEnumerable<IEventProcessor>>().First(p => p is CombatEventProcessor));
+        services.AddTransient<IUtilityEventProcessor>(sp => (IUtilityEventProcessor)sp.GetRequiredService<IEnumerable<IEventProcessor>>().First(p => p is UtilityEventProcessor));
+        services.AddTransient<IBombEventProcessor>(sp => (IBombEventProcessor)sp.GetRequiredService<IEnumerable<IEventProcessor>>().First(p => p is BombEventProcessor));
+        services.AddTransient<IEconomyEventProcessor>(sp => (IEconomyEventProcessor)sp.GetRequiredService<IEnumerable<IEventProcessor>>().First(p => p is EconomyEventProcessor));
+
         services.AddTransient<IPositionTrackingService, PositionTrackingService>();
         services.AddSingleton<IPositionPersistenceService, PositionPersistenceService>();
         services.AddSingleton<IStatsPersistenceService, StatsPersistenceService>();
@@ -158,6 +169,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddSingleton<IRoundBackupService, RoundBackupService>();
         services.AddSingleton<IScrimManager, ScrimManager>();
         services.AddSingleton<IPluginLifecycleService, PluginLifecycleService>();
+        services.AddSingleton<IGameEventHandlerService, GameEventHandlerService>();
 
         _serviceProvider = services.BuildServiceProvider();
 

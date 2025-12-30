@@ -400,15 +400,14 @@ public class ScrimManager : IScrimManager
         _knifeWinnerTeam = winnerTeam;
         var winnerName = winnerTeam == 2 ? "Terrorists" : "Counter-Terrorists";
         
-        Server.NextFrame(() => 
+        Server.NextFrame(async () => 
         {
             Server.PrintToChatAll($" [Scrim] {winnerName} won the knife round!");
             
-            // Find a captain from the winning team to make the choice
             var winningCaptainId = winnerTeam == 2 ? _team1.FirstOrDefault() : _team2.FirstOrDefault();
             if (winningCaptainId == 0) 
             {
-                _ = _machine.FireAsync(ScrimTrigger.KnifeRoundFinished);
+                await _machine.FireAsync(ScrimTrigger.KnifeRoundFinished);
                 return;
             }
 
@@ -418,13 +417,15 @@ public class ScrimManager : IScrimManager
             _sideSelectionTimer = new CounterStrikeSharp.API.Modules.Timers.Timer(30.0f, () => 
             {
                 _logger.LogInformation("Side selection timed out. Auto-assigning sides.");
-                Server.NextFrame(() => 
+                Server.NextFrame(async () => 
                 {
                     Server.PrintToChatAll(" [Scrim] Side selection timed out. Proceeding with current sides.");
-                    _ = _machine.FireAsync(ScrimTrigger.KnifeRoundFinished);
+                    await _machine.FireAsync(ScrimTrigger.KnifeRoundFinished);
                 });
             });
         });
+
+        await Task.CompletedTask;
     }
 
     public async Task SelectSideAsync(ulong steamId, string side)
@@ -434,7 +435,7 @@ public class ScrimManager : IScrimManager
         var winningCaptainId = _knifeWinnerTeam == 2 ? _team1.FirstOrDefault() : _team2.FirstOrDefault();
         if (steamId != winningCaptainId) return;
 
-        Server.NextFrame(() => 
+        Server.NextFrame(async () => 
         {
             _sideSelectionTimer?.Kill();
 
@@ -442,7 +443,6 @@ public class ScrimManager : IScrimManager
             
             if (!stay)
             {
-                // Swap rosters to reflect new sides
                 var temp = new List<ulong>(_team1);
                 _team1.Clear();
                 _team1.AddRange(_team2);
@@ -459,8 +459,10 @@ public class ScrimManager : IScrimManager
             }
 
             Server.PrintToChatAll($" [Scrim] Side selected: {side.ToUpper()}. Match starting...");
-            _ = _machine.FireAsync(ScrimTrigger.KnifeRoundFinished);
+            await _machine.FireAsync(ScrimTrigger.KnifeRoundFinished);
         });
+
+        await Task.CompletedTask;
     }
 
     public async Task SetPracticeModeAsync(bool enabled)

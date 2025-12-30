@@ -165,15 +165,32 @@ public sealed class PositionTrackingService : IPositionTrackingService
         int roundTime,
         CancellationToken cancellationToken = default)
     {
-        var distance = CalculateDistance(killerPos, victimPos);
-        await BulkTrackKillPositionsAsync(matchId, [new KillPositionEvent(
-            matchId,
-            killerSteamId, victimSteamId, 
-            killerPos.X, killerPos.Y, killerPos.Z,
-            victimPos.X, victimPos.Y, victimPos.Z,
-            weapon, isHeadshot, isWallbang,
-            distance, killerTeam, victimTeam,
-            mapName, roundNumber, roundTime)], cancellationToken).ConfigureAwait(false);
+        await _resiliencePipeline.ExecuteAsync(async ct => 
+        {
+            using var activity = Instrumentation.ActivitySource.StartActivity("TrackKillPositionAsync");
+            const string sql = """
+                INSERT INTO kill_positions 
+                (match_id, killer_steam_id, victim_steam_id, killer_pos, killer_z, 
+                 victim_pos, victim_z, weapon_used, is_headshot, is_wallbang,
+                 distance, killer_team, victim_team, map_name, round_number, round_time_seconds)
+                VALUES 
+                (@MatchId, @KS, @VS, POINT(@KX, @KY), @KZ, POINT(@VX, @VY), @VZ, @W, @HS, @WB, @D, @KT, @VT, @M, @RN, @RT)
+                """;
+
+            var distance = CalculateDistance(killerPos, victimPos);
+            var parameters = new {
+                MatchId = matchId,
+                KS = killerSteamId, VS = victimSteamId,
+                KX = killerPos.X, KY = killerPos.Y, KZ = killerPos.Z,
+                VX = victimPos.X, VY = victimPos.Y, VZ = victimPos.Z,
+                W = weapon, HS = isHeadshot, WB = isWallbang,
+                D = distance, KT = killerTeam, VT = victimTeam,
+                M = mapName, RN = roundNumber, RT = roundTime
+            };
+
+            await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)).ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task BulkTrackKillPositionsAsync(int? matchId, IEnumerable<KillPositionEvent> events, CancellationToken cancellationToken = default)
@@ -189,8 +206,8 @@ public sealed class PositionTrackingService : IPositionTrackingService
             {
                 const string sqlBase = """
                     INSERT INTO kill_positions 
-                    (match_id, killer_steam_id, victim_steam_id, killer_x, killer_y, killer_z, 
-                     victim_x, victim_y, victim_z, weapon_used, is_headshot, is_wallbang,
+                    (match_id, killer_steam_id, victim_steam_id, killer_pos, killer_z, 
+                     victim_pos, victim_z, weapon_used, is_headshot, is_wallbang,
                      distance, killer_team, victim_team, map_name, round_number, round_time_seconds)
                     VALUES 
                     """;
@@ -200,7 +217,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 for (int i = 0; i < eventList.Count; i++)
                 {
                     var e = eventList[i];
-                    rows.Add($"(@MatchId{i}, @KS{i}, @VS{i}, @KX{i}, @KY{i}, @KZ{i}, @VX{i}, @VY{i}, @VZ{i}, @W{i}, @HS{i}, @WB{i}, @D{i}, @KT{i}, @VT{i}, @M{i}, @RN{i}, @RT{i})");
+                    rows.Add($"(@MatchId{i}, @KS{i}, @VS{i}, POINT(@KX{i}, @KY{i}), @KZ{i}, POINT(@VX{i}, @VY{i}), @VZ{i}, @W{i}, @HS{i}, @WB{i}, @D{i}, @KT{i}, @VT{i}, @M{i}, @RN{i}, @RT{i})");
                     parameters.Add($"MatchId{i}", matchId);
                     parameters.Add($"KS{i}", e.KillerSteamId);
                     parameters.Add($"VS{i}", e.VictimSteamId);
@@ -248,11 +265,26 @@ public sealed class PositionTrackingService : IPositionTrackingService
         int roundTime,
         CancellationToken cancellationToken = default)
     {
-        await BulkTrackDeathPositionsAsync(matchId, [new DeathPositionEvent(
-            matchId,
-            steamId, position.X, position.Y, position.Z,
-            causeOfDeath, isHeadshot, team,
-            mapName, roundNumber, roundTime)], cancellationToken).ConfigureAwait(false);
+        await _resiliencePipeline.ExecuteAsync(async ct => 
+        {
+            using var activity = Instrumentation.ActivitySource.StartActivity("TrackDeathPositionAsync");
+            const string sql = """
+                INSERT INTO death_positions 
+                (match_id, steam_id, pos, z, cause_of_death, is_headshot, team, map_name, round_number, round_time_seconds)
+                VALUES 
+                (@MatchId, @S, POINT(@X, @Y), @Z, @C, @HS, @T, @M, @RN, @RT)
+                """;
+
+            var parameters = new {
+                MatchId = matchId, S = steamId,
+                X = position.X, Y = position.Y, Z = position.Z,
+                C = causeOfDeath, HS = isHeadshot, T = team,
+                M = mapName, RN = roundNumber, RT = roundTime
+            };
+
+            await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)).ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task BulkTrackDeathPositionsAsync(int? matchId, IEnumerable<DeathPositionEvent> events, CancellationToken cancellationToken = default)
@@ -268,7 +300,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
             {
                 const string sqlBase = """
                     INSERT INTO death_positions 
-                    (match_id, steam_id, x, y, z, cause_of_death, is_headshot, team, map_name, round_number, round_time_seconds)
+                    (match_id, steam_id, pos, z, cause_of_death, is_headshot, team, map_name, round_number, round_time_seconds)
                     VALUES 
                     """;
 
@@ -277,7 +309,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 for (int i = 0; i < eventList.Count; i++)
                 {
                     var e = eventList[i];
-                    rows.Add($"(@MatchId{i}, @S{i}, @X{i}, @Y{i}, @Z{i}, @C{i}, @HS{i}, @T{i}, @M{i}, @RN{i}, @RT{i})");
+                    rows.Add($"(@MatchId{i}, @S{i}, POINT(@X{i}, @Y{i}), @Z{i}, @C{i}, @HS{i}, @T{i}, @M{i}, @RN{i}, @RT{i})");
                     parameters.Add($"MatchId{i}", matchId);
                     parameters.Add($"S{i}", e.SteamId);
                     parameters.Add($"X{i}", e.X);
@@ -320,12 +352,32 @@ public sealed class PositionTrackingService : IPositionTrackingService
         int roundTime,
         CancellationToken cancellationToken = default)
     {
-        await BulkTrackUtilityPositionsAsync(matchId, [new UtilityPositionEvent(
-            matchId,
-            steamId, throwPos.X, throwPos.Y, throwPos.Z,
-            landPos.X, landPos.Y, landPos.Z,
-            utilityType, opponentsAffected, teammatesAffected,
-            damage, mapName, roundNumber, roundTime)], cancellationToken).ConfigureAwait(false);
+        await _resiliencePipeline.ExecuteAsync(async ct => 
+        {
+            using var activity = Instrumentation.ActivitySource.StartActivity("TrackUtilityPositionAsync");
+            const string sql = """
+                INSERT INTO utility_positions 
+                (match_id, steam_id, throw_pos, throw_z, land_pos, land_z,
+                 utility_type, opponents_affected, teammates_affected, damage,
+                 map_name, round_number, round_time_seconds)
+                VALUES 
+                (@MatchId, @SteamId, POINT(@ThrowX, @ThrowY), @ThrowZ, POINT(@LandX, @LandY), @LandZ,
+                 @UtilityType, @OpponentsAffected, @TeammatesAffected, @Damage,
+                 @MapName, @RoundNumber, @RoundTime)
+                """;
+
+            var parameters = new {
+                MatchId = matchId, SteamId = steamId,
+                ThrowX = throwPos.X, ThrowY = throwPos.Y, ThrowZ = throwPos.Z,
+                LandX = landPos.X, LandY = landPos.Y, LandZ = landPos.Z,
+                UtilityType = utilityType, OpponentsAffected = opponentsAffected,
+                TeammatesAffected = teammatesAffected, Damage = damage,
+                MapName = mapName, RoundNumber = roundNumber, RoundTime = roundTime
+            };
+
+            await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)).ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task BulkTrackUtilityPositionsAsync(int? matchId, IEnumerable<UtilityPositionEvent> events, CancellationToken cancellationToken = default)
@@ -341,11 +393,11 @@ public sealed class PositionTrackingService : IPositionTrackingService
             {
                 const string sql = """
                     INSERT INTO utility_positions 
-                    (match_id, steam_id, throw_x, throw_y, throw_z, land_x, land_y, land_z,
+                    (match_id, steam_id, throw_pos, throw_z, land_pos, land_z,
                      utility_type, opponents_affected, teammates_affected, damage,
                      map_name, round_number, round_time_seconds)
                     VALUES 
-                    (@MatchId, @SteamId, @ThrowX, @ThrowY, @ThrowZ, @LandX, @LandY, @LandZ,
+                    (@MatchId, @SteamId, POINT(@ThrowX, @ThrowY), @ThrowZ, POINT(@LandX, @LandY), @LandZ,
                      @UtilityType, @OpponentsAffected, @TeammatesAffected, @Damage,
                      @MapName, @RoundNumber, @RoundTime)
                     """;

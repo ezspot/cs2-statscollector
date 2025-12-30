@@ -16,7 +16,7 @@ public interface IPlayerSessionService
     void MutatePlayer(ulong steamId, Action<PlayerStats> mutation);
     T WithPlayer<T>(ulong steamId, Func<PlayerStats, T> accessor, T defaultValue = default!);
     void ForEachPlayer(Action<PlayerStats> action);
-    PlayerSnapshot[] CaptureSnapshots(int? matchId = null);
+    PlayerSnapshot[] CaptureSnapshots(bool onlyDirty = false, int? matchId = null);
     IReadOnlyCollection<ulong> GetActiveSteamIds();
     bool TryGetSnapshot(ulong steamId, out PlayerSnapshot snapshot, int? matchId = null);
 }
@@ -26,9 +26,12 @@ public sealed class PlayerSessionService : IPlayerSessionService
     private readonly ConcurrentDictionary<ulong, PlayerStats> _playerStats = [];
     private readonly ILogger<PlayerSessionService> _logger;
 
-    public PlayerSessionService(ILogger<PlayerSessionService> logger)
+    private readonly IAnalyticsService _analytics;
+
+    public PlayerSessionService(ILogger<PlayerSessionService> logger, IAnalyticsService analytics)
     {
         _logger = logger;
+        _analytics = analytics;
     }
 
     public PlayerStats EnsurePlayer(ulong steamId, string name)
@@ -96,9 +99,21 @@ public sealed class PlayerSessionService : IPlayerSessionService
         }
     }
 
-    public PlayerSnapshot[] CaptureSnapshots(int? matchId = null)
+    public PlayerSnapshot[] CaptureSnapshots(bool onlyDirty = false, int? matchId = null)
     {
-        return _playerStats.Values.Select(s => s.ToSnapshot(matchId)).ToArray();
+        var snapshots = new List<PlayerSnapshot>();
+        foreach (var stats in _playerStats.Values)
+        {
+            lock (stats.SyncRoot)
+            {
+                if (!onlyDirty || stats.IsDirty)
+                {
+                    snapshots.Add(_analytics.CreateSnapshot(stats, matchId));
+                    if (onlyDirty) stats.ClearDirty();
+                }
+            }
+        }
+        return snapshots.ToArray();
     }
 
     public IReadOnlyCollection<ulong> GetActiveSteamIds() => _playerStats.Keys.ToArray();
@@ -107,7 +122,7 @@ public sealed class PlayerSessionService : IPlayerSessionService
     {
         if (_playerStats.TryGetValue(steamId, out var stats))
         {
-            snapshot = stats.ToSnapshot(matchId);
+            snapshot = _analytics.CreateSnapshot(stats, matchId);
             return true;
         }
         snapshot = null!;

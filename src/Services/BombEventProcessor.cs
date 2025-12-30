@@ -10,22 +10,8 @@ using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public interface IBombEventProcessor
+public interface IBombEventProcessor : IEventProcessor
 {
-    void HandleBombBeginplant(EventBombBeginplant @event);
-    void HandleBombAbortplant(EventBombAbortplant @event);
-    void HandleBombPlanted(EventBombPlanted @event);
-    void HandleBombDefused(EventBombDefused @event);
-    void HandleBombExploded(EventBombExploded @event);
-    void HandleBombDropped(EventBombDropped @event);
-    void HandleBombPickup(EventBombPickup @event);
-    void HandleBombBegindefuse(EventBombBegindefuse @event);
-    void HandleBombAbortdefuse(EventBombAbortdefuse @event);
-    void HandleDefuserDropped(EventDefuserDropped @event);
-    void HandleDefuserPickup(EventDefuserPickup @event);
-    void HandleBombBeep(EventBombBeep @event);
-    void HandlePlayerDeath(EventPlayerDeath @event);
-    void HandleRoundEnd(EventRoundEnd @event);
     void ResetBombState();
 }
 
@@ -53,7 +39,23 @@ public sealed class BombEventProcessor : IBombEventProcessor
         _timeProvider = timeProvider;
     }
 
-    public void HandleBombBeginplant(EventBombBeginplant @event)
+    public void RegisterEvents(IEventDispatcher dispatcher)
+    {
+        dispatcher.Subscribe<EventBombBeginplant>((e, i) => { HandleBombBeginplant(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventBombAbortplant>((e, i) => { HandleBombAbortplant(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventBombPlanted>((e, i) => { HandleBombPlanted(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventBombDefused>((e, i) => { HandleBombDefused(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventBombExploded>((e, i) => { HandleBombExploded(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventBombDropped>((e, i) => { HandleBombDropped(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventBombPickup>((e, i) => { HandleBombPickup(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventBombBegindefuse>((e, i) => { HandleBombBegindefuse(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventBombAbortdefuse>((e, i) => { HandleBombAbortdefuse(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventDefuserDropped>((e, i) => { HandleDefuserDropped(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventDefuserPickup>((e, i) => { HandleDefuserPickup(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventPlayerDeath>((e, i) => { HandlePlayerDeath(e); return HookResult.Continue; });
+    }
+
+    private void HandleBombBeginplant(EventBombBeginplant @event)
     {
         using var activity = Instrumentation.ActivitySource.StartActivity("HandleBombBeginplant");
         try
@@ -76,7 +78,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         catch (Exception ex) { _logger.LogError(ex, "Error handling bomb beginplant event"); }
     }
 
-    public void HandleBombAbortplant(EventBombAbortplant @event)
+    private void HandleBombAbortplant(EventBombAbortplant @event)
     {
         try
         {
@@ -98,7 +100,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         catch (Exception ex) { _logger.LogError(ex, "Error handling bomb abortplant event"); }
     }
 
-    public void HandleBombPlanted(EventBombPlanted @event)
+    private void HandleBombPlanted(EventBombPlanted @event)
     {
         using var activity = Instrumentation.ActivitySource.StartActivity("HandleBombPlanted");
         try
@@ -127,7 +129,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         catch (Exception ex) { _logger.LogError(ex, "Error handling bomb planted event"); }
     }
 
-    public void HandleBombDefused(EventBombDefused @event)
+    private void HandleBombDefused(EventBombDefused @event)
     {
         using var activity = Instrumentation.ActivitySource.StartActivity("HandleBombDefused");
         try
@@ -161,7 +163,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         finally { ResetBombState(); }
     }
 
-    public void HandleBombExploded(EventBombExploded @event)
+    private void HandleBombExploded(EventBombExploded @event)
     {
         Instrumentation.BombExplosionsCounter.Add(1);
         if (_bombPlantTime.HasValue)
@@ -172,7 +174,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         ResetBombState();
     }
 
-    public void HandleBombDropped(EventBombDropped @event)
+    private void HandleBombDropped(EventBombDropped @event)
     {
         var player = @event.GetPlayerOrDefault("userid");
         if (player is { IsBot: false })
@@ -187,7 +189,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         }
     }
 
-    public void HandleBombPickup(EventBombPickup @event)
+    private void HandleBombPickup(EventBombPickup @event)
     {
         var player = @event.GetPlayerOrDefault("userid");
         if (player is { IsBot: false })
@@ -202,7 +204,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         }
     }
 
-    public void HandleBombBegindefuse(EventBombBegindefuse @event)
+    private void HandleBombBegindefuse(EventBombBegindefuse @event)
     {
         var player = @event.GetPlayerOrDefault("userid");
         if (player is { IsBot: false })
@@ -222,7 +224,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         }
     }
 
-    public void HandleBombAbortdefuse(EventBombAbortdefuse @event)
+    private void HandleBombAbortdefuse(EventBombAbortdefuse @event)
     {
         var player = @event.GetPlayerOrDefault("userid");
         if (player is { IsBot: false })
@@ -239,7 +241,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         }
     }
 
-    public void HandleDefuserDropped(EventDefuserDropped @event)
+    private void HandleDefuserDropped(EventDefuserDropped @event)
     {
         var player = @event.GetPlayerOrDefault("userid");
         if (player is { IsBot: false })
@@ -254,7 +256,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         }
     }
 
-    public void HandleDefuserPickup(EventDefuserPickup @event)
+    private void HandleDefuserPickup(EventDefuserPickup @event)
     {
         var player = @event.GetPlayerOrDefault("userid");
         if (player is { IsBot: false })
@@ -269,9 +271,9 @@ public sealed class BombEventProcessor : IBombEventProcessor
         }
     }
 
-    public void HandleBombBeep(EventBombBeep @event) { }
+    private void HandleBombBeep(EventBombBeep @event) { }
 
-    public void HandlePlayerDeath(EventPlayerDeath @event)
+    private void HandlePlayerDeath(EventPlayerDeath @event)
     {
         var weapon = @event.GetStringValue("weapon", "unknown");
         if (weapon != "planted_c4") return;
@@ -301,7 +303,15 @@ public sealed class BombEventProcessor : IBombEventProcessor
         }
     }
 
-    public void HandleRoundEnd(EventRoundEnd @event) => ResetBombState();
+    public void OnRoundStart(RoundContext context)
+    {
+        ResetBombState();
+    }
+
+    public void OnRoundEnd(int winnerTeam, int winReason)
+    {
+        ResetBombState();
+    }
 
     public void ResetBombState() { _bombPlantTime = null; _planterSteamId = null; _bombDefuseStartTime = null; _defuserSteamId = null; }
 }
