@@ -261,39 +261,42 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
                 _playerSessions.MutatePlayer(attacker.SteamID, stats =>
                 {
-                    stats.RoundNumber = _currentRoundNumber;
-                    stats.RoundStartUtc = _currentRoundStartUtc;
-                    stats.HadKillThisRound = true;
-                    stats.Kills++;
-                    stats.CurrentRoundKills++;
-                    stats.DamageDealt += damage;
-                    stats.Headshots += isHeadshot ? 1 : 0;
-                    stats.WeaponKills[weaponName] = stats.WeaponKills.GetValueOrDefault(weaponName, 0) + 1;
-                    stats.CurrentTeam = attackerTeam;
-
-                    if (isRevengeKill) stats.Revenges++;
-
-                    if (!_firstKillTimes.ContainsKey(attacker.SteamID)) { _firstKillTimes[attacker.SteamID] = now; stats.EntryKills++; }
-                    _roundKills[attacker.SteamID] = _roundKills.GetValueOrDefault(attacker.SteamID, 0) + 1;
-                    var killsThisRound = _roundKills[attacker.SteamID];
-                    if (killsThisRound > stats.MultiKills) stats.MultiKills = killsThisRound;
-
-                    if (noscope) stats.NoscopeKills++;
-                    if (thruSmoke) stats.ThruSmokeKills++;
-                    if (attackerBlind) stats.AttackerBlindKills++;
-                    if (flashAssisted) stats.FlashAssistedKills++;
-                    if (penetrated) stats.WallbangKills++;
-
-                    if (isGrenadeKill)
+                    lock (stats.SyncRoot)
                     {
-                        stats.NadeKills++;
-                        var nadeKillsThisRound = _roundKills[attacker.SteamID]; // Simplified proxy for multi-kill nades
-                        if (nadeKillsThisRound >= 2) stats.MultiKillNades++;
-                    }
+                        stats.RoundNumber = _currentRoundNumber;
+                        stats.RoundStartUtc = _currentRoundStartUtc;
+                        stats.HadKillThisRound = true;
+                        stats.Kills++;
+                        stats.CurrentRoundKills++;
+                        // stats.DamageDealt += damage; // Removed: damage is now accumulated in HandlePlayerHurt
+                        stats.Headshots += isHeadshot ? 1 : 0;
+                        stats.WeaponKills[weaponName] = stats.WeaponKills.GetValueOrDefault(weaponName, 0) + 1;
+                        stats.CurrentTeam = attackerTeam;
 
-                    bool highImpact = killsThisRound >= 3 || (teammatesAlive == 1 && enemyAlive >= 1) || (_firstKillTimes.Count == 1 && _firstKillTimes.ContainsKey(attacker.SteamID));
-                    if (highImpact) stats.HighImpactKills++;
-                    else if (teammatesAlive >= enemyAlive + 3) stats.LowImpactKills++;
+                        if (isRevengeKill) stats.Revenges++;
+
+                        if (!_firstKillTimes.ContainsKey(attacker.SteamID)) { _firstKillTimes[attacker.SteamID] = now; stats.EntryKills++; }
+                        _roundKills[attacker.SteamID] = _roundKills.GetValueOrDefault(attacker.SteamID, 0) + 1;
+                        var killsThisRound = _roundKills[attacker.SteamID];
+                        if (killsThisRound > stats.MultiKills) stats.MultiKills = killsThisRound;
+
+                        if (noscope) stats.NoscopeKills++;
+                        if (thruSmoke) stats.ThruSmokeKills++;
+                        if (attackerBlind) stats.AttackerBlindKills++;
+                        if (flashAssisted) stats.FlashAssistedKills++;
+                        if (penetrated) stats.WallbangKills++;
+
+                        if (isGrenadeKill)
+                        {
+                            stats.NadeKills++;
+                            var nadeKillsThisRound = _roundKills[attacker.SteamID]; // Simplified proxy for multi-kill nades
+                            if (nadeKillsThisRound >= 2) stats.MultiKillNades++;
+                        }
+
+                        bool highImpact = killsThisRound >= 3 || (teammatesAlive == 1 && enemyAlive >= 1) || (_firstKillTimes.Count == 1 && _firstKillTimes.ContainsKey(attacker.SteamID));
+                        if (highImpact) stats.HighImpactKills++;
+                        else if (teammatesAlive >= enemyAlive + 3) stats.LowImpactKills++;
+                    }
                 });
 
                 if (victimTeam != PlayerTeam.Spectator && _lastTeamDeathTime.TryGetValue(victimTeam, out var lastDeath) && lastDeath > DateTime.MinValue && lastDeath != now && (now - lastDeath).TotalSeconds <= tradeWindowSeconds)
@@ -334,23 +337,37 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             var damageArmor = @event.GetIntValue("dmg_armor", 0);
             var hitgroup = @event.GetIntValue("hitgroup", 0);
 
-            if (victim is { IsBot: false }) _playerSessions.MutatePlayer(victim.SteamID, stats => { stats.DamageTaken += damage; stats.DamageArmor += damageArmor; });
+            if (victim is { IsBot: false })
+            {
+                _playerSessions.MutatePlayer(victim.SteamID, stats =>
+                {
+                    lock (stats.SyncRoot)
+                    {
+                        stats.DamageTaken += damage;
+                        stats.DamageArmor += damageArmor;
+                    }
+                });
+            }
+
             if (attacker is { IsBot: false } && attacker != victim)
             {
                 _playerSessions.MutatePlayer(attacker.SteamID, stats =>
                 {
-                    stats.DamageDealt += damage;
-                    stats.DamageArmor += damageArmor;
-                    stats.WeaponHits[weapon] = stats.WeaponHits.GetValueOrDefault(weapon, 0) + 1;
-                    switch (hitgroup)
+                    lock (stats.SyncRoot)
                     {
-                        case 1: stats.HeadshotsHit++; break;
-                        case 2: stats.ChestHits++; break;
-                        case 3: stats.StomachHits++; break;
-                        case 4:
-                        case 5: stats.ArmHits++; break;
-                        case 6:
-                        case 7: stats.LegHits++; break;
+                        stats.DamageDealt += damage;
+                        stats.DamageArmor += damageArmor;
+                        stats.WeaponHits[weapon] = stats.WeaponHits.GetValueOrDefault(weapon, 0) + 1;
+                        switch (hitgroup)
+                        {
+                            case 1: stats.HeadshotsHit++; break;
+                            case 2: stats.ChestHits++; break;
+                            case 3: stats.StomachHits++; break;
+                            case 4:
+                            case 5: stats.ArmHits++; break;
+                            case 6:
+                            case 7: stats.LegHits++; break;
+                        }
                     }
                 });
             }

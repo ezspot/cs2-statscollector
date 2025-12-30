@@ -8,7 +8,16 @@ CREATE DATABASE IF NOT EXISTS `cs2_statscollector`
 
 USE `cs2_statscollector`;
 
--- Match history
+-- 1. Base Tables (No dependencies)
+CREATE TABLE IF NOT EXISTS players (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    steam_id BIGINT UNIQUE NOT NULL,
+    name VARCHAR(255),
+    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_players_steam_id (steam_id)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS matches (
     id INT AUTO_INCREMENT PRIMARY KEY,
     match_uuid VARCHAR(36) UNIQUE NOT NULL,
@@ -19,121 +28,7 @@ CREATE TABLE IF NOT EXISTS matches (
     INDEX idx_matches_time (start_time)
 ) ENGINE=InnoDB;
 
--- Round history
-CREATE TABLE IF NOT EXISTS rounds (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    match_id INT NOT NULL,
-    round_number INT NOT NULL,
-    start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    end_time TIMESTAMP NULL,
-    winner_team INT, -- 2: T, 3: CT
-    win_type INT, -- Reason for win
-    FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
-    UNIQUE KEY uq_match_round (match_id, round_number)
-) ENGINE=InnoDB;
-
--- Per-match player stats
-CREATE TABLE IF NOT EXISTS match_player_stats (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    match_id INT NOT NULL,
-    steam_id BIGINT NOT NULL,
-    kills INT DEFAULT 0,
-    deaths INT DEFAULT 0,
-    assists INT DEFAULT 0,
-    headshots INT DEFAULT 0,
-    damage_dealt INT DEFAULT 0,
-    mvps INT DEFAULT 0,
-    score INT DEFAULT 0,
-    rating2 DECIMAL(5,3) DEFAULT 0,
-    adr DECIMAL(6,2) DEFAULT 0,
-    kast DECIMAL(5,2) DEFAULT 0,
-    FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
-    INDEX idx_match_player (match_id, steam_id)
-) ENGINE=InnoDB;
-
--- Dashboard Views
-CREATE OR REPLACE VIEW view_player_match_history AS
-SELECT 
-    m.id AS match_id,
-    m.match_uuid,
-    m.map_name,
-    m.start_time,
-    mps.steam_id,
-    mps.kills,
-    mps.deaths,
-    mps.assists,
-    mps.rating2,
-    mps.adr
-FROM matches m
-JOIN match_player_stats mps ON m.id = mps.match_id;
-
--- Global Leaderboard View
-CREATE OR REPLACE VIEW view_global_leaderboard AS
-SELECT 
-    p.steam_id,
-    p.name,
-    ps.hltv_rating,
-    ps.kd_ratio,
-    ps.average_damage_per_round AS adr,
-    ps.kast_percentage AS kast,
-    ps.kills,
-    ps.deaths,
-    ps.rounds_played,
-    ps.updated_at
-FROM players p
-JOIN player_stats ps ON p.steam_id = ps.steam_id
-WHERE ps.rounds_played > 10 -- Minimum activity threshold
-ORDER BY ps.hltv_rating DESC;
-
--- Player Performance Timeline View
-CREATE OR REPLACE VIEW view_player_performance_timeline AS
-SELECT 
-    steam_id,
-    calculated_at,
-    rating2,
-    performance_score,
-    kast_percentage,
-    average_damage_per_round
-FROM player_advanced_analytics;
-
--- Per-match weapon stats
-CREATE TABLE IF NOT EXISTS match_weapon_stats (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    match_id INT NOT NULL,
-    steam_id BIGINT NOT NULL,
-    weapon_name VARCHAR(100) NOT NULL,
-    kills INT DEFAULT 0,
-    shots INT DEFAULT 0,
-    hits INT DEFAULT 0,
-    FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
-    INDEX idx_match_weapon (match_id, steam_id, weapon_name)
-) ENGINE=InnoDB;
-
--- Player Profile Summary View (The "Single Source of Truth" for Dashboards)
-CREATE OR REPLACE VIEW view_player_profile AS
-SELECT 
-    p.steam_id,
-    p.name,
-    ps.hltv_rating AS lifetime_rating,
-    ps.kills AS total_kills,
-    ps.deaths AS total_deaths,
-    ps.rounds_played AS total_rounds,
-    (SELECT COUNT(*) FROM matches m JOIN match_player_stats mps ON m.id = mps.match_id WHERE mps.steam_id = p.steam_id) AS matches_played,
-    ps.updated_at AS last_updated
-FROM players p
-JOIN player_stats ps ON p.steam_id = ps.steam_id;
-
--- Player registry
-CREATE TABLE IF NOT EXISTS players (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    steam_id BIGINT UNIQUE NOT NULL,
-    name VARCHAR(255),
-    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_players_steam_id (steam_id)
-) ENGINE=InnoDB;
-
--- Core player stats
+-- 2. Tables with dependencies
 CREATE TABLE IF NOT EXISTS player_stats (
     steam_id BIGINT PRIMARY KEY,
     name VARCHAR(255),
@@ -239,15 +134,57 @@ CREATE TABLE IF NOT EXISTS player_stats (
     impact_rating DECIMAL(5,3) DEFAULT 0,
     survival_rating DECIMAL(5,3) DEFAULT 0,
     utility_score DECIMAL(5,3) DEFAULT 0,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 CREATE INDEX idx_player_stats_updated_at ON player_stats (updated_at);
 CREATE INDEX idx_player_stats_hltv_rating ON player_stats (hltv_rating DESC);
-CREATE INDEX idx_player_stats_kills ON player_stats (kills DESC);
-CREATE INDEX idx_player_stats_kd_ratio ON player_stats (kd_ratio DESC);
 
--- Per-weapon stats
+CREATE TABLE IF NOT EXISTS rounds (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    match_id INT NOT NULL,
+    round_number INT NOT NULL,
+    start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    end_time TIMESTAMP NULL,
+    winner_team INT, -- 2: T, 3: CT
+    win_type INT, -- Reason for win
+    FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
+    UNIQUE KEY uq_match_round (match_id, round_number)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS match_player_stats (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    match_id INT NOT NULL,
+    steam_id BIGINT NOT NULL,
+    kills INT DEFAULT 0,
+    deaths INT DEFAULT 0,
+    assists INT DEFAULT 0,
+    headshots INT DEFAULT 0,
+    damage_dealt INT DEFAULT 0,
+    mvps INT DEFAULT 0,
+    score INT DEFAULT 0,
+    rating2 DECIMAL(5,3) DEFAULT 0,
+    adr DECIMAL(6,2) DEFAULT 0,
+    kast DECIMAL(5,2) DEFAULT 0,
+    FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
+    FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
+    INDEX idx_match_player (match_id, steam_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS match_weapon_stats (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    match_id INT NOT NULL,
+    steam_id BIGINT NOT NULL,
+    weapon_name VARCHAR(100) NOT NULL,
+    kills INT DEFAULT 0,
+    shots INT DEFAULT 0,
+    hits INT DEFAULT 0,
+    FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
+    FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
+    INDEX idx_match_weapon (match_id, steam_id, weapon_name)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS weapon_stats (
     steam_id BIGINT NOT NULL,
     weapon_name VARCHAR(100) NOT NULL,
@@ -256,12 +193,10 @@ CREATE TABLE IF NOT EXISTS weapon_stats (
     shots INT DEFAULT 0,
     hits INT DEFAULT 0,
     headshots INT DEFAULT 0,
-    PRIMARY KEY (steam_id, weapon_name)
+    PRIMARY KEY (steam_id, weapon_name),
+    FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
-CREATE INDEX idx_weapon_stats_name ON weapon_stats (weapon_name);
-
--- Snapshot analytics
 CREATE TABLE IF NOT EXISTS player_advanced_analytics (
     id INT AUTO_INCREMENT PRIMARY KEY,
     match_id INT,
@@ -296,18 +231,15 @@ CREATE TABLE IF NOT EXISTS player_advanced_analytics (
     clutch_points DECIMAL(5,3) NOT NULL,
     flash_assisted_kills INT DEFAULT 0,
     wallbang_kills INT DEFAULT 0,
-    PRIMARY KEY (steam_id, calculated_at),
-    INDEX idx_player_advanced_analytics_calculated_at (calculated_at),
-    INDEX idx_player_advanced_analytics_rating2 (rating2 DESC),
-    INDEX idx_player_advanced_analytics_performance (performance_score DESC)
+    FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
+    UNIQUE KEY uq_player_analytics_steam_calculated (steam_id, calculated_at),
+    INDEX idx_player_advanced_analytics_calculated_at (calculated_at)
 ) ENGINE=InnoDB;
 
--- Kill positions for heatmaps
 CREATE TABLE IF NOT EXISTS kill_positions (
     id INT AUTO_INCREMENT PRIMARY KEY,
     match_id INT,
     killer_steam_id BIGINT NOT NULL,
-    -- ... existing columns ...
     victim_steam_id BIGINT NOT NULL,
     killer_x FLOAT NOT NULL,
     killer_y FLOAT NOT NULL,
@@ -325,17 +257,15 @@ CREATE TABLE IF NOT EXISTS kill_positions (
     round_number INT NOT NULL,
     round_time_seconds INT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_kill_pos_map (map_name),
-    INDEX idx_kill_pos_killer (killer_steam_id),
-    INDEX idx_kill_pos_victim (victim_steam_id)
+    FOREIGN KEY (killer_steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
+    FOREIGN KEY (victim_steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
+    INDEX idx_kill_pos_map (map_name)
 ) ENGINE=InnoDB;
 
--- Death positions for heatmaps
 CREATE TABLE IF NOT EXISTS death_positions (
     id INT AUTO_INCREMENT PRIMARY KEY,
     match_id INT,
     steam_id BIGINT NOT NULL,
-    -- ... existing columns ...
     x FLOAT NOT NULL,
     y FLOAT NOT NULL,
     z FLOAT NOT NULL,
@@ -346,16 +276,14 @@ CREATE TABLE IF NOT EXISTS death_positions (
     round_number INT NOT NULL,
     round_time_seconds INT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_death_pos_map (map_name),
-    INDEX idx_death_pos_player (steam_id)
+    FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
+    INDEX idx_death_pos_map (map_name)
 ) ENGINE=InnoDB;
 
--- Utility positions for heatmaps
 CREATE TABLE IF NOT EXISTS utility_positions (
     id INT AUTO_INCREMENT PRIMARY KEY,
     match_id INT,
     steam_id BIGINT NOT NULL,
-    -- ... existing columns ...
     throw_x FLOAT NOT NULL,
     throw_y FLOAT NOT NULL,
     throw_z FLOAT NOT NULL,
@@ -370,7 +298,110 @@ CREATE TABLE IF NOT EXISTS utility_positions (
     round_number INT NOT NULL,
     round_time_seconds INT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_utility_pos_map (map_name),
-    INDEX idx_utility_pos_player (steam_id),
-    INDEX idx_utility_pos_type (utility_type)
+    FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
+    INDEX idx_utility_pos_map (map_name)
 ) ENGINE=InnoDB;
+
+-- 3. Views (Dependencies satisfied)
+CREATE OR REPLACE VIEW view_player_match_history AS
+SELECT 
+    m.id AS match_id,
+    m.match_uuid,
+    m.map_name,
+    m.start_time,
+    mps.steam_id,
+    mps.kills,
+    mps.deaths,
+    mps.assists,
+    mps.rating2,
+    mps.adr,
+    mps.kast,
+    (mps.kills / GREATEST(mps.deaths, 1)) as kd_ratio
+FROM matches m
+JOIN match_player_stats mps ON m.id = mps.match_id;
+
+-- Leetify/HLTV Style Enhanced Analytics View
+CREATE OR REPLACE VIEW view_enhanced_player_analytics AS
+SELECT 
+    p.steam_id,
+    p.name,
+    paa.rating2,
+    paa.performance_score,
+    paa.average_damage_per_round as adr,
+    paa.kast_percentage as kast,
+    paa.entry_success_rate as entry_win_rate,
+    paa.opening_kill_ratio,
+    paa.clutch_success_rate,
+    paa.clutch_points,
+    paa.utility_impact_score as util_rating,
+    paa.flash_effectiveness_rate as flash_eff,
+    paa.trade_success_rate as trade_rate,
+    paa.trade_kill_ratio,
+    paa.survival_rating,
+    paa.top_weapon_by_kills as main_weapon,
+    paa.calculated_at
+FROM players p
+JOIN player_advanced_analytics paa ON p.steam_id = paa.steam_id;
+
+-- Clutch Performance Standard View
+CREATE OR REPLACE VIEW view_clutch_performance AS
+SELECT 
+    steam_id,
+    name,
+    clutches_won,
+    clutches_lost,
+    clutch_points,
+    ROUND((clutches_won / GREATEST(clutches_won + clutches_lost, 1)) * 100, 2) as clutch_win_percent
+FROM player_stats
+WHERE (clutches_won + clutches_lost) > 0;
+
+-- Entry Fragging Efficiency View
+CREATE OR REPLACE VIEW view_entry_efficiency AS
+SELECT 
+    steam_id,
+    name,
+    opening_duels_won,
+    opening_duels_lost,
+    ROUND((opening_duels_won / GREATEST(opening_duels_won + opening_duels_lost, 1)) * 100, 2) as entry_success_rate
+FROM player_stats
+WHERE (opening_duels_won + opening_duels_lost) > 0;
+
+CREATE OR REPLACE VIEW view_global_leaderboard AS
+SELECT 
+    p.steam_id,
+    p.name,
+    ps.hltv_rating,
+    ps.kd_ratio,
+    ps.average_damage_per_round AS adr,
+    ps.kast_percentage AS kast,
+    ps.kills,
+    ps.deaths,
+    ps.rounds_played,
+    ps.updated_at
+FROM players p
+JOIN player_stats ps ON p.steam_id = ps.steam_id
+WHERE ps.rounds_played > 10
+ORDER BY ps.hltv_rating DESC;
+
+CREATE OR REPLACE VIEW view_player_performance_timeline AS
+SELECT 
+    steam_id,
+    calculated_at,
+    rating2,
+    performance_score,
+    kast_percentage,
+    average_damage_per_round
+FROM player_advanced_analytics;
+
+CREATE OR REPLACE VIEW view_player_profile AS
+SELECT 
+    p.steam_id,
+    p.name,
+    ps.hltv_rating AS lifetime_rating,
+    ps.kills AS total_kills,
+    ps.deaths AS total_deaths,
+    ps.rounds_played AS total_rounds,
+    (SELECT COUNT(*) FROM matches m JOIN match_player_stats mps ON m.id = mps.match_id WHERE mps.steam_id = p.steam_id) AS matches_played,
+    ps.updated_at AS last_updated
+FROM players p
+JOIN player_stats ps ON p.steam_id = ps.steam_id;

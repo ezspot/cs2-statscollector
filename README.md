@@ -1,23 +1,21 @@
-# statsCollector v1.3.0
+# statsCollector v1.6.0
 
 A high-performance CounterStrikeSharp plugin for CS2 that collects advanced player statistics with enterprise-grade architecture. Built for late 2025 standards using .NET 8+, Polly v8 Resilience, and full OpenTelemetry observability.
 
 ## Features
 - **Relational Match Tracking**: Automated `matches` and `rounds` management for league-style history.
+- **Accurate ADR Tracking**: Uses `player_hurt` events for precise damage calculation (not capped at 100 like death events).
 - **Enterprise Observability**: Full OpenTelemetry (OTEL) integration for traces and metrics.
 - **Structured Logging**: Serilog integration with daily rolling files and high-resolution tracing.
-- **Robust Persistence**: Polly v8 resilience pipelines with automated retries and circuit breakers for database operations.
-- **High Performance**: `System.Threading.Channels` for non-blocking, backpressure-aware database writes.
-- **Reliable Registration**: Multi-stage player tracking using `OnClientAuthorized` for guaranteed SteamID64 capture.
+- **Robust Persistence**: Polly v8 resilience pipelines with automated retries and circuit breakers.
+- **High Performance**: `System.Threading.Channels` and **Bulk Multi-row INSERTs** for high-throughput spatial tracking.
+- **Thread Safety**: Enterprise-standard locking and `Server.NextFrame` synchronization for main-loop integrity.
 - **Spatial Analytics (Heatmaps)**: High-resolution position tracking for kills, deaths, and utility usage.
-- **Advanced Analytics**: Real-time calculation of HLTV-style Rating 2.0, Impact, KAST, and performance scores.
-- **Tactical Pause System**: MatchZy-style `.pause` and `.unpause` with support for technical/tactical limits and auto-pause.
-- **Scrim Management**: Automated knife rounds, side selection timers (30s), and captain-based picking.
-- **Crash Recovery**: Persistent `scrim_state_recovery.json` for match restoration after server restarts.
-- **Choke Point Analytics**: Detection of smoke grenades landing in critical map areas (e.g., Mirage Window).
-- **Flash Efficiency 2.0**: Advanced `BlindIntensity` calculation based on victim eye angles and distance falloff.
-- **Economy 2.0**: Dynamic weapon cost lookup via game schema (VData).
-- **Dashboard Optimized**: Pre-aggregated views for global leaderboards and player profiles.
+- **Advanced Analytics**: HLTV Rating 2.0, Impact, KAST, and Leetify-style metrics (Clutch win%, Entry success).
+- **Tactical Pause System**: MatchZy-style `.pause` and `.unpause` with technical/tactical limits.
+- **Scrim Management**: Automated knife rounds, side selection, and captain-based picking.
+- **Round Backup & Restore**: `.restore <round>` to instantly roll back match state and scores.
+- **Dashboard Optimized**: Pre-aggregated views for global leaderboards and Leetify-style analytics.
 
 ## Installation
 1. Install [CounterStrikeSharp](https://docs.cssharp.dev/) on your CS2 server.
@@ -60,10 +58,11 @@ A high-performance CounterStrikeSharp plugin for CS2 that collects advanced play
 
 ## Dashboard Integration (Optimized Views)
 The database includes pre-optimized views for near-instant dashboard rendering:
-- `view_player_profile`: The ultimate single-query player summary.
-- `view_global_leaderboard`: Ranked by HLTV Rating with activity filters.
+- `view_enhanced_player_analytics`: HLTV/Leetify style performance summary.
+- `view_clutch_performance`: Detailed 1vX success rates.
+- `view_entry_efficiency`: Opening duel metrics.
+- `view_global_leaderboard`: Ranked by Rating 2.0 with activity filters.
 - `view_player_match_history`: Complete match-by-match breakdown.
-- `view_player_performance_timeline`: Data for Rating 2.0 and ADR graphs.
 
 ## Architecture
 - **Centralized Instrumentation**: Global `Instrumentation` class for OTEL ActivitySource and Meters.

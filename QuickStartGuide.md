@@ -1,11 +1,14 @@
-# statsCollector Quick Start v1.3.0
+# statsCollector Quick Start v1.6.0
 
 Get up and running fast with enterprise-grade CS2 stats collection. For full details, see README.md.
 
-## New in v1.3.0
-- **Pause System**: `.pause` (tactical/tech/admin), `.unpause`.
-- **Match Recovery**: `.scrim recover` for admins to restore a crashed match.
-- **Side Choice**: Winning captain picks side after knife round (`.ct`/`.t`).
+## New in v1.6.0
+- **Accurate ADR**: Damage is now tracked via `player_hurt` events for true accuracy.
+- **Bulk SQL Persistence**: Optimized spatial data writes using multi-row INSERTs.
+- **Enhanced Thread Safety**: Main-loop integrity via `Server.NextFrame` and `SyncRoot` locks.
+- **Round Backup System**: `.restore <round>` for admins to roll back match state.
+- **Match Lifecycle**: Now uses `round_announce_match_start` for precise live play tracking.
+- **Advanced Views**: New Leetify-style views for entry and clutch efficiency.
 
 ## Prerequisites
 - CounterStrikeSharp v1.0.340+

@@ -10,6 +10,8 @@
   "AutoSaveSeconds": 60,
   "TradeWindowSeconds": 5,
   "TradeDistanceThreshold": 1000.0,
+  "LogLevel": "Information",
+  "DeathmatchMode": false,
   "Scrim": {
     "MapPool": ["de_ancient", "de_anubis", "de_dust2", "de_inferno", "de_mirage", "de_nuke", "de_overpass", "de_vertigo"],
     "PlayersPerTeam": 5,
@@ -24,7 +26,5 @@
   "ClutchSettings": {
     "BaseMultiplier": 1.0,
     "DifficultyWeight": 0.2
-  },
-  "DeathmatchMode": false,
-  "LogLevel": "Information"
+  }
 }

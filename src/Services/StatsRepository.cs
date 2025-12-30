@@ -78,12 +78,35 @@ public sealed class StatsRepository : IStatsRepository
             using var activity = Instrumentation.ActivitySource.StartActivity("UpsertMatchSummariesAsync");
             Instrumentation.DbOperationsCounter.Add(1, new KeyValuePair<string, object?>("operation", "upsert_match_summaries"));
 
-            const string sql = """
+            // Note: For true bulk, we construct a single statement with multiple VALUE groups.
+            // Dapper's list execution is good, but multi-row INSERT is better for IOPS.
+            const string sqlBase = """
                 INSERT INTO match_player_stats (
                     match_id, steam_id, kills, deaths, assists, headshots, damage_dealt, mvps, score, rating2, adr, kast
-                ) VALUES (
-                    @MatchId, @SteamId, @Kills, @Deaths, @Assists, @Headshots, @DamageDealt, @Mvps, @Score, @HLTVRating, @AverageDamagePerRound, @KASTPercentage
-                )
+                ) VALUES 
+                """;
+
+            var rows = new List<string>();
+            var parameters = new DynamicParameters();
+            for (int i = 0; i < snapshotList.Count; i++)
+            {
+                var s = snapshotList[i];
+                rows.Add($"(@MatchId{i}, @SteamId{i}, @Kills{i}, @Deaths{i}, @Assists{i}, @Headshots{i}, @DamageDealt{i}, @Mvps{i}, @Score{i}, @HLTVRating{i}, @ADR{i}, @Kast{i})");
+                parameters.Add($"MatchId{i}", s.MatchId);
+                parameters.Add($"SteamId{i}", s.SteamId);
+                parameters.Add($"Kills{i}", s.Kills);
+                parameters.Add($"Deaths{i}", s.Deaths);
+                parameters.Add($"Assists{i}", s.Assists);
+                parameters.Add($"Headshots{i}", s.Headshots);
+                parameters.Add($"DamageDealt{i}", s.DamageDealt);
+                parameters.Add($"Mvps{i}", s.Mvps);
+                parameters.Add($"Score{i}", s.Score);
+                parameters.Add($"HLTVRating{i}", s.HLTVRating);
+                parameters.Add($"ADR{i}", s.AverageDamagePerRound);
+                parameters.Add($"Kast{i}", s.KASTPercentage);
+            }
+
+            var sql = sqlBase + string.Join(", ", rows) + """
                 ON DUPLICATE KEY UPDATE
                     kills = VALUES(kills), deaths = VALUES(deaths), assists = VALUES(assists),
                     headshots = VALUES(headshots), damage_dealt = VALUES(damage_dealt),
@@ -92,8 +115,8 @@ public sealed class StatsRepository : IStatsRepository
                 """;
 
             await using var connection = await _connectionFactory.CreateConnectionAsync(ct);
-            var count = await connection.ExecuteAsync(new CommandDefinition(sql, snapshotList, cancellationToken: ct)).ConfigureAwait(false);
-            _logger.LogInformation("Upserted {Count} match summaries into match_player_stats", count);
+            var count = await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)).ConfigureAwait(false);
+            _logger.LogInformation("Upserted {Count} match summaries into match_player_stats using bulk insert", count);
         }, cancellationToken);
     }
 
@@ -119,19 +142,34 @@ public sealed class StatsRepository : IStatsRepository
             using var activity = Instrumentation.ActivitySource.StartActivity("UpsertMatchWeaponStatsAsync");
             Instrumentation.DbOperationsCounter.Add(1, new KeyValuePair<string, object?>("operation", "upsert_match_weapons"));
 
-            const string sql = """
+            const string sqlBase = """
                 INSERT INTO match_weapon_stats (
                     match_id, steam_id, weapon_name, kills, shots, hits
-                ) VALUES (
-                    @MatchId, @SteamId, @Weapon, @Kills, @Shots, @Hits
-                )
+                ) VALUES 
+                """;
+
+            var rows = new List<string>();
+            var parameters = new DynamicParameters();
+            for (int i = 0; i < weaponData.Count; i++)
+            {
+                var w = weaponData[i];
+                rows.Add($"(@MatchId{i}, @SteamId{i}, @Weapon{i}, @Kills{i}, @Shots{i}, @Hits{i})");
+                parameters.Add($"MatchId{i}", w.MatchId);
+                parameters.Add($"SteamId{i}", w.SteamId);
+                parameters.Add($"Weapon{i}", w.Weapon);
+                parameters.Add($"Kills{i}", w.Kills);
+                parameters.Add($"Shots{i}", w.Shots);
+                parameters.Add($"Hits{i}", w.Hits);
+            }
+
+            var sql = sqlBase + string.Join(", ", rows) + """
                 ON DUPLICATE KEY UPDATE
                     kills = VALUES(kills), shots = VALUES(shots), hits = VALUES(hits);
                 """;
 
             await using var connection = await _connectionFactory.CreateConnectionAsync(ct);
-            var count = await connection.ExecuteAsync(new CommandDefinition(sql, weaponData, cancellationToken: ct)).ConfigureAwait(false);
-            _logger.LogInformation("Upserted {Count} match weapon records into match_weapon_stats", count);
+            var count = await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)).ConfigureAwait(false);
+            _logger.LogInformation("Upserted {Count} match weapon records into match_weapon_stats using bulk insert", count);
         }, cancellationToken);
     }
 
@@ -140,6 +178,9 @@ public sealed class StatsRepository : IStatsRepository
         var snapshotList = snapshots.ToList();
         if (snapshotList.Count == 0) return;
 
+        // Note: Using Dapper's list execution which internally optimizes but 
+        // for true bulk we should move to a Table-Valued Parameter or multi-row string construction 
+        // if performance on 18+ players becomes an issue.
         const string upsertPlayerInfoSql = """
             INSERT INTO players (steam_id, name)
             VALUES (@SteamId, @Name)

@@ -111,6 +111,7 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
         // Round
         plugin.RegisterEventHandler<EventRoundStart>(OnRoundStart);
         plugin.RegisterEventHandler<EventRoundEnd>(OnRoundEnd);
+        plugin.RegisterEventHandler<EventRoundAnnounceMatchStart>(OnRoundAnnounceMatchStart);
 
         // Commands
         plugin.AddCommand("css_stats", "Show current stats", (player, info) => { if (ValidatePlayer(player)) OnStatsCommand(player!, info); });
@@ -175,8 +176,11 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
             _playerSessions.EnsurePlayer(player.SteamID, player.PlayerName);
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                stats.TotalSpawns++;
-                stats.PlaytimeSeconds = (int)(DateTime.UtcNow - new DateTime(2020, 1, 1)).TotalSeconds;
+                lock (stats.SyncRoot)
+                {
+                    stats.TotalSpawns++;
+                    stats.PlaytimeSeconds = (int)(DateTime.UtcNow - new DateTime(2020, 1, 1)).TotalSeconds;
+                }
             });
         }
         return HookResult.Continue;
@@ -190,8 +194,11 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
             var team = @event.GetIntValue("team", 0);
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                if (team == 2) stats.TRounds++;
-                else if (team == 3) stats.CtRounds++;
+                lock (stats.SyncRoot)
+                {
+                    if (team == 2) stats.TRounds++;
+                    else if (team == 3) stats.CtRounds++;
+                }
             });
         }
         return HookResult.Continue;
@@ -298,6 +305,14 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
     private HookResult OnBombBegindefuse(EventBombBegindefuse @event, GameEventInfo info) { _bombProcessor.HandleBombBegindefuse(@event); return HookResult.Continue; }
     private HookResult OnBombAbortdefuse(EventBombAbortdefuse @event, GameEventInfo info) { _bombProcessor.HandleBombAbortdefuse(@event); return HookResult.Continue; }
 
+    private HookResult OnRoundAnnounceMatchStart(EventRoundAnnounceMatchStart @event, GameEventInfo info)
+    {
+        _logger.LogInformation("Match start announced. Live tracking enabled.");
+        _currentRoundNumber = 1;
+        _matchTracker.StartMatchAsync(Server.MapName).ConfigureAwait(false);
+        return HookResult.Continue;
+    }
+
     private HookResult OnRoundStart(EventRoundStart @event, GameEventInfo info)
     {
         if (_config.DeathmatchMode) return HookResult.Continue;
@@ -309,8 +324,11 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
         var tAlive = 0;
         _playerSessions.ForEachPlayer(stats =>
         {
-            if (stats.CurrentTeam == PlayerTeam.CounterTerrorist) ctAlive++;
-            else if (stats.CurrentTeam == PlayerTeam.Terrorist) tAlive++;
+            lock (stats.SyncRoot)
+            {
+                if (stats.CurrentTeam == PlayerTeam.CounterTerrorist) ctAlive++;
+                else if (stats.CurrentTeam == PlayerTeam.Terrorist) tAlive++;
+            }
         });
 
         _combatProcessor.SetRoundContext(_currentRoundNumber, roundStartUtc, ctAlive, tAlive);
@@ -328,11 +346,14 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
 
         _playerSessions.ForEachPlayer(stats =>
         {
-            stats.RoundNumber = _currentRoundNumber;
-            stats.RoundStartUtc = roundStartUtc;
-            stats.AliveOnTeamAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
-            stats.AliveEnemyAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
-            stats.ResetRoundStats();
+            lock (stats.SyncRoot)
+            {
+                stats.RoundNumber = _currentRoundNumber;
+                stats.RoundStartUtc = roundStartUtc;
+                stats.AliveOnTeamAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
+                stats.AliveEnemyAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
+                stats.ResetRoundStats();
+            }
         });
 
         return HookResult.Continue;
@@ -356,9 +377,12 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
         _combatProcessor.UpdateClutchStats(winningTeam);
         _playerSessions.ForEachPlayer(stats =>
         {
-            stats.RoundsPlayed++;
-            if (winningTeam != PlayerTeam.Spectator && stats.CurrentTeam == winningTeam) stats.RoundsWon++;
-            if (stats.HadKillThisRound || stats.HadAssistThisRound || stats.SurvivedThisRound || stats.DidTradeThisRound) stats.KASTRounds++;
+            lock (stats.SyncRoot)
+            {
+                stats.RoundsPlayed++;
+                if (winningTeam != PlayerTeam.Spectator && stats.CurrentTeam == winningTeam) stats.RoundsWon++;
+                if (stats.HadKillThisRound || stats.HadAssistThisRound || stats.SurvivedThisRound || stats.DidTradeThisRound) stats.KASTRounds++;
+            }
         });
 
         _bombProcessor.HandleRoundEnd(@event);

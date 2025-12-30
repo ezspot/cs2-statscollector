@@ -41,7 +41,7 @@ public sealed class PauseService(
             {
                 if (_tacticalPausesUsed[team] >= (_config.Scrim.MaxTacticalPauses > 0 ? _config.Scrim.MaxTacticalPauses : 4))
                 {
-                    player.PrintToChat(" [Scrim] Your team has no tactical pauses left.");
+                    Server.NextFrame(() => player.PrintToChat(" [Scrim] Your team has no tactical pauses left."));
                     return Task.CompletedTask;
                 }
             }
@@ -53,7 +53,7 @@ public sealed class PauseService(
         _currentPauseType = type;
         
         var typeStr = type == PauseType.Technical ? "Technical" : "Tactical";
-        Server.PrintToChatAll($" [Scrim] {typeStr} pause requested by Team {(_requestingTeam == 2 ? "T" : "CT")}. It will take effect at the end of the round.");
+        Server.NextFrame(() => Server.PrintToChatAll($" [Scrim] {typeStr} pause requested by Team {(_requestingTeam == 2 ? "T" : "CT")}. It will take effect at the end of the round."));
         
         return Task.CompletedTask;
     }
@@ -69,9 +69,7 @@ public sealed class PauseService(
             return Task.CompletedTask;
         }
 
-        // MatchZy logic: Unpause requires both teams to be ready or just the requesting team to unpause if it was tactical?
-        // Typically, any team can unpause if both are ready.
-        Server.PrintToChatAll($" [Scrim] Player {player.PlayerName} requested unpause. Waiting for admin or both teams.");
+        Server.NextFrame(() => Server.PrintToChatAll($" [Scrim] Player {player.PlayerName} requested unpause. Waiting for admin or both teams."));
         return Task.CompletedTask;
     }
 
@@ -86,40 +84,49 @@ public sealed class PauseService(
 
     private void Pause()
     {
-        var gameRules = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules").FirstOrDefault()?.GameRules;
-        if (gameRules == null)
+        Server.NextFrame(() => 
         {
-            _logger.LogError("Failed to find GameRules for pausing.");
-            return;
-        }
-
-        _isPaused = true;
-        
-        // Use GameRules for a cleaner pause if available, otherwise fallback to command
-        Server.ExecuteCommand("mp_pause_match");
-        
-        _logger.LogInformation("Match paused. Type: {Type}", _currentPauseType);
-        
-        if (_currentPauseType == PauseType.Tactical)
-        {
-            _tacticalPausesUsed[_requestingTeam]++;
-            
-            // Tactical pauses usually have a duration
-            var duration = _config.Scrim.TacticalPauseDuration > 0 ? _config.Scrim.TacticalPauseDuration : 30;
-            _pauseTimer = new CounterStrikeSharp.API.Modules.Timers.Timer(duration, () => 
+            var gameRules = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules").FirstOrDefault()?.GameRules;
+            if (gameRules == null)
             {
-                Server.PrintToChatAll(" [Scrim] Tactical pause finished. Unpausing...");
-                Unpause();
-            });
-        }
+                _logger.LogError("Failed to find GameRules for pausing.");
+                return;
+            }
+
+            _isPaused = true;
+            
+            // Use GameRules for a cleaner pause if available, otherwise fallback to command
+            Server.ExecuteCommand("mp_pause_match");
+            
+            _logger.LogInformation("Match paused. Type: {Type}", _currentPauseType);
+            
+            if (_currentPauseType == PauseType.Tactical)
+            {
+                _tacticalPausesUsed[_requestingTeam]++;
+                
+                // Tactical pauses usually have a duration
+                var duration = _config.Scrim.TacticalPauseDuration > 0 ? _config.Scrim.TacticalPauseDuration : 30;
+                _pauseTimer = new CounterStrikeSharp.API.Modules.Timers.Timer(duration, () => 
+                {
+                    Server.NextFrame(() => 
+                    {
+                        Server.PrintToChatAll(" [Scrim] Tactical pause finished. Unpausing...");
+                        Unpause();
+                    });
+                });
+            }
+        });
     }
 
     private void Unpause()
     {
-        _pauseTimer?.Kill();
-        _isPaused = false;
-        _currentPauseType = PauseType.None;
-        Server.ExecuteCommand("mp_unpause_match");
-        _logger.LogInformation("Match unpaused.");
+        Server.NextFrame(() => 
+        {
+            _pauseTimer?.Kill();
+            _isPaused = false;
+            _currentPauseType = PauseType.None;
+            Server.ExecuteCommand("mp_unpause_match");
+            _logger.LogInformation("Match unpaused.");
+        });
     }
 }

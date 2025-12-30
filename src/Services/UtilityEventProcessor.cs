@@ -65,8 +65,11 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
             {
                 _playerSessions.MutatePlayer(player.SteamID, stats =>
                 {
-                    stats.TimesBlinded++;
-                    stats.TotalBlindTime += (int)blindDurationMs;
+                    lock (stats.SyncRoot)
+                    {
+                        stats.TimesBlinded++;
+                        stats.TotalBlindTime += (int)blindDurationMs;
+                    }
                 });
             }
 
@@ -78,24 +81,27 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
                 
                 _playerSessions.MutatePlayer(attacker.SteamID, stats =>
                 {
-                    stats.PlayersBlinded++;
-                    stats.TotalBlindTimeInflicted += (int)blindDurationMs;
-                    
-                    if (player != null)
+                    lock (stats.SyncRoot)
                     {
-                        if (attacker.TeamNum != player.TeamNum)
+                        stats.PlayersBlinded++;
+                        stats.TotalBlindTimeInflicted += (int)blindDurationMs;
+                        
+                        if (player != null)
                         {
-                            stats.EnemiesFlashed++;
-                            if (player.PlayerPawn.Value?.FlashDuration > 1.0f) 
+                            if (attacker.TeamNum != player.TeamNum)
                             {
-                                stats.FlashWaste++;
-                                Instrumentation.FlashWasteCounter.Add(1);
+                                stats.EnemiesFlashed++;
+                                if (player.PlayerPawn.Value?.FlashDuration > 1.0f) 
+                                {
+                                    stats.FlashWaste++;
+                                    Instrumentation.FlashWasteCounter.Add(1);
+                                }
+                                if (blindDuration > 1.5f) stats.EffectiveFlashes++;
                             }
-                            if (blindDuration > 1.5f) stats.EffectiveFlashes++;
-                        }
-                        else
-                        {
-                            stats.TeammatesFlashed++;
+                            else
+                            {
+                                stats.TeammatesFlashed++;
+                            }
                         }
                     }
                 });
@@ -146,11 +152,14 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
 
                 _playerSessions.MutatePlayer(player.SteamID, stats =>
                 {
-                    switch (type)
+                    lock (stats.SyncRoot)
                     {
-                        case UtilityType.HeGrenade: stats.EffectiveHEGrenades++; break;
-                        case UtilityType.Smoke: stats.EffectiveSmokes++; break;
-                        case UtilityType.Molotov: stats.EffectiveMolotovs++; break;
+                        switch (type)
+                        {
+                            case UtilityType.HeGrenade: stats.EffectiveHEGrenades++; break;
+                            case UtilityType.Smoke: stats.EffectiveSmokes++; break;
+                            case UtilityType.Molotov: stats.EffectiveMolotovs++; break;
+                        }
                     }
                 });
             }

@@ -41,14 +41,17 @@ public class ConfigLoaderService : IConfigLoaderService
 
     public Task ExecuteLinesAsync(string[] lines)
     {
-        foreach (var line in lines)
+        Server.NextFrame(() =>
         {
-            var trimmedLine = line.Trim();
-            if (string.IsNullOrWhiteSpace(trimmedLine) || trimmedLine.StartsWith("//") || trimmedLine.StartsWith("#"))
-                continue;
+            foreach (var line in lines)
+            {
+                var trimmedLine = line.Trim();
+                if (string.IsNullOrWhiteSpace(trimmedLine) || trimmedLine.StartsWith("//") || trimmedLine.StartsWith("#"))
+                    continue;
 
-            Server.ExecuteCommand(trimmedLine);
-        }
+                Server.ExecuteCommand(trimmedLine);
+            }
+        });
         return Task.CompletedTask;
     }
 

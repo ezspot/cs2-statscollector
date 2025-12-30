@@ -69,9 +69,12 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
 
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                stats.ItemsPurchased++;
-                stats.MoneySpent += cost;
-                stats.CashSpent += cost;
+                lock (stats.SyncRoot)
+                {
+                    stats.ItemsPurchased++;
+                    stats.MoneySpent += cost;
+                    stats.CashSpent += cost;
+                }
             });
 
             _logger.LogTrace("Player {SteamId} purchased {Weapon} for ${Cost} (Dynamic)", player.SteamID, weapon, cost);
@@ -120,7 +123,13 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
             var player = @event.GetPlayerOrDefault("userid");
             if (player is not { IsBot: false, IsValid: true }) return;
             var item = @event.GetStringValue("item", string.Empty);
-            _playerSessions.MutatePlayer(player.SteamID, stats => stats.ItemsPickedUp++);
+            _playerSessions.MutatePlayer(player.SteamID, stats =>
+            {
+                lock (stats.SyncRoot)
+                {
+                    stats.ItemsPickedUp++;
+                }
+            });
             _logger.LogTrace("Player {SteamId} picked up {Item}", player.SteamID, item);
         }
         catch (Exception ex) { _logger.LogError(ex, "Error processing item pickup event"); }
@@ -137,10 +146,13 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
             var hasDefuser = @event.GetBoolValue("hasdefuser", false);
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                var value = GetItemValue(item);
-                if (hasHelmet) value += 350;
-                if (hasDefuser) value += 400;
-                stats.EquipmentValue = value;
+                lock (stats.SyncRoot)
+                {
+                    var value = GetItemValue(item);
+                    if (hasHelmet) value += 350;
+                    if (hasDefuser) value += 400;
+                    stats.EquipmentValue = value;
+                }
             });
         }
         catch (Exception ex) { _logger.LogError(ex, "Error processing item equip event"); }

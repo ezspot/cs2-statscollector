@@ -63,7 +63,13 @@ public sealed class BombEventProcessor : IBombEventProcessor
             {
                 _bombPlantTime = _timeProvider.GetUtcNow().UtcDateTime;
                 _planterSteamId = player.SteamID;
-                _playerSessions.MutatePlayer(player.SteamID, stats => stats.BombPlantAttempts++);
+                _playerSessions.MutatePlayer(player.SteamID, stats =>
+                {
+                    lock (stats.SyncRoot)
+                    {
+                        stats.BombPlantAttempts++;
+                    }
+                });
                 _logger.LogDebug("Player {SteamId} started planting bomb at site {Site}", player.SteamID, @event.GetIntValue("site", 0));
             }
         }
@@ -79,7 +85,13 @@ public sealed class BombEventProcessor : IBombEventProcessor
             {
                 _bombPlantTime = null;
                 _planterSteamId = null;
-                _playerSessions.MutatePlayer(player.SteamID, stats => stats.BombPlantAborts++);
+                _playerSessions.MutatePlayer(player.SteamID, stats =>
+                {
+                    lock (stats.SyncRoot)
+                    {
+                        stats.BombPlantAborts++;
+                    }
+                });
                 _logger.LogDebug("Player {SteamId} aborted bomb plant", player.SteamID);
             }
         }
@@ -102,8 +114,11 @@ public sealed class BombEventProcessor : IBombEventProcessor
                 Instrumentation.BombPlantDurationsRecorder.Record(plantDuration, new KeyValuePair<string, object?>("site", @event.GetIntValue("site", 0)));
                 _playerSessions.MutatePlayer(player.SteamID, stats =>
                 {
-                    stats.BombPlants++;
-                    stats.TotalPlantTime += (int)(plantDuration * 1000);
+                    lock (stats.SyncRoot)
+                    {
+                        stats.BombPlants++;
+                        stats.TotalPlantTime += (int)(plantDuration * 1000);
+                    }
                 });
 
                 _logger.LogInformation("Bomb planted by {SteamId} at site {Site}", player.SteamID, @event.GetIntValue("site", 0));
@@ -131,9 +146,12 @@ public sealed class BombEventProcessor : IBombEventProcessor
                 Instrumentation.BombDefuseDurationsRecorder.Record(defuseDuration);
                 _playerSessions.MutatePlayer(player.SteamID, stats =>
                 {
-                    stats.BombDefuses++;
-                    stats.TotalDefuseTime += (int)(defuseDuration * 1000);
-                    if (isClutchDefuse) stats.ClutchDefuses++;
+                    lock (stats.SyncRoot)
+                    {
+                        stats.BombDefuses++;
+                        stats.TotalDefuseTime += (int)(defuseDuration * 1000);
+                        if (isClutchDefuse) stats.ClutchDefuses++;
+                    }
                 });
 
                 _logger.LogInformation("Bomb defused by {SteamId} (Clutch: {Clutch})", player.SteamID, isClutchDefuse);
@@ -157,13 +175,31 @@ public sealed class BombEventProcessor : IBombEventProcessor
     public void HandleBombDropped(EventBombDropped @event)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        if (player is { IsBot: false }) _playerSessions.MutatePlayer(player.SteamID, stats => stats.BombDrops++);
+        if (player is { IsBot: false })
+        {
+            _playerSessions.MutatePlayer(player.SteamID, stats =>
+            {
+                lock (stats.SyncRoot)
+                {
+                    stats.BombDrops++;
+                }
+            });
+        }
     }
 
     public void HandleBombPickup(EventBombPickup @event)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        if (player is { IsBot: false }) _playerSessions.MutatePlayer(player.SteamID, stats => stats.BombPickups++);
+        if (player is { IsBot: false })
+        {
+            _playerSessions.MutatePlayer(player.SteamID, stats =>
+            {
+                lock (stats.SyncRoot)
+                {
+                    stats.BombPickups++;
+                }
+            });
+        }
     }
 
     public void HandleBombBegindefuse(EventBombBegindefuse @event)
@@ -176,9 +212,12 @@ public sealed class BombEventProcessor : IBombEventProcessor
             var hasKit = @event.GetBoolValue("haskit", false);
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                stats.BombDefuseAttempts++;
-                if (hasKit) stats.BombDefuseWithKit++;
-                else stats.BombDefuseWithoutKit++;
+                lock (stats.SyncRoot)
+                {
+                    stats.BombDefuseAttempts++;
+                    if (hasKit) stats.BombDefuseWithKit++;
+                    else stats.BombDefuseWithoutKit++;
+                }
             });
         }
     }
@@ -190,20 +229,44 @@ public sealed class BombEventProcessor : IBombEventProcessor
         {
             _bombDefuseStartTime = null;
             _defuserSteamId = null;
-            _playerSessions.MutatePlayer(player.SteamID, stats => stats.BombDefuseAborts++);
+            _playerSessions.MutatePlayer(player.SteamID, stats =>
+            {
+                lock (stats.SyncRoot)
+                {
+                    stats.BombDefuseAborts++;
+                }
+            });
         }
     }
 
     public void HandleDefuserDropped(EventDefuserDropped @event)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        if (player is { IsBot: false }) _playerSessions.MutatePlayer(player.SteamID, stats => stats.DefuserDrops++);
+        if (player is { IsBot: false })
+        {
+            _playerSessions.MutatePlayer(player.SteamID, stats =>
+            {
+                lock (stats.SyncRoot)
+                {
+                    stats.DefuserDrops++;
+                }
+            });
+        }
     }
 
     public void HandleDefuserPickup(EventDefuserPickup @event)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        if (player is { IsBot: false }) _playerSessions.MutatePlayer(player.SteamID, stats => stats.DefuserPickups++);
+        if (player is { IsBot: false })
+        {
+            _playerSessions.MutatePlayer(player.SteamID, stats =>
+            {
+                lock (stats.SyncRoot)
+                {
+                    stats.DefuserPickups++;
+                }
+            });
+        }
     }
 
     public void HandleBombBeep(EventBombBeep @event) { }
@@ -214,10 +277,28 @@ public sealed class BombEventProcessor : IBombEventProcessor
         if (weapon != "planted_c4") return;
 
         var victim = @event.GetPlayerOrDefault("userid");
-        if (victim is { IsBot: false }) _playerSessions.MutatePlayer(victim.SteamID, stats => stats.BombDeaths++);
+        if (victim is { IsBot: false })
+        {
+            _playerSessions.MutatePlayer(victim.SteamID, stats =>
+            {
+                lock (stats.SyncRoot)
+                {
+                    stats.BombDeaths++;
+                }
+            });
+        }
 
         var attacker = @event.GetPlayerOrDefault("attacker");
-        if (attacker is { IsBot: false } && attacker != victim) _playerSessions.MutatePlayer(attacker.SteamID, stats => stats.BombKills++);
+        if (attacker is { IsBot: false } && attacker != victim)
+        {
+            _playerSessions.MutatePlayer(attacker.SteamID, stats =>
+            {
+                lock (stats.SyncRoot)
+                {
+                    stats.BombKills++;
+                }
+            });
+        }
     }
 
     public void HandleRoundEnd(EventRoundEnd @event) => ResetBombState();

@@ -187,27 +187,45 @@ public sealed class PositionTrackingService : IPositionTrackingService
             _logger.LogDebug("Starting bulk track for {Count} kill positions (MatchId: {MatchId})", eventList.Count, matchId);
             try
             {
-                const string sql = """
+                const string sqlBase = """
                     INSERT INTO kill_positions 
                     (match_id, killer_steam_id, victim_steam_id, killer_x, killer_y, killer_z, 
                      victim_x, victim_y, victim_z, weapon_used, is_headshot, is_wallbang,
                      distance, killer_team, victim_team, map_name, round_number, round_time_seconds)
                     VALUES 
-                    (@MatchId, @KillerSteamId, @VictimSteamId, @KillerX, @KillerY, @KillerZ,
-                     @VictimX, @VictimY, @VictimZ, @Weapon, @IsHeadshot, @IsWallbang,
-                     @Distance, @KillerTeam, @VictimTeam, @MapName, @RoundNumber, @RoundTime)
                     """;
 
-                var parameters = eventList.Select(e => new {
-                    MatchId = matchId,
-                    e.KillerSteamId, e.VictimSteamId, e.KillerX, e.KillerY, e.KillerZ,
-                    e.VictimX, e.VictimY, e.VictimZ, e.Weapon, e.IsHeadshot, e.IsWallbang,
-                    e.Distance, e.KillerTeam, e.VictimTeam, e.MapName, e.RoundNumber, e.RoundTime
-                });
+                var rows = new List<string>();
+                var parameters = new DynamicParameters();
+                for (int i = 0; i < eventList.Count; i++)
+                {
+                    var e = eventList[i];
+                    rows.Add($"(@MatchId{i}, @KS{i}, @VS{i}, @KX{i}, @KY{i}, @KZ{i}, @VX{i}, @VY{i}, @VZ{i}, @W{i}, @HS{i}, @WB{i}, @D{i}, @KT{i}, @VT{i}, @M{i}, @RN{i}, @RT{i})");
+                    parameters.Add($"MatchId{i}", matchId);
+                    parameters.Add($"KS{i}", e.KillerSteamId);
+                    parameters.Add($"VS{i}", e.VictimSteamId);
+                    parameters.Add($"KX{i}", e.KillerX);
+                    parameters.Add($"KY{i}", e.KillerY);
+                    parameters.Add($"KZ{i}", e.KillerZ);
+                    parameters.Add($"VX{i}", e.VictimX);
+                    parameters.Add($"VY{i}", e.VictimY);
+                    parameters.Add($"VZ{i}", e.VictimZ);
+                    parameters.Add($"W{i}", e.Weapon);
+                    parameters.Add($"HS{i}", e.IsHeadshot);
+                    parameters.Add($"WB{i}", e.IsWallbang);
+                    parameters.Add($"D{i}", e.Distance);
+                    parameters.Add($"KT{i}", e.KillerTeam);
+                    parameters.Add($"VT{i}", e.VictimTeam);
+                    parameters.Add($"M{i}", e.MapName);
+                    parameters.Add($"RN{i}", e.RoundNumber);
+                    parameters.Add($"RT{i}", e.RoundTime);
+                }
+
+                var sql = sqlBase + string.Join(", ", rows);
 
                 await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
                 var count = await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)).ConfigureAwait(false);
-                _logger.LogDebug("Successfully tracked {Count} kill positions", count);
+                _logger.LogDebug("Successfully tracked {Count} kill positions using bulk insert", count);
                 Instrumentation.PositionEventsTrackedCounter.Add(count, new KeyValuePair<string, object?>("type", "kill"));
             }
             catch (Exception ex)
@@ -248,22 +266,36 @@ public sealed class PositionTrackingService : IPositionTrackingService
             _logger.LogDebug("Starting bulk track for {Count} death positions (MatchId: {MatchId})", eventList.Count, matchId);
             try
             {
-                const string sql = """
+                const string sqlBase = """
                     INSERT INTO death_positions 
                     (match_id, steam_id, x, y, z, cause_of_death, is_headshot, team, map_name, round_number, round_time_seconds)
                     VALUES 
-                    (@MatchId, @SteamId, @X, @Y, @Z, @CauseOfDeath, @IsHeadshot, @Team, @MapName, @RoundNumber, @RoundTime)
                     """;
 
-                var parameters = eventList.Select(e => new {
-                    MatchId = matchId,
-                    e.SteamId, e.X, e.Y, e.Z, e.CauseOfDeath, e.IsHeadshot, e.Team,
-                    e.MapName, e.RoundNumber, e.RoundTime
-                });
+                var rows = new List<string>();
+                var parameters = new DynamicParameters();
+                for (int i = 0; i < eventList.Count; i++)
+                {
+                    var e = eventList[i];
+                    rows.Add($"(@MatchId{i}, @S{i}, @X{i}, @Y{i}, @Z{i}, @C{i}, @HS{i}, @T{i}, @M{i}, @RN{i}, @RT{i})");
+                    parameters.Add($"MatchId{i}", matchId);
+                    parameters.Add($"S{i}", e.SteamId);
+                    parameters.Add($"X{i}", e.X);
+                    parameters.Add($"Y{i}", e.Y);
+                    parameters.Add($"Z{i}", e.Z);
+                    parameters.Add($"C{i}", e.CauseOfDeath);
+                    parameters.Add($"HS{i}", e.IsHeadshot);
+                    parameters.Add($"T{i}", e.Team);
+                    parameters.Add($"M{i}", e.MapName);
+                    parameters.Add($"RN{i}", e.RoundNumber);
+                    parameters.Add($"RT{i}", e.RoundTime);
+                }
+
+                var sql = sqlBase + string.Join(", ", rows);
 
                 await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
                 var count = await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)).ConfigureAwait(false);
-                _logger.LogDebug("Successfully tracked {Count} death positions", count);
+                _logger.LogDebug("Successfully tracked {Count} death positions using bulk insert", count);
                 Instrumentation.PositionEventsTrackedCounter.Add(count, new KeyValuePair<string, object?>("type", "death"));
             }
             catch (Exception ex)

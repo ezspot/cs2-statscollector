@@ -43,46 +43,57 @@ public sealed class RoundBackupService(
 
     public void CreateSnapshot(int roundNumber)
     {
-        var playerData = new Dictionary<ulong, PlayerRoundData>();
-        
-        foreach (var steamId in _playerSessions.GetActiveSteamIds())
+        Server.NextFrame(() =>
         {
-            var player = Utilities.GetPlayerFromSteamId(steamId);
-            if (player is not { IsValid: true, IsBot: false }) continue;
-
-            if (_playerSessions.TryGetSnapshot(steamId, out var snapshot))
+            var playerData = new Dictionary<ulong, PlayerRoundData>();
+            
+            foreach (var steamId in _playerSessions.GetActiveSteamIds())
             {
-                playerData[steamId] = new PlayerRoundData(
-                    steamId,
-                    player.InGameMoneyServices?.Account ?? 0,
-                    snapshot.Kills,
-                    snapshot.Deaths,
-                    snapshot.Assists,
-                    player.Team
-                );
+                var player = Utilities.GetPlayerFromSteamId(steamId);
+                if (player is not { IsValid: true, IsBot: false }) continue;
+
+                if (_playerSessions.TryGetSnapshot(steamId, out var snapshot))
+                {
+                    playerData[steamId] = new PlayerRoundData(
+                        steamId,
+                        player.InGameMoneyServices?.Account ?? 0,
+                        snapshot.Kills,
+                        snapshot.Deaths,
+                        snapshot.Assists,
+                        player.Team
+                    );
+                }
             }
-        }
 
-        var teamManagers = Utilities.FindAllEntitiesByDesignerName<CCSTeam>("cs_team_manager");
-        int tScore = 0;
-        int ctScore = 0;
+            var teamManagers = Utilities.FindAllEntitiesByDesignerName<CCSTeam>("cs_team_manager");
+            int tScore = 0;
+            int ctScore = 0;
 
-        foreach (var team in teamManagers)
-        {
-            if (team.TeamNum == (int)CsTeam.Terrorist) tScore = team.Score;
-            else if (team.TeamNum == (int)CsTeam.CounterTerrorist) ctScore = team.Score;
-        }
+            foreach (var team in teamManagers)
+            {
+                if (team.TeamNum == (int)CsTeam.Terrorist) tScore = team.Score;
+                else if (team.TeamNum == (int)CsTeam.CounterTerrorist) ctScore = team.Score;
+            }
 
-        var backup = new RoundSnapshot(roundNumber, tScore, ctScore, playerData);
-        _backups.RemoveAll(b => b.RoundNumber == roundNumber);
-        _backups.Add(backup);
-        
-        _logger.LogInformation("Created backup for round {RoundNumber}. T:{TScore} CT:{CTScore}", roundNumber, tScore, ctScore);
+            var backup = new RoundSnapshot(roundNumber, tScore, ctScore, playerData);
+            lock (_backups)
+            {
+                _backups.RemoveAll(b => b.RoundNumber == roundNumber);
+                _backups.Add(backup);
+            }
+            
+            _logger.LogInformation("Created backup for round {RoundNumber}. T:{TScore} CT:{CTScore}", roundNumber, tScore, ctScore);
+        });
     }
 
     public bool RestoreRound(int roundNumber)
     {
-        var backup = _backups.FirstOrDefault(b => b.RoundNumber == roundNumber);
+        RoundSnapshot? backup;
+        lock (_backups)
+        {
+            backup = _backups.FirstOrDefault(b => b.RoundNumber == roundNumber);
+        }
+
         if (backup == null)
         {
             _logger.LogWarning("Attempted to restore round {RoundNumber} but no backup exists.", roundNumber);
@@ -91,49 +102,56 @@ public sealed class RoundBackupService(
 
         _logger.LogInformation("Restoring round {RoundNumber}...", roundNumber);
 
-        // Restore team scores
-        var teamManagers = Utilities.FindAllEntitiesByDesignerName<CCSTeam>("cs_team_manager");
-        foreach (var team in teamManagers)
+        Server.NextFrame(() =>
         {
-            if (team.TeamNum == (int)CsTeam.Terrorist) team.Score = backup.Team1Score;
-            else if (team.TeamNum == (int)CsTeam.CounterTerrorist) team.Score = backup.Team2Score;
-            
-            Utilities.SetStateChanged(team, "CCSTeam", "m_iScore");
-        }
-
-        // Restore player stats and money
-        foreach (var kvp in backup.PlayerData)
-        {
-            var steamId = kvp.Key;
-            var data = kvp.Value;
-            var player = Utilities.GetPlayerFromSteamId(steamId);
-
-            if (player is { IsValid: true })
+            // Restore team scores
+            var teamManagers = Utilities.FindAllEntitiesByDesignerName<CCSTeam>("cs_team_manager");
+            foreach (var team in teamManagers)
             {
-                if (player.InGameMoneyServices != null)
-                {
-                    player.InGameMoneyServices.Account = data.Money;
-                }
-
-                _playerSessions.MutatePlayer(steamId, stats =>
-                {
-                    stats.Kills = data.Kills;
-                    stats.Deaths = data.Deaths;
-                    stats.Assists = data.Assists;
-                });
+                if (team.TeamNum == (int)CsTeam.Terrorist) team.Score = backup.Team1Score;
+                else if (team.TeamNum == (int)CsTeam.CounterTerrorist) team.Score = backup.Team2Score;
+                
+                Utilities.SetStateChanged(team, "CCSTeam", "m_iScore");
             }
-        }
 
-        // Use native command to set round
-        Server.ExecuteCommand($"mp_round_restart_delay 0; mp_restartgame 1; mp_round_restart_delay 5");
-        
-        // Note: CounterStrikeSharp doesn't expose a direct way to set the internal round counter 
-        // that matches mp_restartgame perfectly for a specific round number without some hackery 
-        // or using GameRules directly which can be unstable. 
-        // Most production plugins (MatchZy) use mp_restartgame and then handle the score/stats correction.
+            // Restore player stats and money
+            foreach (var kvp in backup.PlayerData)
+            {
+                var steamId = kvp.Key;
+                var data = kvp.Value;
+                var player = Utilities.GetPlayerFromSteamId(steamId);
+
+                if (player is { IsValid: true })
+                {
+                    if (player.InGameMoneyServices != null)
+                    {
+                        player.InGameMoneyServices.Account = data.Money;
+                    }
+
+                    _playerSessions.MutatePlayer(steamId, stats =>
+                    {
+                        lock (stats.SyncRoot)
+                        {
+                            stats.Kills = data.Kills;
+                            stats.Deaths = data.Deaths;
+                            stats.Assists = data.Assists;
+                        }
+                    });
+                }
+            }
+
+            // Use native command to set round
+            Server.ExecuteCommand($"mp_round_restart_delay 0; mp_restartgame 1; mp_round_restart_delay 5");
+        });
         
         return true;
     }
 
-    public IReadOnlyList<int> GetAvailableRounds() => _backups.Select(b => b.RoundNumber).ToList();
+    public IReadOnlyList<int> GetAvailableRounds()
+    {
+        lock (_backups)
+        {
+            return _backups.Select(b => b.RoundNumber).ToList();
+        }
+    }
 }
