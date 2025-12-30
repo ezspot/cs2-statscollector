@@ -16,11 +16,13 @@ namespace statsCollector.Services;
 public class ScrimManager : IScrimManager
 {
     private readonly ILogger<ScrimManager> _logger;
-    private readonly PluginConfig _config;
+    private readonly IOptionsMonitor<PluginConfig> _configMonitor;
     private readonly IConfigLoaderService _configLoader;
     private readonly IMatchTrackingService _matchTracker;
     private readonly IScrimPersistenceService _persistence;
     private readonly StateMachine<ScrimState, ScrimTrigger> _machine;
+
+    private PluginConfig _config => _configMonitor.CurrentValue;
 
     private readonly Dictionary<ulong, bool> _readyPlayers = [];
     private readonly Dictionary<int, ulong> _captains = [];
@@ -50,20 +52,24 @@ public class ScrimManager : IScrimManager
         KnifeRoundFinished,
         MatchStarted,
         MatchFinished,
-        RecoverState
+        RecoverState,
+        EnterPractice,
+        ExitPractice,
+        StartVeto,
+        VetoFinished
     }
 
     public ScrimState CurrentState => _machine.State;
 
     public ScrimManager(
         ILogger<ScrimManager> logger,
-        IOptions<PluginConfig> config,
+        IOptionsMonitor<PluginConfig> configMonitor,
         IConfigLoaderService configLoader,
         IMatchTrackingService matchTracker,
         IScrimPersistenceService persistence)
     {
         _logger = logger;
-        _config = config.Value;
+        _configMonitor = configMonitor;
         _configLoader = configLoader;
         _matchTracker = matchTracker;
         _persistence = persistence;
@@ -86,11 +92,28 @@ public class ScrimManager : IScrimManager
 
         _machine.Configure(ScrimState.Idle)
             .Permit(ScrimTrigger.StartLobby, ScrimState.Lobby)
-            .Permit(ScrimTrigger.RecoverState, ScrimState.Lobby); // Simple recovery entry
+            .Permit(ScrimTrigger.RecoverState, ScrimState.Lobby)
+            .Permit(ScrimTrigger.EnterPractice, ScrimState.Practice);
 
         _machine.Configure(ScrimState.Lobby)
             .OnEntryAsync(async () => await OnLobbyEntry())
             .Permit(ScrimTrigger.AllReady, ScrimState.CaptainSetup)
+            .Permit(ScrimTrigger.StartVeto, ScrimState.Veto)
+            .Permit(ScrimTrigger.StopScrim, ScrimState.Idle);
+
+        _machine.Configure(ScrimState.Veto)
+            .OnEntry(() => Server.PrintToChatAll(" [Scrim] Map Veto started!"))
+            .Permit(ScrimTrigger.VetoFinished, ScrimState.Picking)
+            .Permit(ScrimTrigger.StopScrim, ScrimState.Idle);
+
+        _machine.Configure(ScrimState.Practice)
+            .OnEntryAsync(async () => 
+            {
+                await _configLoader.LoadAndExecuteConfigAsync("practice.cfg");
+                Server.PrintToChatAll(" [Scrim] Practice Mode enabled! God, noclip, and infinite ammo active.");
+            })
+            .OnExitAsync(async () => await _configLoader.LoadAndExecuteConfigAsync("live.cfg"))
+            .Permit(ScrimTrigger.ExitPractice, ScrimState.Idle)
             .Permit(ScrimTrigger.StopScrim, ScrimState.Idle);
 
         _machine.Configure(ScrimState.CaptainSetup)
@@ -99,7 +122,7 @@ public class ScrimManager : IScrimManager
             .Permit(ScrimTrigger.StopScrim, ScrimState.Idle);
 
         _machine.Configure(ScrimState.MapVote)
-            .OnEntryAsync(async () => await OnMapVoteEntry())
+            .OnEntryAsync(OnMapVoteEntry)
             .Permit(ScrimTrigger.MapSelected, ScrimState.Picking)
             .Permit(ScrimTrigger.StopScrim, ScrimState.Idle);
 
@@ -175,11 +198,12 @@ public class ScrimManager : IScrimManager
         Server.PrintToChatAll(" [Scrim] Lobby started! Type .ready to prepare.");
     }
 
-    private async Task OnMapVoteEntry()
+    private Task OnMapVoteEntry()
     {
         _mapVotes.Clear();
         _playerVotes.Clear();
         Server.PrintToChatAll(" [Scrim] Map voting started! Type .vote <map>.");
+        return Task.CompletedTask;
     }
 
     private void StartPicking()
@@ -408,6 +432,20 @@ public class ScrimManager : IScrimManager
 
         Server.PrintToChatAll($" [Scrim] Side selected: {side.ToUpper()}. Match starting...");
         await _machine.FireAsync(ScrimTrigger.KnifeRoundFinished);
+    }
+
+    public async Task SetPracticeModeAsync(bool enabled)
+    {
+        if (enabled && CurrentState == ScrimState.Idle)
+            await _machine.FireAsync(ScrimTrigger.EnterPractice);
+        else if (!enabled && CurrentState == ScrimState.Practice)
+            await _machine.FireAsync(ScrimTrigger.ExitPractice);
+    }
+
+    public async Task StartVetoAsync()
+    {
+        if (CurrentState == ScrimState.Lobby)
+            await _machine.FireAsync(ScrimTrigger.StartVeto);
     }
 
     public void HandleDisconnect(ulong steamId)

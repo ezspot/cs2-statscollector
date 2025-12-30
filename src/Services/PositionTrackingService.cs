@@ -1,7 +1,7 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.Diagnostics.Metrics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CounterStrikeSharp.API.Core;
@@ -15,8 +15,16 @@ using Polly.Registry;
 
 namespace statsCollector.Services;
 
+public record PlayerPositionSnapshot(
+    ulong SteamId,
+    float X, float Y, float Z,
+    float Yaw, float Pitch, float Roll,
+    int Team
+);
+
 public interface IPositionTrackingService
 {
+    void OnTick();
     Task TrackKillPositionAsync(
         int? matchId,
         ulong killerSteamId, 
@@ -71,15 +79,74 @@ public sealed class PositionTrackingService : IPositionTrackingService
     private readonly IConnectionFactory _connectionFactory;
     private readonly ILogger<PositionTrackingService> _logger;
     private readonly ResiliencePipeline _resiliencePipeline;
+    private readonly IPlayerSessionService _playerSessions;
+    private readonly IPositionPersistenceService _positionPersistence;
+    private int _tickCount;
+    private const int TrackIntervalTicks = 128; // Track every 1 second at 128 tick
 
     public PositionTrackingService(
         IConnectionFactory connectionFactory,
         ResiliencePipelineProvider<string> pipelineProvider,
-        ILogger<PositionTrackingService> logger)
+        ILogger<PositionTrackingService> logger,
+        IPlayerSessionService playerSessions,
+        IPositionPersistenceService positionPersistence)
     {
         _connectionFactory = connectionFactory;
         _logger = logger;
         _resiliencePipeline = pipelineProvider.GetPipeline("database");
+        _playerSessions = playerSessions;
+        _positionPersistence = positionPersistence;
+    }
+
+    public void OnTick()
+    {
+        _tickCount++;
+        if (_tickCount % TrackIntervalTicks != 0) return;
+
+        var steamIds = _playerSessions.GetActiveSteamIds();
+        if (steamIds.Count == 0) return;
+
+        var positions = ArrayPool<PlayerPositionSnapshot>.Shared.Rent(steamIds.Count);
+        int actualCount = 0;
+
+        try
+        {
+            foreach (var steamId in steamIds)
+            {
+                var player = CounterStrikeSharp.API.Utilities.GetPlayerFromSteamId(steamId);
+                if (player is { IsValid: true, PlayerPawn.Value: not null })
+                {
+                    var pawn = player.PlayerPawn.Value;
+                    var pos = pawn.AbsOrigin;
+                    var ang = pawn.EyeAngles;
+
+                    if (pos != null && ang != null)
+                    {
+                        positions[actualCount++] = new PlayerPositionSnapshot(
+                            steamId,
+                            pos.X, pos.Y, pos.Z,
+                            ang.X, ang.Y, ang.Z,
+                            (int)player.TeamNum
+                        );
+                    }
+                }
+            }
+
+            if (actualCount > 0)
+            {
+                var batch = new PlayerPositionSnapshot[actualCount];
+                Array.Copy(positions, batch, actualCount);
+                _ = _positionPersistence.EnqueueAsync(new PositionTickEvent(CounterStrikeSharp.API.Server.MapName, batch), CancellationToken.None);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during position tracking tick");
+        }
+        finally
+        {
+            ArrayPool<PlayerPositionSnapshot>.Shared.Return(positions);
+        }
     }
 
     public async Task TrackKillPositionAsync(

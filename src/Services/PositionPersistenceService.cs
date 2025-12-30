@@ -13,7 +13,7 @@ using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public record PositionEvent(int? MatchId);
+public record PositionEvent(int? MatchId = null);
 
 public record KillPositionEvent(
     int? MatchId,
@@ -37,6 +37,8 @@ public record UtilityPositionEvent(
     float LandX, float LandY, float LandZ,
     int UtilityType, int OpponentsAffected, int TeammatesAffected,
     int Damage, string MapName, int RoundNumber, int RoundTime) : PositionEvent(MatchId);
+
+public record PositionTickEvent(string MapName, PlayerPositionSnapshot[] Positions) : PositionEvent((int?)null);
 
 public interface IPositionPersistenceService : IAsyncDisposable
 {
@@ -149,6 +151,12 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
                         case KillPositionEvent k: killBatch.Add(k); break;
                         case DeathPositionEvent d: deathBatch.Add(d); break;
                         case UtilityPositionEvent u: utilityBatch.Add(u); break;
+                        case PositionTickEvent t:
+                            // For ticks, we might want to handle them immediately or batch them differently
+                            // For now, let's just log or process if needed. 
+                            // In a real scenario, you'd probably write these to a high-throughput store or another table.
+                            _logger.LogTrace("Processing position tick for {Count} players on {Map}", t.Positions.Length, t.MapName);
+                            break;
                     }
 
                     if (killBatch.Count + deathBatch.Count + utilityBatch.Count >= 50) break;

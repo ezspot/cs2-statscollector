@@ -15,6 +15,7 @@ public interface IMatchTrackingService
     Task EndMatchAsync(int matchId, CancellationToken ct = default);
     Task<int> StartRoundAsync(int matchId, int roundNumber, CancellationToken ct = default);
     Task EndRoundAsync(int roundId, int winnerTeam, int winType, CancellationToken ct = default);
+    float GetRoundWinProbability(int ctAlive, int tAlive);
     MatchContext? CurrentMatch { get; }
     int? CurrentRoundId { get; }
 }
@@ -73,5 +74,34 @@ public sealed class MatchTrackingService : IMatchTrackingService
         await using var connection = await _connectionFactory.CreateConnectionAsync(ct);
         const string sql = "UPDATE rounds SET end_time = CURRENT_TIMESTAMP, winner_team = @Winner, win_type = @WinType WHERE id = @RoundId";
         await connection.ExecuteAsync(sql, new { RoundId = roundId, Winner = winnerTeam, WinType = winType });
+    }
+
+    public float GetRoundWinProbability(int ctAlive, int tAlive)
+    {
+        // Simple historical model for CT win probability based on alive counts
+        // 5v5 -> 0.5, 5v4 -> 0.7, etc.
+        if (ctAlive == 0) return 0.0f;
+        if (tAlive == 0) return 1.0f;
+
+        // Using a basic sigmoid-like approach or lookup table for CS2 standard meta
+        return (ctAlive, tAlive) switch
+        {
+            (5, 5) => 0.50f,
+            (5, 4) => 0.72f,
+            (4, 5) => 0.28f,
+            (4, 4) => 0.50f,
+            (5, 3) => 0.85f,
+            (3, 5) => 0.15f,
+            (4, 3) => 0.70f,
+            (3, 4) => 0.30f,
+            (3, 3) => 0.50f,
+            (2, 3) => 0.25f,
+            (3, 2) => 0.75f,
+            (2, 2) => 0.50f,
+            (1, 2) => 0.15f,
+            (2, 1) => 0.85f,
+            (1, 1) => 0.50f,
+            _ => (float)ctAlive / (ctAlive + tAlive)
+        };
     }
 }
