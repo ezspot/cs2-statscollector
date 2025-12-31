@@ -43,23 +43,23 @@ public sealed class PlayerLifecycleHandler : IGameHandler
 
     private HookResult OnPlayerConnect(EventPlayerConnect @event, GameEventInfo info)
     {
-        // Early connect - SteamID might not be fully ready yet in some environments
         var player = @event.GetPlayerOrDefault("userid");
         if (player != null && !player.IsBot && player.SteamID != 0)
         {
-            _playerSessions.EnsurePlayer(player.SteamID, player.PlayerName);
+            var state = PlayerControllerState.From(player);
+            _playerSessions.EnsurePlayer(state);
         }
         return HookResult.Continue;
     }
 
     private HookResult OnPlayerConnectFull(EventPlayerConnectFull @event, GameEventInfo info)
     {
-        // Full connect - SteamID is guaranteed to be valid now
         var player = @event.GetPlayerOrDefault("userid");
         if (player != null && !player.IsBot && player.SteamID != 0)
         {
             _logger.LogInformation("Player {Name} fully connected. SteamID: {SteamID}", player.PlayerName, player.SteamID);
-            _playerSessions.EnsurePlayer(player.SteamID, player.PlayerName);
+            var state = PlayerControllerState.From(player);
+            _playerSessions.EnsurePlayer(state);
         }
         return HookResult.Continue;
     }
@@ -69,19 +69,20 @@ public sealed class PlayerLifecycleHandler : IGameHandler
         var player = @event.GetPlayerOrDefault("userid");
         if (player != null && !player.IsBot)
         {
-            _scrimManager.HandleDisconnect(player.SteamID);
-            _taskTracker.Track("SaveStatsOnDisconnect", SavePlayerStatsOnDisconnectAsync(player));
+            var steamId = player.SteamID;
+            _scrimManager.HandleDisconnect(steamId);
+            _taskTracker.Track("SaveStatsOnDisconnect", SavePlayerStatsOnDisconnectAsync(steamId));
         }
         return HookResult.Continue;
     }
 
-    private async Task SavePlayerStatsOnDisconnectAsync(CCSPlayerController player)
+    private async Task SavePlayerStatsOnDisconnectAsync(ulong steamId)
     {
         var match = _matchTracker.CurrentMatch;
-        if (_playerSessions.TryGetSnapshot(player.SteamID, out var snapshot, match?.MatchId, match?.MatchUuid))
+        if (_playerSessions.TryGetSnapshot(steamId, out var snapshot, match?.MatchId, match?.MatchUuid))
         {
             await _statsRepository.UpsertPlayerAsync(snapshot, default);
-            _playerSessions.TryRemovePlayer(player.SteamID, out _);
+            _playerSessions.TryRemovePlayer(steamId, out _);
         }
     }
 
@@ -90,8 +91,9 @@ public sealed class PlayerLifecycleHandler : IGameHandler
         var player = @event.GetPlayerOrDefault("userid");
         if (player is { IsBot: false })
         {
-            _playerSessions.EnsurePlayer(player.SteamID, player.PlayerName);
-            _playerSessions.MutatePlayer(player.SteamID, stats =>
+            var state = PlayerControllerState.From(player);
+            _playerSessions.EnsurePlayer(state);
+            _playerSessions.MutatePlayer(state.SteamId, stats =>
             {
                 stats.Round.TotalSpawns++;
                 stats.Round.PlaytimeSeconds = (int)(DateTime.UtcNow - new DateTime(2020, 1, 1)).TotalSeconds;

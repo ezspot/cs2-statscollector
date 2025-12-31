@@ -89,7 +89,9 @@ public sealed class MatchFlowHandler : IGameHandler
 
         if (_matchTracker.CurrentMatch != null)
         {
-            _taskTracker.Track("EnqueueStartRound", _matchLifecyclePersistence.EnqueueStartRoundAsync(_matchTracker.CurrentMatch.MatchId, _currentRoundNumber));
+            var matchId = _matchTracker.CurrentMatch.MatchId;
+            var roundNumber = _currentRoundNumber;
+            _taskTracker.Track("EnqueueStartRound", _matchLifecyclePersistence.EnqueueStartRoundAsync(matchId, roundNumber));
         }
 
         return HookResult.Continue;
@@ -103,10 +105,18 @@ public sealed class MatchFlowHandler : IGameHandler
         var ctAlive = 0;
         var tAlive = 0;
         
-        _playerSessions.ForEachPlayer(stats =>
+        // Capture player states on the game thread
+        var playerStates = new List<PlayerControllerState>();
+        _playerSessions.GetActiveSteamIds().ToList().ForEach(steamId => 
         {
-            if (stats.CurrentTeam == PlayerTeam.CounterTerrorist) ctAlive++;
-            else if (stats.CurrentTeam == PlayerTeam.Terrorist) tAlive++;
+            var player = Utilities.GetPlayerFromSteamId(steamId);
+            if (player is { IsValid: true })
+            {
+                var state = PlayerControllerState.From(player);
+                playerStates.Add(state);
+                if (state.Team == PlayerTeam.CounterTerrorist) ctAlive++;
+                else if (state.Team == PlayerTeam.Terrorist) tAlive++;
+            }
         });
 
         var context = new RoundContext(_currentRoundNumber, roundStartUtc, ctAlive, tAlive);
@@ -115,18 +125,16 @@ public sealed class MatchFlowHandler : IGameHandler
             processor.OnRoundStart(context);
         }
 
-        _playerSessions.ForEachPlayer(stats =>
+        foreach (var state in playerStates)
         {
-            stats.Round.AliveOnTeamAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
-            stats.Round.AliveEnemyAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
-            
-            var player = Utilities.GetPlayerFromSteamId(stats.SteamId);
-            if (player is { IsValid: true, InGameMoneyServices: not null })
+            _playerSessions.MutatePlayer(state.SteamId, stats => 
             {
-                stats.Economy.RoundStartMoney = player.InGameMoneyServices.Account;
+                stats.Round.AliveOnTeamAtRoundStart = state.Team == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
+                stats.Round.AliveEnemyAtRoundStart = state.Team == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
+                stats.Economy.RoundStartMoney = state.Money;
                 stats.Economy.EquipmentValueStart = stats.Economy.EquipmentValue;
-            }
-        });
+            });
+        }
 
         _logger.LogInformation("Round {Round} Freeze End. Timing started.", _currentRoundNumber);
         return HookResult.Continue;
@@ -172,7 +180,8 @@ public sealed class MatchFlowHandler : IGameHandler
         
         if (_matchTracker.CurrentRoundId != null)
         {
-            _taskTracker.Track("EnqueueEndRound", _matchLifecyclePersistence.EnqueueEndRoundAsync(_matchTracker.CurrentRoundId.Value, winningTeamInt, winReason));
+            var roundId = _matchTracker.CurrentRoundId.Value;
+            _taskTracker.Track("EnqueueEndRound", _matchLifecyclePersistence.EnqueueEndRoundAsync(roundId, winningTeamInt, winReason));
         }
 
         _taskTracker.Track("SaveStatsAtRoundEnd", SaveStatsAtRoundEndAsync());

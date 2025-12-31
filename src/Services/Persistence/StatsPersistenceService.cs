@@ -123,25 +123,45 @@ public sealed class StatsPersistenceService : IStatsPersistenceService
     private async Task ProcessLoopAsync(CancellationToken cancellationToken)
     {
         var reader = _channel.Reader;
+        var flushInterval = TimeSpan.FromSeconds(30);
+        var lastFlush = DateTime.UtcNow;
+
         try
         {
-            while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+            while (!cancellationToken.IsCancellationRequested)
             {
+                // Wait for data OR timeout for periodic flush
+                try
+                {
+                    using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    timeoutCts.CancelAfter(TimeSpan.FromSeconds(1));
+                    await reader.WaitToReadAsync(timeoutCts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // Timeout reached, check if we need to flush
+                    _logger.LogInformation("Stats persistence timeout reached. Flushing {Pending} snapshots...", reader.Count);
+                }
+
                 var batch = new Dictionary<ulong, PlayerSnapshot>();
                 while (reader.TryRead(out var snapshot))
                 {
-                    batch[snapshot.SteamId] = snapshot; // Keep latest per player in this batch
+                    batch[snapshot.SteamId] = snapshot; // Keep latest per player
                     if (batch.Count >= _config.CurrentValue.FlushConcurrency)
                     {
                         await FlushBatchAsync(batch.Values.ToList(), cancellationToken).ConfigureAwait(false);
                         batch.Clear();
+                        lastFlush = DateTime.UtcNow;
                     }
                 }
 
-                if (batch.Count > 0)
+                if (batch.Count > 0 || (DateTime.UtcNow - lastFlush >= flushInterval && batch.Count > 0))
                 {
                     await FlushBatchAsync(batch.Values.ToList(), cancellationToken).ConfigureAwait(false);
+                    lastFlush = DateTime.UtcNow;
                 }
+
+                if (reader.Completion.IsCompleted && batch.Count == 0) break;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

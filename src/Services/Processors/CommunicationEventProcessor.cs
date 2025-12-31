@@ -41,13 +41,14 @@ public sealed class CommunicationEventProcessor : ICommunicationEventProcessor
     private void HandlePlayerPing(EventPlayerPing @event)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        if (player is not { IsBot: false, IsValid: true }) return;
+        var playerState = PlayerControllerState.From(player);
+        if (!playerState.IsValid || playerState.IsBot) return;
 
-        _playerSessions.MutatePlayer(player.SteamID, stats =>
+        _playerSessions.MutatePlayer(playerState.SteamId, stats =>
         {
             stats.Round.Pings++;
         });
 
-        _logger.LogTrace("Player {SteamId} pinged at ({X}, {Y}, {Z})", player.SteamID, @event.X, @event.Y, @event.Z);
+        _logger.LogTrace("Player {SteamId} pinged at ({X}, {Y}, {Z})", playerState.SteamId, @event.X, @event.Y, @event.Z);
     }
 }

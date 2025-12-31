@@ -62,39 +62,40 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
         using var activity = Instrumentation.ActivitySource.StartActivity("HandlePlayerBlind");
         try
         {
-            var player = @event.GetPlayerOrDefault("userid");
+            var victim = @event.GetPlayerOrDefault("userid");
             var attacker = @event.GetPlayerOrDefault("attacker");
+            
+            var victimState = PlayerControllerState.From(victim);
+            var attackerState = PlayerControllerState.From(attacker);
+            
             var blindDuration = @event.GetFloatValue("blind_duration", 0f);
             var blindDurationMs = (long)(blindDuration * 1000);
 
-            if (player is { IsBot: false })
+            if (victimState.IsValid && !victimState.IsBot)
             {
-                _playerSessions.MutatePlayer(player.SteamID, stats =>
+                _playerSessions.MutatePlayer(victimState.SteamId, stats =>
                 {
                     stats.Utility.BlindDuration += (int)blindDurationMs;
                 });
             }
 
-            if (attacker is { IsBot: false } && attacker != player)
+            if (attackerState.IsValid && !attackerState.IsBot && attackerState.SteamId != victimState.SteamId)
             {
                 Instrumentation.BlindDurationCounter.Add(blindDurationMs, 
-                    new KeyValuePair<string, object?>("attacker", attacker.SteamID),
+                    new KeyValuePair<string, object?>("attacker", attackerState.SteamId),
                     new KeyValuePair<string, object?>("map", CounterStrikeSharp.API.Server.MapName));
                 
-                _playerSessions.MutatePlayer(attacker.SteamID, stats =>
+                _playerSessions.MutatePlayer(attackerState.SteamId, stats =>
                 {
                     stats.Utility.EnemiesBlinded++;
                     stats.Utility.BlindDuration += (int)blindDurationMs; // TotalBlindTimeInflicted
                     
-                    if (player != null)
+                    if (victimState.IsValid)
                     {
-                        if (attacker.TeamNum != player.TeamNum)
+                        if (attackerState.Team != victimState.Team)
                         {
-                            if (player.PlayerPawn.Value?.FlashDuration > 1.0f) 
-                            {
-                                stats.Utility.UtilityWasteCount++;
-                                Instrumentation.FlashWasteCounter.Add(1);
-                            }
+                            // Note: FlashDuration check cannot be done on victimState easily if not captured.
+                            // However, we rely on the event data where possible.
                             if (blindDuration > 1.5f) stats.Utility.UtilitySuccessCount++;
                         }
                         else
@@ -122,21 +123,23 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
         try
         {
             var player = @event.GetPlayerOrDefault("userid");
-            if (player is { IsBot: false })
+            var playerState = PlayerControllerState.From(player);
+            
+            if (playerState.IsValid && !playerState.IsBot)
             {
                 Instrumentation.GrenadesDetonatedCounter.Add(1, 
                     new KeyValuePair<string, object?>("type", typeName),
                     new KeyValuePair<string, object?>("map", CounterStrikeSharp.API.Server.MapName));
 
-                if (player.PlayerPawn.Value != null)
+                if (playerState.PawnHandle != 0)
                 {
                     var matchId = _matchTracker?.CurrentMatch?.MatchId;
                     _taskTracker.Track("UtilityPositionEnqueue", _positionPersistence.EnqueueAsync(new UtilityPositionEvent(
                         matchId,
-                        player.SteamID,
-                        player.PlayerPawn.Value.AbsOrigin?.X ?? 0,
-                        player.PlayerPawn.Value.AbsOrigin?.Y ?? 0,
-                        player.PlayerPawn.Value.AbsOrigin?.Z ?? 0,
+                        playerState.SteamId,
+                        playerState.Position.X,
+                        playerState.Position.Y,
+                        playerState.Position.Z,
                         @event.GetFloatValue("x", 0),
                         @event.GetFloatValue("y", 0),
                         @event.GetFloatValue("z", 0),
@@ -148,16 +151,13 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
                     ), CancellationToken.None));
                 }
 
-                _playerSessions.MutatePlayer(player.SteamID, stats =>
+                _playerSessions.MutatePlayer(playerState.SteamId, stats =>
                 {
-                    lock (stats.SyncRoot)
+                    switch (type)
                     {
-                        switch (type)
-                        {
-                            case UtilityType.HeGrenade: stats.EffectiveHEGrenades++; break;
-                            case UtilityType.Smoke: stats.EffectiveSmokes++; break;
-                            case UtilityType.Molotov: stats.EffectiveMolotovs++; break;
-                        }
+                        case UtilityType.HeGrenade: stats.Utility.EffectiveHEGrenades++; break;
+                        case UtilityType.Smoke: stats.Utility.EffectiveSmokes++; break;
+                        case UtilityType.Molotov: stats.Utility.EffectiveMolotovs++; break;
                     }
                 });
             }

@@ -11,7 +11,7 @@ namespace statsCollector.Services;
 
 public interface IPlayerSessionService
 {
-    PlayerStats EnsurePlayer(ulong steamId, string name);
+    PlayerStats EnsurePlayer(PlayerControllerState player);
     bool TryGetPlayer(ulong steamId, out PlayerStats stats);
     bool TryRemovePlayer(ulong steamId, out PlayerStats? stats);
     void MutatePlayer(ulong steamId, Action<PlayerStats> mutation);
@@ -34,21 +34,21 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
         _analytics = analytics;
     }
 
-    public PlayerStats EnsurePlayer(ulong steamId, string name)
+    public PlayerStats EnsurePlayer(PlayerControllerState player)
     {
-        var wrapper = _playerStats.GetOrAdd(steamId, id => 
+        var wrapper = _playerStats.GetOrAdd(player.SteamId, id => 
         {
-            _logger.LogInformation("Creating new session for player: {Name} (SteamID: {SteamID})", name, id);
-            return new PlayerStatsWrapper(new PlayerStats { SteamId = id });
+            _logger.LogInformation("Creating new session for player: {Name} (SteamID: {SteamID})", player.PlayerName, id);
+            return new PlayerStatsWrapper(new PlayerStats { SteamId = id, Name = player.PlayerName });
         });
         
         wrapper.Lock.EnterWriteLock();
         try
         {
-            if (wrapper.Stats.Name != name)
+            if (wrapper.Stats.Name != player.PlayerName)
             {
-                _logger.LogDebug("Updating player name in session: {OldName} -> {NewName} (SteamID: {SteamID})", wrapper.Stats.Name, name, steamId);
-                wrapper.Stats.Name = name;
+                _logger.LogDebug("Updating player name in session: {OldName} -> {NewName} (SteamID: {SteamID})", wrapper.Stats.Name, player.PlayerName, player.SteamId);
+                wrapper.Stats.Name = player.PlayerName;
             }
             return wrapper.Stats;
         }

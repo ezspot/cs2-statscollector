@@ -58,12 +58,14 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
         try
         {
             var player = @event.GetPlayerOrDefault("userid");
-            if (player is not { IsBot: false, IsValid: true }) return;
+            var playerState = PlayerControllerState.From(player);
+            
+            if (!playerState.IsValid || playerState.IsBot) return;
 
             var weapon = @event.GetStringValue("weapon", string.Empty) ?? string.Empty;
             var cost = GetDynamicWeaponCost(weapon);
 
-            activity?.SetTag("player.steamid", player.SteamID);
+            activity?.SetTag("player.steamid", playerState.SteamId);
             activity?.SetTag("weapon", weapon);
             activity?.SetTag("cost", cost);
 
@@ -71,13 +73,13 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
                 new KeyValuePair<string, object?>("weapon", weapon),
                 new KeyValuePair<string, object?>("map", CounterStrikeSharp.API.Server.MapName));
 
-            _playerSessions.MutatePlayer(player.SteamID, stats =>
+            _playerSessions.MutatePlayer(playerState.SteamId, stats =>
             {
                 stats.Economy.ItemsPurchased++;
                 stats.Economy.MoneySpent += cost;
             });
 
-            _logger.LogTrace("Player {SteamId} purchased {Weapon} for ${Cost} (Dynamic)", player.SteamID, weapon, cost);
+            _logger.LogTrace("Player {SteamId} purchased {Weapon} for ${Cost} (Dynamic)", playerState.SteamId, weapon, cost);
         }
         catch (Exception ex) { _logger.LogError(ex, "Error processing item purchase event"); }
     }
@@ -121,13 +123,16 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
         try
         {
             var player = @event.GetPlayerOrDefault("userid");
-            if (player is not { IsBot: false, IsValid: true }) return;
+            var playerState = PlayerControllerState.From(player);
+            
+            if (!playerState.IsValid || playerState.IsBot) return;
+            
             var item = @event.GetStringValue("item", string.Empty);
-            _playerSessions.MutatePlayer(player.SteamID, stats =>
+            _playerSessions.MutatePlayer(playerState.SteamId, stats =>
             {
                 stats.Economy.ItemsPickedUp++;
             });
-            _logger.LogTrace("Player {SteamId} picked up {Item}", player.SteamID, item);
+            _logger.LogTrace("Player {SteamId} picked up {Item}", playerState.SteamId, item);
         }
         catch (Exception ex) { _logger.LogError(ex, "Error processing item pickup event"); }
     }
@@ -137,11 +142,14 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
         try
         {
             var player = @event.GetPlayerOrDefault("userid");
-            if (player is not { IsBot: false, IsValid: true }) return;
+            var playerState = PlayerControllerState.From(player);
+            
+            if (!playerState.IsValid || playerState.IsBot) return;
+            
             var item = @event.GetStringValue("item", string.Empty) ?? string.Empty;
             var hasHelmet = @event.GetBoolValue("hashelmet", false);
             var hasDefuser = @event.GetBoolValue("hasdefuser", false);
-            _playerSessions.MutatePlayer(player.SteamID, stats =>
+            _playerSessions.MutatePlayer(playerState.SteamId, stats =>
             {
                 var value = GetItemValue(item);
                 if (hasHelmet) value += 350;

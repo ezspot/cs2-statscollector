@@ -12,39 +12,36 @@ public interface IEventDispatcher
     HookResult Dispatch<T>(T @event, GameEventInfo info) where T : GameEvent;
 }
 
-public sealed class EventDispatcher : IEventDispatcher
+public sealed class EventDispatcher(ILogger<EventDispatcher> logger) : IEventDispatcher
 {
-    private readonly ConcurrentDictionary<Type, ImmutableArray<Delegate>> _handlers = new();
-    private readonly ILogger<EventDispatcher> _logger;
-
-    public EventDispatcher(ILogger<EventDispatcher> logger)
-    {
-        _logger = logger;
-    }
+    private readonly ConcurrentDictionary<Type, object> _handlers = new();
+    private readonly ILogger<EventDispatcher> _logger = logger;
 
     public void Subscribe<T>(Func<T, GameEventInfo, HookResult> handler) where T : GameEvent
     {
-        _handlers.AddOrUpdate(typeof(T), 
-            _ => ImmutableArray.Create<Delegate>(handler),
-            (_, existing) => existing.Add(handler));
+        _handlers.AddOrUpdate(typeof(T),
+            _ => ImmutableArray.Create<Func<T, GameEventInfo, HookResult>>(handler),
+            (_, existing) => ((ImmutableArray<Func<T, GameEventInfo, HookResult>>)existing).Add(handler));
+        
         _logger.LogTrace("Subscribed to event {EventType}", typeof(T).Name);
     }
 
     public HookResult Dispatch<T>(T @event, GameEventInfo info) where T : GameEvent
     {
-        if (!_handlers.TryGetValue(typeof(T), out var handlers))
+        if (!_handlers.TryGetValue(typeof(T), out var handlersObj))
         {
             return HookResult.Continue;
         }
 
+        var handlers = (ImmutableArray<Func<T, GameEventInfo, HookResult>>)handlersObj;
         var result = HookResult.Continue;
-        // handlers is an ImmutableArray, so iteration is thread-safe without locks
+
         foreach (var handler in handlers)
         {
             try
             {
-                var handlerResult = ((Func<T, GameEventInfo, HookResult>)handler)(@event, info);
-                if (handlerResult == HookResult.Stop || handlerResult == HookResult.Handled)
+                var handlerResult = handler(@event, info);
+                if (handlerResult is HookResult.Stop or HookResult.Handled)
                 {
                     result = handlerResult;
                 }

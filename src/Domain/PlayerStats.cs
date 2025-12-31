@@ -55,9 +55,6 @@ public sealed class PlayerStats
         Weapon = new WeaponStats(MarkDirty);
     }
 
-    // legacy field for backward compatibility if needed, or just remove if all call sites updated
-    public object SyncRoot { get; } = new();
-
     public void ResetRoundStats()
     {
         Round.ResetRoundFlags();

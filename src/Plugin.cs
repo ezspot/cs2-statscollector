@@ -93,6 +93,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         _logger.LogInformation("statsCollector v{Version} loading... HotReload: {HotReload}", Instrumentation.ServiceVersion, hotReload);
 
         // Run initialization in a separate task to avoid blocking the game thread
+        // BUT ensure any game thread interactions are correctly scheduled
         Task.Run(async () =>
         {
             try
@@ -194,9 +195,15 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         await _lifecycle.StartAsync(ct);
 
         // Initialize match tracking if server is already running
-        if (hotReload && Server.MapName != null)
+        if (hotReload)
         {
-            await matchTracker.StartMatchAsync(Server.MapName);
+            Server.NextFrame(async () => 
+            {
+                if (Server.MapName != null)
+                {
+                    await matchTracker.StartMatchAsync(Server.MapName);
+                }
+            });
         }
 
         // Register listeners on the game thread

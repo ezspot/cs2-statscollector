@@ -12,9 +12,9 @@ public interface IMatchLifecyclePersistenceService
 {
     Task StartAsync(CancellationToken cancellationToken);
     Task StopAsync();
-    Task EnqueueStartMatchAsync(string matchId, string? seriesUuid, CancellationToken cancellationToken = default);
-    Task EnqueueEndMatchAsync(string matchId, int winnerTeam, CancellationToken cancellationToken = default);
-    Task EnqueueStartRoundAsync(string matchId, int roundNumber, CancellationToken cancellationToken = default);
+    Task EnqueueStartMatchAsync(string mapName, string? seriesUuid, CancellationToken cancellationToken = default);
+    Task EnqueueEndMatchAsync(int matchId, int winnerTeam, CancellationToken cancellationToken = default);
+    Task EnqueueStartRoundAsync(int matchId, int roundNumber, CancellationToken cancellationToken = default);
     Task EnqueueEndRoundAsync(int roundId, int winnerTeam, int winReason, CancellationToken cancellationToken = default);
 }
 
@@ -58,7 +58,7 @@ public sealed class MatchLifecyclePersistenceService : IMatchLifecyclePersistenc
         if (_cts == null) return;
 
         _eventChannel.Writer.Complete();
-        _cts.Cancel();
+        await _cts.CancelAsync();
 
         if (_processingTask != null)
         {
@@ -75,33 +75,26 @@ public sealed class MatchLifecyclePersistenceService : IMatchLifecyclePersistenc
         _logger.LogInformation("MatchLifecyclePersistenceService stopped");
     }
 
-    public async Task EnqueueStartMatchAsync(string matchId, string? seriesUuid, CancellationToken cancellationToken = default)
+    public async Task EnqueueStartMatchAsync(string mapName, string? seriesUuid, CancellationToken cancellationToken = default)
     {
         var evt = new LifecycleEvent
         {
             Type = LifecycleEventType.StartMatch,
-            MatchId = matchId,
+            MapName = mapName,
             SeriesUuid = seriesUuid,
             Timestamp = DateTime.UtcNow
         };
 
-        if (!await _eventChannel.Writer.WaitToWriteAsync(cancellationToken))
+        if (await _eventChannel.Writer.WaitToWriteAsync(cancellationToken).ConfigureAwait(false))
         {
-            _logger.LogWarning("Failed to enqueue StartMatch event - channel closed");
-            return;
-        }
-
-        if (_eventChannel.Writer.TryWrite(evt))
-        {
-            Instrumentation.MatchLifecycleEventsCounter.Add(1, new("event_type", "start_match"));
-        }
-        else
-        {
-            _logger.LogWarning("Failed to enqueue StartMatch event - channel full");
+            if (_eventChannel.Writer.TryWrite(evt))
+            {
+                Instrumentation.MatchLifecycleEventsCounter.Add(1, new("event_type", "start_match"));
+            }
         }
     }
 
-    public async Task EnqueueEndMatchAsync(string matchId, int winnerTeam, CancellationToken cancellationToken = default)
+    public async Task EnqueueEndMatchAsync(int matchId, int winnerTeam, CancellationToken cancellationToken = default)
     {
         var evt = new LifecycleEvent
         {
@@ -111,23 +104,16 @@ public sealed class MatchLifecyclePersistenceService : IMatchLifecyclePersistenc
             Timestamp = DateTime.UtcNow
         };
 
-        if (!await _eventChannel.Writer.WaitToWriteAsync(cancellationToken))
+        if (await _eventChannel.Writer.WaitToWriteAsync(cancellationToken).ConfigureAwait(false))
         {
-            _logger.LogWarning("Failed to enqueue EndMatch event - channel closed");
-            return;
-        }
-
-        if (_eventChannel.Writer.TryWrite(evt))
-        {
-            Instrumentation.MatchLifecycleEventsCounter.Add(1, new("event_type", "end_match"));
-        }
-        else
-        {
-            _logger.LogWarning("Failed to enqueue EndMatch event - channel full");
+            if (_eventChannel.Writer.TryWrite(evt))
+            {
+                Instrumentation.MatchLifecycleEventsCounter.Add(1, new("event_type", "end_match"));
+            }
         }
     }
 
-    public async Task EnqueueStartRoundAsync(string matchId, int roundNumber, CancellationToken cancellationToken = default)
+    public async Task EnqueueStartRoundAsync(int matchId, int roundNumber, CancellationToken cancellationToken = default)
     {
         var evt = new LifecycleEvent
         {
@@ -137,19 +123,12 @@ public sealed class MatchLifecyclePersistenceService : IMatchLifecyclePersistenc
             Timestamp = DateTime.UtcNow
         };
 
-        if (!await _eventChannel.Writer.WaitToWriteAsync(cancellationToken))
+        if (await _eventChannel.Writer.WaitToWriteAsync(cancellationToken).ConfigureAwait(false))
         {
-            _logger.LogWarning("Failed to enqueue StartRound event - channel closed");
-            return;
-        }
-
-        if (_eventChannel.Writer.TryWrite(evt))
-        {
-            Instrumentation.MatchLifecycleEventsCounter.Add(1, new("event_type", "start_round"));
-        }
-        else
-        {
-            _logger.LogWarning("Failed to enqueue StartRound event - channel full");
+            if (_eventChannel.Writer.TryWrite(evt))
+            {
+                Instrumentation.MatchLifecycleEventsCounter.Add(1, new("event_type", "start_round"));
+            }
         }
     }
 
@@ -164,32 +143,25 @@ public sealed class MatchLifecyclePersistenceService : IMatchLifecyclePersistenc
             Timestamp = DateTime.UtcNow
         };
 
-        if (!await _eventChannel.Writer.WaitToWriteAsync(cancellationToken))
+        if (await _eventChannel.Writer.WaitToWriteAsync(cancellationToken).ConfigureAwait(false))
         {
-            _logger.LogWarning("Failed to enqueue EndRound event - channel closed");
-            return;
-        }
-
-        if (_eventChannel.Writer.TryWrite(evt))
-        {
-            Instrumentation.MatchLifecycleEventsCounter.Add(1, new("event_type", "end_round"));
-        }
-        else
-        {
-            _logger.LogWarning("Failed to enqueue EndRound event - channel full");
+            if (_eventChannel.Writer.TryWrite(evt))
+            {
+                Instrumentation.MatchLifecycleEventsCounter.Add(1, new("event_type", "end_round"));
+            }
         }
     }
 
     private async Task ProcessEventsAsync(CancellationToken cancellationToken)
     {
-        await foreach (var evt in _eventChannel.Reader.ReadAllAsync(cancellationToken))
+        await foreach (var evt in _eventChannel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
         {
             try
             {
                 await _resiliencePipeline.ExecuteAsync(async ct =>
                 {
-                    await ProcessEventAsync(evt, ct);
-                }, cancellationToken);
+                    await ProcessEventAsync(evt, ct).ConfigureAwait(false);
+                }, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -206,27 +178,19 @@ public sealed class MatchLifecyclePersistenceService : IMatchLifecyclePersistenc
         switch (evt.Type)
         {
             case LifecycleEventType.StartMatch:
-                await _matchTracker.StartMatchAsync(evt.MatchId!, evt.SeriesUuid);
-                _logger.LogDebug("Processed StartMatch event for {MatchId}", evt.MatchId);
+                await _matchTracker.StartMatchAsync(evt.MapName!, evt.SeriesUuid, cancellationToken).ConfigureAwait(false);
                 break;
 
             case LifecycleEventType.EndMatch:
-                await _matchTracker.EndMatchAsync(evt.MatchId!, evt.WinnerTeam);
-                _logger.LogDebug("Processed EndMatch event for {MatchId}", evt.MatchId);
+                await _matchTracker.EndMatchAsync(evt.MatchId, cancellationToken).ConfigureAwait(false);
                 break;
 
             case LifecycleEventType.StartRound:
-                await _matchTracker.StartRoundAsync(evt.MatchId!, evt.RoundNumber);
-                _logger.LogDebug("Processed StartRound event for {MatchId} Round {RoundNumber}", evt.MatchId, evt.RoundNumber);
+                await _matchTracker.StartRoundAsync(evt.MatchId, evt.RoundNumber, cancellationToken).ConfigureAwait(false);
                 break;
 
             case LifecycleEventType.EndRound:
-                await _matchTracker.EndRoundAsync(evt.RoundId, evt.WinnerTeam, evt.WinReason);
-                _logger.LogDebug("Processed EndRound event for RoundId {RoundId}", evt.RoundId);
-                break;
-
-            default:
-                _logger.LogWarning("Unknown lifecycle event type: {EventType}", evt.Type);
+                await _matchTracker.EndRoundAsync(evt.RoundId, evt.WinnerTeam, evt.WinReason, cancellationToken).ConfigureAwait(false);
                 break;
         }
     }
@@ -240,7 +204,8 @@ public sealed class MatchLifecyclePersistenceService : IMatchLifecyclePersistenc
     private sealed class LifecycleEvent
     {
         public LifecycleEventType Type { get; init; }
-        public string? MatchId { get; init; }
+        public int MatchId { get; init; }
+        public string? MapName { get; init; }
         public string? SeriesUuid { get; init; }
         public int RoundNumber { get; init; }
         public int RoundId { get; init; }

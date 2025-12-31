@@ -41,39 +41,46 @@ public sealed class MatchTrackingService : IMatchTrackingService
         var uuid = Guid.NewGuid().ToString();
         _logger.LogInformation("Starting new match tracking: {Uuid} (Series: {Series}) on {Map}", uuid, seriesUuid ?? "None", mapName);
 
-        await using var connection = await _connectionFactory.CreateConnectionAsync(ct);
+        // Capture local variables to avoid closure issues with potentially modified state
+        var localMapName = mapName;
+        var localSeriesUuid = seriesUuid;
+
+        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
         const string sql = "INSERT INTO matches (match_uuid, series_uuid, map_name, status) VALUES (@Uuid, @SeriesUuid, @MapName, 'IN_PROGRESS'); SELECT LAST_INSERT_ID();";
         
-        var id = await connection.ExecuteScalarAsync<int>(sql, new { Uuid = uuid, SeriesUuid = seriesUuid, MapName = mapName });
-        _currentMatch = new MatchContext(id, uuid, mapName, seriesUuid);
+        var id = await connection.ExecuteScalarAsync<int>(sql, new { Uuid = uuid, SeriesUuid = localSeriesUuid, MapName = localMapName }).ConfigureAwait(false);
+        
+        var context = new MatchContext(id, uuid, localMapName, localSeriesUuid);
+        _currentMatch = context;
         _currentRoundId = null;
         
-        return _currentMatch;
+        return context;
     }
 
     public async Task EndMatchAsync(int matchId, CancellationToken ct = default)
     {
         _logger.LogInformation("Ending match tracking: {MatchId}", matchId);
-        await using var connection = await _connectionFactory.CreateConnectionAsync(ct);
+        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
         const string sql = "UPDATE matches SET end_time = CURRENT_TIMESTAMP, status = 'COMPLETED' WHERE id = @MatchId";
-        await connection.ExecuteAsync(sql, new { MatchId = matchId });
+        await connection.ExecuteAsync(new CommandDefinition(sql, new { MatchId = matchId }, cancellationToken: ct)).ConfigureAwait(false);
         _currentMatch = null;
     }
 
     public async Task<int> StartRoundAsync(int matchId, int roundNumber, CancellationToken ct = default)
     {
-        await using var connection = await _connectionFactory.CreateConnectionAsync(ct);
+        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
         const string sql = "INSERT INTO rounds (match_id, round_number) VALUES (@MatchId, @RoundNumber) ON DUPLICATE KEY UPDATE start_time = CURRENT_TIMESTAMP; SELECT id FROM rounds WHERE match_id = @MatchId AND round_number = @RoundNumber;";
         
-        _currentRoundId = await connection.ExecuteScalarAsync<int>(sql, new { MatchId = matchId, RoundNumber = roundNumber });
-        return _currentRoundId.Value;
+        var roundId = await connection.ExecuteScalarAsync<int>(sql, new { MatchId = matchId, RoundNumber = roundNumber }).ConfigureAwait(false);
+        _currentRoundId = roundId;
+        return roundId;
     }
 
     public async Task EndRoundAsync(int roundId, int winnerTeam, int winType, CancellationToken ct = default)
     {
-        await using var connection = await _connectionFactory.CreateConnectionAsync(ct);
+        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
         const string sql = "UPDATE rounds SET end_time = CURRENT_TIMESTAMP, winner_team = @Winner, win_type = @WinType WHERE id = @RoundId";
-        await connection.ExecuteAsync(sql, new { RoundId = roundId, Winner = winnerTeam, WinType = winType });
+        await connection.ExecuteAsync(new CommandDefinition(sql, new { RoundId = roundId, Winner = winnerTeam, WinType = winType }, cancellationToken: ct)).ConfigureAwait(false);
     }
 
     public float GetRoundWinProbability(int ctAlive, int tAlive)
