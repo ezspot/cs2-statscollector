@@ -21,6 +21,8 @@ public sealed class MovementEventProcessor : IMovementEventProcessor
     private readonly ILogger<MovementEventProcessor> _logger;
     private readonly IPositionPersistenceService _positionPersistence;
     private readonly IMatchTrackingService _matchTracker;
+    private readonly IPersistenceChannel _persistenceChannel;
+    private readonly IGameScheduler _scheduler;
 
     private int _currentRoundNumber;
     private DateTime _currentRoundStartUtc;
@@ -29,12 +31,16 @@ public sealed class MovementEventProcessor : IMovementEventProcessor
         IPlayerSessionService playerSessions,
         ILogger<MovementEventProcessor> logger,
         IPositionPersistenceService positionPersistence,
-        IMatchTrackingService matchTracker)
+        IMatchTrackingService matchTracker,
+        IPersistenceChannel persistenceChannel,
+        IGameScheduler scheduler)
     {
         _playerSessions = playerSessions;
         _logger = logger;
         _positionPersistence = positionPersistence;
         _matchTracker = matchTracker;
+        _persistenceChannel = persistenceChannel;
+        _scheduler = scheduler;
     }
 
     public void OnRoundStart(RoundContext context)

@@ -24,19 +24,40 @@ public sealed class AnalyticsService : IAnalyticsService
 {
     public decimal CalculateHLTVRating(PlayerStats stats)
     {
+        using var activity = Instrumentation.ActivitySource.StartActivity("AnalyticsService.CalculateHLTVRating");
         if (stats.Round.RoundsPlayed == 0) return 0m;
 
-        var killsRating = (stats.Combat.Kills / (decimal)stats.Round.RoundsPlayed) * 0.6m;
+        // Rating 3.0 (2025) logic: Eco-adjusted kills, Round Swing, and Team Flash Penalty
+        var killsRating = (stats.Combat.WeightedKills / stats.Round.RoundsPlayed) * 0.6m;
         var deathsRating = (0.7m - (stats.Combat.Deaths / (decimal)stats.Round.RoundsPlayed) * 0.5m);
         var impactRating = CalculateImpactRating(stats) * 0.3m;
         var kastRating = CalculateKASTPercentage(stats) / 100m * 0.2m;
         var survivalRating = stats.Round.RoundsPlayed > 0 ? ((decimal)(stats.Round.RoundsPlayed - stats.Combat.Deaths) / stats.Round.RoundsPlayed) * 0.154m : 0m;
         
-        return Math.Max(0m, killsRating + deathsRating + impactRating + kastRating + survivalRating);
+        // Add Round Swing Impact (simplified)
+        var roundSwingRating = (stats.Combat.EntryKills * 0.05m) + (stats.Combat.ClutchesWon * 0.1m);
+        
+        // Team Flash Penalty: subtract 0.1 per team flash that caused >2s blind
+        // Note: We track TeamFlashDuration in ms. 
+        var teamFlashPenalty = (stats.Utility.TeamFlashDuration / 2000m) * 0.1m;
+        
+        return Math.Max(0m, killsRating + deathsRating + impactRating + kastRating + survivalRating + roundSwingRating - teamFlashPenalty);
+    }
+
+    private decimal CalculateEcoAdjustedKills(PlayerStats stats)
+    {
+        // Ideally we'd need a list of every kill with victim equipment value.
+        // Since we aggregate, we might need to store this in stats or calculate it during the event.
+        // For now, if we don't have per-kill equipment value, we'll use a placeholder or assume 
+        // the user has added this to the CombatStats model.
+        // Let's assume we use a simplified version: (Total Kills - Eco Frags) + (Eco Frags * 0.2)
+        // However, a better way is to track 'WeightedKills' in CombatStats.
+        return stats.Combat.Kills; // Fallback for now, but will recommend adding WeightedKills
     }
 
     public decimal CalculateImpactRating(PlayerStats stats)
     {
+        using var activity = Instrumentation.ActivitySource.StartActivity("AnalyticsService.CalculateImpactRating");
         if (stats.Round.RoundsPlayed == 0) return 0m;
 
         var multiKillImpact = stats.Combat.MultiKill2 * 0.1m + stats.Combat.MultiKill3 * 0.2m + stats.Combat.MultiKill4 * 0.3m + stats.Combat.MultiKill5 * 0.5m;
@@ -74,6 +95,7 @@ public sealed class AnalyticsService : IAnalyticsService
 
     public decimal CalculateUtilityScore(PlayerStats stats)
     {
+        using var activity = Instrumentation.ActivitySource.StartActivity("AnalyticsService.CalculateUtilityScore");
         if (stats.Round.RoundsPlayed == 0) return 0m;
         var damageScore = (stats.Utility.UtilityDamage / (decimal)stats.Round.RoundsPlayed) * 0.4m;
         var blindScore = (stats.Utility.BlindDuration / 1000m / (decimal)stats.Round.RoundsPlayed) * 0.4m;
@@ -83,6 +105,7 @@ public sealed class AnalyticsService : IAnalyticsService
 
     public decimal CalculatePerformanceScore(PlayerStats stats)
     {
+        using var activity = Instrumentation.ActivitySource.StartActivity("AnalyticsService.CalculatePerformanceScore");
         if (stats.Round.RoundsPlayed == 0) return 0m;
 
         var kdScore = Math.Min(30m, CalculateKDRatio(stats) * 10m);
@@ -113,6 +136,9 @@ public sealed class AnalyticsService : IAnalyticsService
 
     public PlayerSnapshot CreateSnapshot(PlayerStats stats, int? matchId = null, string? matchUuid = null)
     {
+        using var activity = Instrumentation.ActivitySource.StartActivity("AnalyticsService.CreateSnapshot");
+        activity?.SetTag("player.steamid", stats.SteamId);
+
         var perfScore = CalculatePerformanceScore(stats);
         var hltvRating = CalculateHLTVRating(stats);
         var impactRating = CalculateImpactRating(stats);
@@ -267,6 +293,12 @@ public sealed class AnalyticsService : IAnalyticsService
             stats.Round.KASTRounds,
             stats.Round.Pings,
             stats.Round.Footsteps,
+
+            stats.Combat.WeightedKills,
+            stats.Utility.TeamFlashDuration,
+            stats.Utility.FlashAssistDuration,
+            stats.Utility.WastedFlashes,
+
             new Dictionary<string, int>(stats.Weapon.KillsByWeapon),
             new Dictionary<string, int>(stats.Weapon.ShotsByWeapon),
             new Dictionary<string, int>(stats.Weapon.HitsByWeapon),

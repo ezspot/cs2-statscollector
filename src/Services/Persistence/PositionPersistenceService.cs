@@ -13,32 +13,32 @@ using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public record PositionEvent(int? MatchId = null);
+public record PositionEvent(string? MatchUuid = null);
 
 public record KillPositionEvent(
-    int? MatchId,
+    string? MatchUuid,
     ulong KillerSteamId, 
     ulong VictimSteamId, 
     float KillerX, float KillerY, float KillerZ,
     float VictimX, float VictimY, float VictimZ,
     string Weapon, bool IsHeadshot, bool IsWallbang,
     float Distance, int KillerTeam, int VictimTeam,
-    string MapName, int RoundNumber, int RoundTime) : PositionEvent(MatchId);
+    string MapName, int RoundNumber, int RoundTime) : PositionEvent(MatchUuid);
 
 public record DeathPositionEvent(
-    int? MatchId,
+    string? MatchUuid,
     ulong SteamId, float X, float Y, float Z,
     string CauseOfDeath, bool IsHeadshot, int Team,
-    string MapName, int RoundNumber, int RoundTime) : PositionEvent(MatchId);
+    string MapName, int RoundNumber, int RoundTime) : PositionEvent(MatchUuid);
 
 public record UtilityPositionEvent(
-    int? MatchId,
+    string? MatchUuid,
     ulong SteamId, float ThrowX, float ThrowY, float ThrowZ,
     float LandX, float LandY, float LandZ,
     int UtilityType, int OpponentsAffected, int TeammatesAffected,
-    int Damage, string MapName, int RoundNumber, int RoundTime) : PositionEvent(MatchId);
+    int Damage, string MapName, int RoundNumber, int RoundTime) : PositionEvent(MatchUuid);
 
-public record PositionTickEvent(string MapName, PlayerPositionSnapshot[] Positions) : PositionEvent((int?)null);
+public record PositionTickEvent(string MapName, string? MatchUuid, PlayerPositionSnapshot[] Positions) : PositionEvent(MatchUuid);
 
 public interface IPositionPersistenceService : IAsyncDisposable
 {
@@ -52,6 +52,9 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
     private readonly IPositionTrackingService _repository;
     private readonly ILogger<PositionPersistenceService> _logger;
     private readonly Channel<PositionEvent> _channel;
+    
+    private readonly ConcurrentQueue<PositionEvent> _retryQueue = new();
+    private readonly ActivitySource _activitySource = Instrumentation.ActivitySource;
     
     private Task? _processingTask;
     private CancellationTokenSource? _linkedCts;
@@ -69,7 +72,7 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         _channel = Channel.CreateBounded<PositionEvent>(new BoundedChannelOptions(capacity)
         {
             AllowSynchronousContinuations = false,
-            FullMode = BoundedChannelFullMode.DropWrite, // Drop if full to protect game performance
+            FullMode = BoundedChannelFullMode.DropWrite,
             SingleReader = true,
             SingleWriter = false
         });
@@ -95,6 +98,9 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
             return Task.CompletedTask;
         }
 
+        using var activity = _activitySource.StartActivity("PositionPersistence.Enqueue", ActivityKind.Producer);
+        activity?.SetTag("event.type", @event.GetType().Name);
+
         if (_channel.Writer.TryWrite(@event))
         {
             Instrumentation.PositionEventsEnqueuedCounter.Add(1);
@@ -103,6 +109,7 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         {
             Instrumentation.PositionEventsDroppedCounter.Add(1);
             _logger.LogWarning("Position event dropped: channel full. Type: {Type}", @event.GetType().Name);
+            activity?.SetStatus(ActivityStatusCode.Error, "Channel full");
         }
         return Task.CompletedTask;
     }
@@ -136,77 +143,86 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
     private async Task ProcessLoopAsync(CancellationToken cancellationToken)
     {
         var reader = _channel.Reader;
+        var retryDelay = TimeSpan.FromSeconds(5);
+        var maxRetryDelay = TimeSpan.FromMinutes(5);
+
         try
         {
             while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                var killBatch = new List<KillPositionEvent>();
-                var deathBatch = new List<DeathPositionEvent>();
-                var utilityBatch = new List<UtilityPositionEvent>();
+                var batch = new List<PositionEvent>();
 
-                while (reader.TryRead(out var @event))
+                // 1. Drain retry queue first
+                while (_retryQueue.TryDequeue(out var retryEvent) && batch.Count < 100)
                 {
-                    switch (@event)
-                    {
-                        case KillPositionEvent k: killBatch.Add(k); break;
-                        case DeathPositionEvent d: deathBatch.Add(d); break;
-                        case UtilityPositionEvent u: utilityBatch.Add(u); break;
-                        case PositionTickEvent t:
-                            // For ticks, we might want to handle them immediately or batch them differently
-                            // For now, let's just log or process if needed. 
-                            // In a real scenario, you'd probably write these to a high-throughput store or another table.
-                            _logger.LogTrace("Processing position tick for {Count} players on {Map}", t.Positions.Length, t.MapName);
-                            break;
-                    }
-
-                    if (killBatch.Count + deathBatch.Count + utilityBatch.Count >= 50) break;
+                    batch.Add(retryEvent);
                 }
 
-                if (killBatch.Count > 0 || deathBatch.Count > 0 || utilityBatch.Count > 0)
+                // 2. Fill rest from channel
+                while (batch.Count < 100 && reader.TryRead(out var @event))
                 {
-                    using var activity = Instrumentation.ActivitySource.StartActivity("ProcessPositionBatch");
-                    activity?.SetTag("batch.kill_count", killBatch.Count);
-                    activity?.SetTag("batch.death_count", deathBatch.Count);
-                    activity?.SetTag("batch.utility_count", utilityBatch.Count);
+                    batch.Add(@event);
+                }
 
-                    _logger.LogInformation("Flushing position batch: {Kills} kills, {Deaths} deaths, {Utility} utility", 
-                        killBatch.Count, deathBatch.Count, utilityBatch.Count);
+                if (batch.Count == 0) continue;
 
-                    try
+                using var activity = _activitySource.StartActivity("PositionPersistence.ProcessBatch", ActivityKind.Consumer);
+                activity?.SetTag("batch.size", batch.Count);
+
+                try
+                {
+                    await ProcessBatchInternalAsync(batch, cancellationToken).ConfigureAwait(false);
+                    
+                    // Reset delay on success
+                    retryDelay = TimeSpan.FromSeconds(5);
+                    _logger.LogDebug("Successfully persisted position batch of {Count} items", batch.Count);
+                }
+                catch (Exception ex)
+                {
+                    activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+                    _logger.LogError(ex, "Failed to persist position batch. Buffering {Count} items for retry.", batch.Count);
+
+                    // Re-queue for retry
+                    foreach (var item in batch)
                     {
-                        if (killBatch.Count > 0) 
+                        if (_retryQueue.Count < 5000) // Safety cap for in-memory buffer
                         {
-                            var matchId = killBatch[0].MatchId;
-                            await _repository.BulkTrackKillPositionsAsync(matchId, killBatch, cancellationToken).ConfigureAwait(false);
+                            _retryQueue.Enqueue(item);
                         }
-                        if (deathBatch.Count > 0) 
-                        {
-                            var matchId = deathBatch[0].MatchId;
-                            await _repository.BulkTrackDeathPositionsAsync(matchId, deathBatch, cancellationToken).ConfigureAwait(false);
-                        }
-                        if (utilityBatch.Count > 0) 
-                        {
-                            var matchId = utilityBatch[0].MatchId;
-                            await _repository.BulkTrackUtilityPositionsAsync(matchId, utilityBatch, cancellationToken).ConfigureAwait(false);
-                        }
-                        
-                        _logger.LogDebug("Successfully persisted position batch");
                     }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Failed to persist batch of position events. Total: {Count}", 
-                            killBatch.Count + deathBatch.Count + utilityBatch.Count);
-                    }
+
+                    // Exponential backoff
+                    await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+                    retryDelay = TimeSpan.FromTicks(Math.Min(retryDelay.Ticks * 2, maxRetryDelay.Ticks));
                 }
             }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            // Normal shutdown
-        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception ex)
         {
             _logger.LogCritical(ex, "Fatal error in position persistence loop");
+        }
+    }
+
+    private async Task ProcessBatchInternalAsync(List<PositionEvent> batch, CancellationToken ct)
+    {
+        var killBatch = batch.OfType<KillPositionEvent>().ToList();
+        var deathBatch = batch.OfType<DeathPositionEvent>().ToList();
+        var utilityBatch = batch.OfType<UtilityPositionEvent>().ToList();
+
+        if (killBatch.Count > 0)
+        {
+            await _repository.BulkTrackKillPositionsAsync(killBatch, ct).ConfigureAwait(false);
+        }
+
+        if (deathBatch.Count > 0)
+        {
+            await _repository.BulkTrackDeathPositionsAsync(deathBatch, ct).ConfigureAwait(false);
+        }
+
+        if (utilityBatch.Count > 0)
+        {
+            await _repository.BulkTrackUtilityPositionsAsync(utilityBatch, ct).ConfigureAwait(false);
         }
     }
 

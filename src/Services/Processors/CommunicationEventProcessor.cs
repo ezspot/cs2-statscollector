@@ -14,13 +14,19 @@ public sealed class CommunicationEventProcessor : ICommunicationEventProcessor
 {
     private readonly IPlayerSessionService _playerSessions;
     private readonly ILogger<CommunicationEventProcessor> _logger;
+    private readonly IPersistenceChannel _persistenceChannel;
+    private readonly IGameScheduler _scheduler;
 
     public CommunicationEventProcessor(
         IPlayerSessionService playerSessions,
-        ILogger<CommunicationEventProcessor> logger)
+        ILogger<CommunicationEventProcessor> logger,
+        IPersistenceChannel persistenceChannel,
+        IGameScheduler scheduler)
     {
         _playerSessions = playerSessions;
         _logger = logger;
+        _persistenceChannel = persistenceChannel;
+        _scheduler = scheduler;
     }
 
     public void OnRoundStart(RoundContext context)

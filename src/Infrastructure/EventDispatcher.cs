@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Threading.Tasks;
 using CounterStrikeSharp.API.Core;
@@ -6,9 +7,15 @@ using Microsoft.Extensions.Logging;
 
 namespace statsCollector.Infrastructure;
 
+public interface IEventHandler<in T> where T : GameEvent
+{
+    HookResult Handle(T @event, GameEventInfo info);
+}
+
 public interface IEventDispatcher
 {
     void Subscribe<T>(Func<T, GameEventInfo, HookResult> handler) where T : GameEvent;
+    void Subscribe<T>(IEventHandler<T> handler) where T : GameEvent;
     HookResult Dispatch<T>(T @event, GameEventInfo info) where T : GameEvent;
 }
 
@@ -23,16 +30,24 @@ public sealed class EventDispatcher(ILogger<EventDispatcher> logger) : IEventDis
             _ => ImmutableArray.Create<Func<T, GameEventInfo, HookResult>>(handler),
             (_, existing) => ((ImmutableArray<Func<T, GameEventInfo, HookResult>>)existing).Add(handler));
         
-        _logger.LogTrace("Subscribed to event {EventType}", typeof(T).Name);
+        _logger.LogTrace("Subscribed to event {EventType} (Delegate)", typeof(T).Name);
+    }
+
+    public void Subscribe<T>(IEventHandler<T> handler) where T : GameEvent
+    {
+        Subscribe<T>(handler.Handle);
     }
 
     public HookResult Dispatch<T>(T @event, GameEventInfo info) where T : GameEvent
     {
+        using var activity = Instrumentation.ActivitySource.StartActivity($"EventDispatcher.Dispatch.{typeof(T).Name}");
+        
         if (!_handlers.TryGetValue(typeof(T), out var handlersObj))
         {
             return HookResult.Continue;
         }
 
+        // ImmutableArray provides lock-free iteration on the snapshot
         var handlers = (ImmutableArray<Func<T, GameEventInfo, HookResult>>)handlersObj;
         var result = HookResult.Continue;
 

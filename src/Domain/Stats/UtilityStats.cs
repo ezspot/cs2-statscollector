@@ -31,10 +31,17 @@ public sealed class UtilityStats
 
     private int _tacticalGrenadesThrown;
 
+    private int _flashAssistDuration; // ms
+    private int _teamFlashDuration; // ms
+
     public UtilityStats(Action markDirty)
     {
         _markDirty = markDirty;
     }
+
+    public int FlashAssistDuration { get => _flashAssistDuration; set { _flashAssistDuration = value; _markDirty(); } }
+    public int TeamFlashDuration { get => _teamFlashDuration; set { _teamFlashDuration = value; _markDirty(); } }
+    public int WastedFlashes { get => _utilityWasteCount; set { _utilityWasteCount = value; _markDirty(); } }
 
     public int FlashbangsThrown { get => _flashbangsThrown; set { _flashbangsThrown = value; _markDirty(); } }
     public int SmokesThrown { get => _smokesThrown; set { _smokesThrown = value; _markDirty(); } }
@@ -67,6 +74,8 @@ public sealed class UtilityStats
         _timesBlinded = _totalBlindTime = _totalBlindTimeInflicted = _utilityDamageTaken = 0;
         _effectiveFlashes = _effectiveSmokes = _effectiveHeGrenades = _effectiveMolotovs = 0;
         _tacticalGrenadesThrown = 0;
+        _flashAssistDuration = 0;
+        _teamFlashDuration = 0;
         _markDirty();
     }
 }

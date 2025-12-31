@@ -30,6 +30,11 @@ public sealed class FlashEfficiencyService : IFlashEfficiencyService
     {
         if (victim.PlayerPawn.Value == null) return 0f;
 
+        // Verify against networked m_flFlashDuration if possible
+        // Note: m_flFlashDuration is a property on CBasePlayerPawn
+        var flashDuration = victim.PlayerPawn.Value.FlashDuration;
+        if (flashDuration <= 0.0f) return 0.0f;
+
         var victimPos = victim.PlayerPawn.Value.AbsOrigin;
         var victimEyeAngles = victim.PlayerPawn.Value.EyeAngles;
 

@@ -10,8 +10,8 @@ namespace statsCollector.Services;
 
 public interface IJsonRecoveryService
 {
-    Task SaveScrimStateAsync(ScrimRecoveryData data);
-    Task<ScrimRecoveryData?> LoadScrimStateAsync();
+    Task SaveScrimStateAsync<T>(T data);
+    Task<T?> LoadScrimStateAsync<T>();
     Task ClearScrimStateAsync();
 }
 
@@ -19,8 +19,9 @@ public sealed class JsonRecoveryService(ILogger<JsonRecoveryService> logger) : I
 {
     private readonly ILogger<JsonRecoveryService> _logger = logger;
     private readonly string _filePath = Path.Combine(Server.GameDirectory, "csgo", "addons", "counterstrikesharp", "plugins", "statsCollector", "scrim_state.json");
+    private readonly string _tempPath = Path.Combine(Server.GameDirectory, "csgo", "addons", "counterstrikesharp", "plugins", "statsCollector", "scrim_state.json.tmp");
 
-    public async Task SaveScrimStateAsync(ScrimRecoveryData data)
+    public async Task SaveScrimStateAsync<T>(T data)
     {
         try
         {
@@ -31,8 +32,18 @@ public sealed class JsonRecoveryService(ILogger<JsonRecoveryService> logger) : I
             }
 
             var json = JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true });
-            await File.WriteAllTextAsync(_filePath, json);
-            _logger.LogDebug("Scrim state recovery saved to {Path}", _filePath);
+            
+            // Atomic write: Write to temp file first
+            await File.WriteAllTextAsync(_tempPath, json);
+            
+            // Then move to final path (overwrite)
+            if (File.Exists(_filePath))
+            {
+                File.Delete(_filePath);
+            }
+            File.Move(_tempPath, _filePath);
+
+            _logger.LogDebug("Scrim state recovery saved atomically to {Path}", _filePath);
         }
         catch (Exception ex)
         {
@@ -40,18 +51,27 @@ public sealed class JsonRecoveryService(ILogger<JsonRecoveryService> logger) : I
         }
     }
 
-    public async Task<ScrimRecoveryData?> LoadScrimStateAsync()
+    public async Task<T?> LoadScrimStateAsync<T>()
     {
         try
         {
-            if (!File.Exists(_filePath)) return null;
+            if (!File.Exists(_filePath)) return default;
+
+            var lastWrite = File.GetLastWriteTimeUtc(_filePath);
+            if (DateTime.UtcNow - lastWrite > TimeSpan.FromMinutes(15))
+            {
+                _logger.LogWarning("Recovery file is older than 15 minutes, skipping recovery.");
+                await ClearScrimStateAsync();
+                return default;
+            }
+
             var json = await File.ReadAllTextAsync(_filePath);
-            return JsonSerializer.Deserialize<ScrimRecoveryData>(json);
+            return JsonSerializer.Deserialize<T>(json);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to load scrim recovery state from {Path}", _filePath);
-            return null;
+            return default;
         }
     }
 
@@ -59,11 +79,9 @@ public sealed class JsonRecoveryService(ILogger<JsonRecoveryService> logger) : I
     {
         try
         {
-            if (File.Exists(_filePath))
-            {
-                File.Delete(_filePath);
-                _logger.LogInformation("Scrim recovery state cleared.");
-            }
+            if (File.Exists(_filePath)) File.Delete(_filePath);
+            if (File.Exists(_tempPath)) File.Delete(_tempPath);
+            _logger.LogInformation("Scrim recovery state cleared.");
         }
         catch (Exception ex)
         {

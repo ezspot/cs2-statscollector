@@ -21,11 +21,13 @@ public interface IDamageReportService
 public sealed class DamageReportService : IDamageReportService
 {
     private readonly ILogger<DamageReportService> _logger;
+    private readonly IGameScheduler _scheduler;
     private readonly ConcurrentDictionary<ulong, ConcurrentDictionary<ulong, DamageInfo>> _damageDealt = new();
 
-    public DamageReportService(ILogger<DamageReportService> logger)
+    public DamageReportService(ILogger<DamageReportService> logger, IGameScheduler scheduler)
     {
         _logger = logger;
+        _scheduler = scheduler;
     }
 
     public void RecordDamage(ulong attackerId, ulong victimId, int damage)
@@ -40,29 +42,26 @@ public sealed class DamageReportService : IDamageReportService
 
     public void ReportToPlayers()
     {
-        foreach (var attackerId in _damageDealt.Keys)
+        _scheduler.Schedule(() =>
         {
-            var attacker = Utilities.GetPlayerFromSteamId(attackerId);
-            if (attacker == null || !attacker.IsValid) continue;
-
-            if (_damageDealt.TryGetValue(attackerId, out var victims))
+            foreach (var attackerId in _damageDealt.Keys)
             {
-                foreach (var victimEntry in victims)
-                {
-                    var victim = Utilities.GetPlayerFromSteamId(victimEntry.Key);
-                    if (victim == null || !victim.IsValid) continue;
+                var attacker = Utilities.GetPlayerFromSteamId(attackerId);
+                if (attacker == null || !attacker.IsValid) continue;
 
-                    var info = victimEntry.Value;
-                    attacker.PrintToChat($" {ChatColors.Green}[Damage]{ChatColors.Default} To {ChatColors.Blue}{victim.PlayerName}{ChatColors.Default}: {ChatColors.Red}{info.Damage}{ChatColors.Default} in {ChatColors.Yellow}{info.Hits}{ChatColors.Default} hits");
-                    
-                    // Also report damage taken to the victim
-                    if (_damageDealt.TryGetValue(victimEntry.Key, out var attackerVictims) && attackerVictims.TryGetValue(attackerId, out var takenInfo))
+                if (_damageDealt.TryGetValue(attackerId, out var victims))
+                {
+                    foreach (var victimEntry in victims)
                     {
-                        // Taken info will be reported when it's the victim's turn as an attacker in this loop
+                        var victim = Utilities.GetPlayerFromSteamId(victimEntry.Key);
+                        if (victim == null || !victim.IsValid) continue;
+
+                        var info = victimEntry.Value;
+                        attacker.PrintToChat($" {ChatColors.Green}[Damage]{ChatColors.Default} To {ChatColors.Blue}{victim.PlayerName}{ChatColors.Default}: {ChatColors.Red}{info.Damage}{ChatColors.Default} in {ChatColors.Yellow}{info.Hits}{ChatColors.Default} hits");
                     }
                 }
             }
-        }
+        });
     }
 
     public void ResetRound()

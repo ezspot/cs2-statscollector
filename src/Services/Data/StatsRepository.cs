@@ -23,6 +23,12 @@ public interface IStatsRepository
     Task UpsertPlayerAsync(PlayerSnapshot snapshot, CancellationToken cancellationToken);
     Task UpsertMatchSummariesAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken);
     Task UpsertMatchWeaponStatsAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken);
+    
+    // Match Lifecycle
+    Task StartMatchAsync(string mapName, string? matchUuid, string? seriesUuid, CancellationToken ct);
+    Task EndMatchAsync(string matchUuid, CancellationToken ct);
+    Task StartRoundAsync(string matchUuid, int roundNumber, CancellationToken ct);
+    Task EndRoundAsync(string matchUuid, int roundNumber, int winnerTeam, int winReason, CancellationToken ct);
 }
 
 public sealed class StatsRepository : IStatsRepository
@@ -70,7 +76,7 @@ public sealed class StatsRepository : IStatsRepository
 
     public async Task UpsertMatchSummariesAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
     {
-        var snapshotList = snapshots.Where(s => s.MatchId.HasValue).ToList();
+        var snapshotList = snapshots.Where(s => !string.IsNullOrEmpty(s.MatchUuid)).ToList();
         if (snapshotList.Count == 0) return;
 
         await _resiliencePipeline.ExecuteAsync(async ct => 
@@ -78,61 +84,81 @@ public sealed class StatsRepository : IStatsRepository
             using var activity = Instrumentation.ActivitySource.StartActivity("UpsertMatchSummariesAsync");
             Instrumentation.DbOperationsCounter.Add(1, new KeyValuePair<string, object?>("operation", "upsert_match_summaries"));
 
-            // Note: For true bulk, we construct a single statement with multiple VALUE groups.
-            // Dapper's list execution is good, but multi-row INSERT is better for IOPS.
-            const string sqlBase = """
-                INSERT INTO match_player_stats (
-                    match_id, steam_id, kills, deaths, assists, headshots, damage_dealt, mvps, score, rating2, adr, kast
-                ) VALUES 
-                """;
+            await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            
+            var dataTable = new DataTable();
+            dataTable.Columns.Add("match_uuid", typeof(string)); // Using UUID for intermediate step
+            dataTable.Columns.Add("steam_id", typeof(ulong));
+            dataTable.Columns.Add("kills", typeof(int));
+            dataTable.Columns.Add("deaths", typeof(int));
+            dataTable.Columns.Add("assists", typeof(int));
+            dataTable.Columns.Add("headshots", typeof(int));
+            dataTable.Columns.Add("damage_dealt", typeof(int));
+            dataTable.Columns.Add("mvps", typeof(int));
+            dataTable.Columns.Add("score", typeof(int));
+            dataTable.Columns.Add("rating2", typeof(decimal));
+            dataTable.Columns.Add("adr", typeof(decimal));
+            dataTable.Columns.Add("kast", typeof(decimal));
+            dataTable.Columns.Add("idempotency_key", typeof(string));
+            dataTable.Columns.Add("created_at", typeof(DateTime));
+            dataTable.Columns.Add("retry_count", typeof(int));
 
-            var rows = new List<string>();
-            var parameters = new DynamicParameters();
-            for (int i = 0; i < snapshotList.Count; i++)
+            var now = DateTime.UtcNow;
+            foreach (var s in snapshotList)
             {
-                var s = snapshotList[i];
-                rows.Add($"(@MatchId{i}, @SteamId{i}, @Kills{i}, @Deaths{i}, @Assists{i}, @Headshots{i}, @DamageDealt{i}, @Mvps{i}, @Score{i}, @HLTVRating{i}, @ADR{i}, @Kast{i})");
-                parameters.Add($"MatchId{i}", s.MatchId);
-                parameters.Add($"SteamId{i}", s.SteamId);
-                parameters.Add($"Kills{i}", s.Kills);
-                parameters.Add($"Deaths{i}", s.Deaths);
-                parameters.Add($"Assists{i}", s.Assists);
-                parameters.Add($"Headshots{i}", s.Headshots);
-                parameters.Add($"DamageDealt{i}", s.DamageDealt);
-                parameters.Add($"Mvps{i}", s.Mvps);
-                parameters.Add($"Score{i}", s.Score);
-                parameters.Add($"HLTVRating{i}", s.HLTVRating);
-                parameters.Add($"ADR{i}", s.AverageDamagePerRound);
-                parameters.Add($"Kast{i}", s.KASTPercentage);
+                dataTable.Rows.Add(
+                    s.MatchUuid, s.SteamId, s.Kills, s.Deaths, s.Assists, s.Headshots, 
+                    s.DamageDealt, s.Mvps, s.Score, s.HLTVRating, 
+                    s.AverageDamagePerRound, s.KASTPercentage, 
+                    $"{s.MatchUuid}_{s.RoundNumber}_{s.SteamId}_Summary",
+                    now, 0
+                );
             }
 
-            var sql = sqlBase + string.Join(", ", rows) + """
+            await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_match_player_stats_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, kills INT, deaths INT, assists INT, headshots INT, damage_dealt INT, mvps INT, score INT, rating2 DECIMAL(5,2), adr DECIMAL(10,2), kast DECIMAL(5,2), idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);").ConfigureAwait(false);
+            
+            var bulkCopy = new MySqlBulkCopy(connection)
+            {
+                DestinationTableName = "temp_match_player_stats_uuid"
+            };
+            
+            await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false);
+
+            const string mergeSql = """
+                INSERT INTO match_player_stats 
+                (match_id, steam_id, kills, deaths, assists, headshots, damage_dealt, mvps, score, rating2, adr, kast, idempotency_key, created_at, retry_count)
+                SELECT m.id, t.steam_id, t.kills, t.deaths, t.assists, t.headshots, t.damage_dealt, t.mvps, t.score, t.rating2, t.adr, t.kast, t.idempotency_key, t.created_at, t.retry_count
+                FROM temp_match_player_stats_uuid t
+                JOIN matches m ON t.match_uuid = m.match_uuid
                 ON DUPLICATE KEY UPDATE
                     kills = VALUES(kills), deaths = VALUES(deaths), assists = VALUES(assists),
                     headshots = VALUES(headshots), damage_dealt = VALUES(damage_dealt),
                     mvps = VALUES(mvps), score = VALUES(score), rating2 = VALUES(rating2),
-                    adr = VALUES(adr), kast = VALUES(kast);
+                    adr = VALUES(adr), kast = VALUES(kast),
+                    retry_count = match_player_stats.retry_count + 1;
                 """;
 
-            await using var connection = await _connectionFactory.CreateConnectionAsync(ct);
-            var count = await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)).ConfigureAwait(false);
-            _logger.LogInformation("Upserted {Count} match summaries into match_player_stats using bulk insert", count);
+            await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);
+            await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_match_player_stats_uuid;").ConfigureAwait(false);
+            
+            _logger.LogInformation("Bulk upserted {Count} match summaries using MatchUuid resolution", snapshotList.Count);
         }, cancellationToken);
     }
 
     public async Task UpsertMatchWeaponStatsAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
     {
-        var snapshotList = snapshots.Where(s => s.MatchId.HasValue).ToList();
+        var snapshotList = snapshots.Where(s => !string.IsNullOrEmpty(s.MatchUuid)).ToList();
         if (snapshotList.Count == 0) return;
 
         var weaponData = snapshotList.SelectMany(s => s.WeaponKills.Select(kvp => new
         {
-            s.MatchId,
+            s.MatchUuid,
             s.SteamId,
             Weapon = kvp.Key,
             Kills = kvp.Value,
             Shots = s.WeaponShots.GetValueOrDefault(kvp.Key, 0),
-            Hits = s.WeaponHits.GetValueOrDefault(kvp.Key, 0)
+            Hits = s.WeaponHits.GetValueOrDefault(kvp.Key, 0),
+            IdempotencyKey = $"{s.MatchUuid}_{s.RoundNumber}_{s.SteamId}_Weapon_{kvp.Key}"
         })).ToList();
 
         if (weaponData.Count == 0) return;
@@ -142,97 +168,260 @@ public sealed class StatsRepository : IStatsRepository
             using var activity = Instrumentation.ActivitySource.StartActivity("UpsertMatchWeaponStatsAsync");
             Instrumentation.DbOperationsCounter.Add(1, new KeyValuePair<string, object?>("operation", "upsert_match_weapons"));
 
-            const string sqlBase = """
-                INSERT INTO match_weapon_stats (
-                    match_id, steam_id, weapon_name, kills, shots, hits
-                ) VALUES 
-                """;
+            await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            
+            var dataTable = new DataTable();
+            dataTable.Columns.Add("match_uuid", typeof(string));
+            dataTable.Columns.Add("steam_id", typeof(ulong));
+            dataTable.Columns.Add("weapon_name", typeof(string));
+            dataTable.Columns.Add("kills", typeof(int));
+            dataTable.Columns.Add("shots", typeof(int));
+            dataTable.Columns.Add("hits", typeof(int));
+            dataTable.Columns.Add("idempotency_key", typeof(string));
+            dataTable.Columns.Add("created_at", typeof(DateTime));
+            dataTable.Columns.Add("retry_count", typeof(int));
 
-            var rows = new List<string>();
-            var parameters = new DynamicParameters();
-            for (int i = 0; i < weaponData.Count; i++)
+            var now = DateTime.UtcNow;
+            foreach (var w in weaponData)
             {
-                var w = weaponData[i];
-                rows.Add($"(@MatchId{i}, @SteamId{i}, @Weapon{i}, @Kills{i}, @Shots{i}, @Hits{i})");
-                parameters.Add($"MatchId{i}", w.MatchId);
-                parameters.Add($"SteamId{i}", w.SteamId);
-                parameters.Add($"Weapon{i}", w.Weapon);
-                parameters.Add($"Kills{i}", w.Kills);
-                parameters.Add($"Shots{i}", w.Shots);
-                parameters.Add($"Hits{i}", w.Hits);
+                dataTable.Rows.Add(w.MatchUuid, w.SteamId, w.Weapon, w.Kills, w.Shots, w.Hits, w.IdempotencyKey, now, 0);
             }
 
-            var sql = sqlBase + string.Join(", ", rows) + """
+            await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_match_weapon_stats_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, weapon_name VARCHAR(64), kills INT, shots INT, hits INT, idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);").ConfigureAwait(false);
+            
+            var bulkCopy = new MySqlBulkCopy(connection)
+            {
+                DestinationTableName = "temp_match_weapon_stats_uuid"
+            };
+            
+            await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false);
+
+            const string mergeSql = """
+                INSERT INTO match_weapon_stats 
+                (match_id, steam_id, weapon_name, kills, shots, hits, idempotency_key, created_at, retry_count)
+                SELECT m.id, t.steam_id, t.weapon_name, t.kills, t.shots, t.hits, t.idempotency_key, t.created_at, t.retry_count
+                FROM temp_match_weapon_stats_uuid t
+                JOIN matches m ON t.match_uuid = m.match_uuid
                 ON DUPLICATE KEY UPDATE
-                    kills = VALUES(kills), shots = VALUES(shots), hits = VALUES(hits);
+                    kills = VALUES(kills), shots = VALUES(shots), hits = VALUES(hits),
+                    retry_count = match_weapon_stats.retry_count + 1;
                 """;
 
-            await using var connection = await _connectionFactory.CreateConnectionAsync(ct);
-            var count = await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)).ConfigureAwait(false);
-            _logger.LogInformation("Upserted {Count} match weapon records into match_weapon_stats using bulk insert", count);
+            await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);
+            await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_match_weapon_stats_uuid;").ConfigureAwait(false);
+            
+            _logger.LogInformation("Bulk upserted {Count} weapon records using MatchUuid resolution", weaponData.Count);
         }, cancellationToken);
+    }
+
+    public async Task StartMatchAsync(string mapName, string? matchUuid, string? seriesUuid, CancellationToken ct)
+    {
+        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+        const string sql = "INSERT INTO matches (match_uuid, series_uuid, map_name, status) VALUES (@MatchUuid, @SeriesUuid, @MapName, 'IN_PROGRESS') ON DUPLICATE KEY UPDATE status = 'IN_PROGRESS';";
+        await connection.ExecuteAsync(new CommandDefinition(sql, new { MatchUuid = matchUuid, SeriesUuid = seriesUuid, MapName = mapName }, cancellationToken: ct)).ConfigureAwait(false);
+    }
+
+    public async Task EndMatchAsync(string matchUuid, CancellationToken ct)
+    {
+        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+        const string sql = "UPDATE matches SET end_time = CURRENT_TIMESTAMP, status = 'COMPLETED' WHERE match_uuid = @MatchUuid";
+        await connection.ExecuteAsync(new CommandDefinition(sql, new { MatchUuid = matchUuid }, cancellationToken: ct)).ConfigureAwait(false);
+    }
+
+    public async Task StartRoundAsync(string matchUuid, int roundNumber, CancellationToken ct)
+    {
+        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+        const string sql = """
+            INSERT INTO rounds (match_id, round_number) 
+            SELECT id, @RoundNumber FROM matches WHERE match_uuid = @MatchUuid
+            ON DUPLICATE KEY UPDATE start_time = CURRENT_TIMESTAMP;
+            """;
+        await connection.ExecuteAsync(new CommandDefinition(sql, new { MatchUuid = matchUuid, RoundNumber = roundNumber }, cancellationToken: ct)).ConfigureAwait(false);
+    }
+
+    public async Task EndRoundAsync(string matchUuid, int roundNumber, int winnerTeam, int winReason, CancellationToken ct)
+    {
+        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+        const string sql = """
+            UPDATE rounds r
+            JOIN matches m ON r.match_id = m.id
+            SET r.end_time = CURRENT_TIMESTAMP, r.winner_team = @Winner, r.win_type = @WinType 
+            WHERE m.match_uuid = @MatchUuid AND r.round_number = @RoundNumber;
+            """;
+        await connection.ExecuteAsync(new CommandDefinition(sql, new { MatchUuid = matchUuid, RoundNumber = roundNumber, Winner = winnerTeam, WinType = winReason }, cancellationToken: ct)).ConfigureAwait(false);
     }
 
     private async Task UpsertPlayersCoreAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
     {
+        using var activity = Instrumentation.ActivitySource.StartActivity("UpsertPlayersCoreAsync");
         var snapshotList = snapshots.ToList();
+        activity?.SetTag("db.snapshot_count", snapshotList.Count);
+        
         if (snapshotList.Count == 0) return;
 
-        // Note: Using Dapper's list execution which internally optimizes but 
-        // for true bulk we should move to a Table-Valued Parameter or multi-row string construction 
-        // if performance on 18+ players becomes an issue.
-        const string upsertPlayerInfoSql = """
-            INSERT INTO players (steam_id, name)
-            VALUES (@SteamId, @Name)
-            ON DUPLICATE KEY UPDATE
-                name = VALUES(name),
-                last_seen = CURRENT_TIMESTAMP;
-            """;
+        await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(cancellationToken).ConfigureAwait(false);
+        
+        // High-performance pattern for player stats (many columns):
+        // 1. Create a DataTable matching the full schema
+        // 2. Bulk copy to a temporary table
+        // 3. Perform a server-side merge into the main tables
+        
+        var dataTable = new DataTable();
+        // Add all columns
+        dataTable.Columns.Add("steam_id", typeof(ulong));
+        dataTable.Columns.Add("name", typeof(string));
+        dataTable.Columns.Add("kills", typeof(int));
+        dataTable.Columns.Add("deaths", typeof(int));
+        dataTable.Columns.Add("assists", typeof(int));
+        dataTable.Columns.Add("headshots", typeof(int));
+        dataTable.Columns.Add("damage_dealt", typeof(int));
+        dataTable.Columns.Add("damage_taken", typeof(int));
+        dataTable.Columns.Add("damage_armor", typeof(int));
+        dataTable.Columns.Add("shots_fired", typeof(int));
+        dataTable.Columns.Add("shots_hit", typeof(int));
+        dataTable.Columns.Add("mvps", typeof(int));
+        dataTable.Columns.Add("score", typeof(int));
+        dataTable.Columns.Add("rounds_played", typeof(int));
+        dataTable.Columns.Add("rounds_won", typeof(int));
+        dataTable.Columns.Add("total_spawns", typeof(int));
+        dataTable.Columns.Add("playtime_seconds", typeof(int));
+        dataTable.Columns.Add("ct_rounds", typeof(int));
+        dataTable.Columns.Add("t_rounds", typeof(int));
+        dataTable.Columns.Add("grenades_thrown", typeof(int));
+        dataTable.Columns.Add("flashes_thrown", typeof(int));
+        dataTable.Columns.Add("smokes_thrown", typeof(int));
+        dataTable.Columns.Add("molotovs_thrown", typeof(int));
+        dataTable.Columns.Add("he_grenades_thrown", typeof(int));
+        dataTable.Columns.Add("decoys_thrown", typeof(int));
+        dataTable.Columns.Add("tactical_grenades_thrown", typeof(int));
+        dataTable.Columns.Add("players_blinded", typeof(int));
+        dataTable.Columns.Add("times_blinded", typeof(int));
+        dataTable.Columns.Add("flash_assists", typeof(int));
+        dataTable.Columns.Add("total_blind_time", typeof(decimal));
+        dataTable.Columns.Add("total_blind_time_inflicted", typeof(decimal));
+        dataTable.Columns.Add("utility_damage_dealt", typeof(int));
+        dataTable.Columns.Add("utility_damage_taken", typeof(int));
+        dataTable.Columns.Add("bomb_plants", typeof(int));
+        dataTable.Columns.Add("bomb_defuses", typeof(int));
+        dataTable.Columns.Add("bomb_plant_attempts", typeof(int));
+        dataTable.Columns.Add("bomb_plant_aborts", typeof(int));
+        dataTable.Columns.Add("bomb_defuse_attempts", typeof(int));
+        dataTable.Columns.Add("bomb_defuse_aborts", typeof(int));
+        dataTable.Columns.Add("bomb_defuse_with_kit", typeof(int));
+        dataTable.Columns.Add("bomb_defuse_without_kit", typeof(int));
+        dataTable.Columns.Add("bomb_drops", typeof(int));
+        dataTable.Columns.Add("bomb_pickups", typeof(int));
+        dataTable.Columns.Add("defuser_drops", typeof(int));
+        dataTable.Columns.Add("defuser_pickups", typeof(int));
+        dataTable.Columns.Add("clutch_defuses", typeof(int));
+        dataTable.Columns.Add("total_plant_time", typeof(int));
+        dataTable.Columns.Add("total_defuse_time", typeof(int));
+        dataTable.Columns.Add("bomb_kills", typeof(int));
+        dataTable.Columns.Add("bomb_deaths", typeof(int));
+        dataTable.Columns.Add("hostages_rescued", typeof(int));
+        dataTable.Columns.Add("jumps", typeof(int));
+        dataTable.Columns.Add("money_spent", typeof(int));
+        dataTable.Columns.Add("equipment_value", typeof(int));
+        dataTable.Columns.Add("items_purchased", typeof(int));
+        dataTable.Columns.Add("items_picked_up", typeof(int));
+        dataTable.Columns.Add("items_dropped", typeof(int));
+        dataTable.Columns.Add("cash_earned", typeof(int));
+        dataTable.Columns.Add("cash_spent", typeof(int));
+        dataTable.Columns.Add("loss_bonus", typeof(int));
+        dataTable.Columns.Add("round_start_money", typeof(int));
+        dataTable.Columns.Add("round_end_money", typeof(int));
+        dataTable.Columns.Add("equipment_value_start", typeof(int));
+        dataTable.Columns.Add("equipment_value_end", typeof(int));
+        dataTable.Columns.Add("enemies_flashed", typeof(int));
+        dataTable.Columns.Add("teammates_flashed", typeof(int));
+        dataTable.Columns.Add("effective_flashes", typeof(int));
+        dataTable.Columns.Add("effective_smokes", typeof(int));
+        dataTable.Columns.Add("effective_he_grenades", typeof(int));
+        dataTable.Columns.Add("effective_molotovs", typeof(int));
+        dataTable.Columns.Add("flash_waste", typeof(int));
+        dataTable.Columns.Add("multi_kill_nades", typeof(int));
+        dataTable.Columns.Add("nade_kills", typeof(int));
+        dataTable.Columns.Add("entry_kills", typeof(int));
+        dataTable.Columns.Add("trade_kills", typeof(int));
+        dataTable.Columns.Add("traded_deaths", typeof(int));
+        dataTable.Columns.Add("high_impact_kills", typeof(int));
+        dataTable.Columns.Add("low_impact_kills", typeof(int));
+        dataTable.Columns.Add("trade_opportunities", typeof(int));
+        dataTable.Columns.Add("trade_windows_missed", typeof(int));
+        dataTable.Columns.Add("multi_kills", typeof(int));
+        dataTable.Columns.Add("opening_duels_won", typeof(int));
+        dataTable.Columns.Add("opening_duels_lost", typeof(int));
+        dataTable.Columns.Add("revenges", typeof(int));
+        dataTable.Columns.Add("clutches_won", typeof(int));
+        dataTable.Columns.Add("clutches_lost", typeof(int));
+        dataTable.Columns.Add("clutch_points", typeof(decimal));
+        dataTable.Columns.Add("mvps_eliminations", typeof(int));
+        dataTable.Columns.Add("mvps_bomb", typeof(int));
+        dataTable.Columns.Add("mvps_hostage", typeof(int));
+        dataTable.Columns.Add("headshots_hit", typeof(int));
+        dataTable.Columns.Add("chest_hits", typeof(int));
+        dataTable.Columns.Add("stomach_hits", typeof(int));
+        dataTable.Columns.Add("arm_hits", typeof(int));
+        dataTable.Columns.Add("leg_hits", typeof(int));
+        dataTable.Columns.Add("kd_ratio", typeof(decimal));
+        dataTable.Columns.Add("headshot_percentage", typeof(decimal));
+        dataTable.Columns.Add("accuracy_percentage", typeof(decimal));
+        dataTable.Columns.Add("kast_percentage", typeof(decimal));
+        dataTable.Columns.Add("average_damage_per_round", typeof(decimal));
+        dataTable.Columns.Add("hltv_rating", typeof(decimal));
+        dataTable.Columns.Add("impact_rating", typeof(decimal));
+        dataTable.Columns.Add("survival_rating", typeof(decimal));
+        dataTable.Columns.Add("utility_score", typeof(decimal));
+        dataTable.Columns.Add("noscope_kills", typeof(int));
+        dataTable.Columns.Add("thru_smoke_kills", typeof(int));
+        dataTable.Columns.Add("attacker_blind_kills", typeof(int));
+        dataTable.Columns.Add("flash_assisted_kills", typeof(int));
+        dataTable.Columns.Add("wallbang_kills", typeof(int));
+        dataTable.Columns.Add("pings", typeof(int));
+        dataTable.Columns.Add("footsteps", typeof(int));
+        dataTable.Columns.Add("created_at", typeof(DateTime));
+        dataTable.Columns.Add("retry_count", typeof(int));
 
-        const string upsertPlayerStatsSql = """
-            INSERT INTO player_stats (
-                steam_id, name, kills, deaths, assists, headshots, damage_dealt, damage_taken, damage_armor,
-                shots_fired, shots_hit, mvps, score, rounds_played, rounds_won, total_spawns, playtime_seconds,
-                ct_rounds, t_rounds, grenades_thrown, flashes_thrown, smokes_thrown, molotovs_thrown,
-                he_grenades_thrown, decoys_thrown, tactical_grenades_thrown, players_blinded, times_blinded,
-                flash_assists, total_blind_time, total_blind_time_inflicted, utility_damage_dealt, utility_damage_taken,
-                bomb_plants, bomb_defuses, bomb_plant_attempts, bomb_plant_aborts, bomb_defuse_attempts,
-                bomb_defuse_aborts, bomb_defuse_with_kit, bomb_defuse_without_kit, bomb_drops, bomb_pickups,
-                defuser_drops, defuser_pickups, clutch_defuses, total_plant_time, total_defuse_time,
-                bomb_kills, bomb_deaths, hostages_rescued, jumps,
-                money_spent, equipment_value, items_purchased, items_picked_up, items_dropped, cash_earned, cash_spent,
-                loss_bonus, round_start_money, round_end_money, equipment_value_start, equipment_value_end,
-                enemies_flashed, teammates_flashed, effective_flashes, effective_smokes, effective_he_grenades,
-                effective_molotovs, flash_waste, multi_kill_nades, nade_kills,
-                entry_kills, trade_kills, traded_deaths, high_impact_kills, low_impact_kills, trade_opportunities, trade_windows_missed, multi_kills, opening_duels_won, opening_duels_lost,
-                revenges, clutches_won, clutches_lost, clutch_points, mvps_eliminations, mvps_bomb, mvps_hostage,
-                headshots_hit, chest_hits, stomach_hits, arm_hits, leg_hits,
-                kd_ratio, headshot_percentage, accuracy_percentage, kast_percentage,
-                average_damage_per_round, hltv_rating, impact_rating, survival_rating, utility_score,
-                noscope_kills, thru_smoke_kills, attacker_blind_kills, flash_assisted_kills, wallbang_kills,
-                pings, footsteps
-            ) VALUES (
-                @SteamId, @Name, @Kills, @Deaths, @Assists, @Headshots, @DamageDealt, @DamageTaken, @DamageArmor,
-                @ShotsFired, @ShotsHit, @Mvps, @Score, @RoundsPlayed, @RoundsWon, @TotalSpawns, @PlaytimeSeconds,
-                @CtRounds, @TRounds, @GrenadesThrown, @FlashesThrown, @SmokesThrown, @MolotovsThrown,
-                @HeGrenadesThrown, @DecoysThrown, @TacticalGrenadesThrown, @PlayersBlinded, @TimesBlinded,
-                @FlashAssists, @TotalBlindTime, @TotalBlindTimeInflicted, @UtilityDamageDealt, @UtilityDamageTaken,
-                @BombPlants, @BombDefuses, @BombPlantAttempts, @BombPlantAborts, @BombDefuseAttempts,
-                @BombDefuseAborts, @BombDefuseWithKit, @BombDefuseWithoutKit, @BombDrops, @BombPickups,
-                @DefuserDrops, @DefuserPickups, @ClutchDefuses, @TotalPlantTime, @TotalDefuseTime,
-                @BombKills, @BombDeaths, @HostagesRescued, @Jumps,
-                @MoneySpent, @EquipmentValue, @ItemsPurchased, @ItemsPickedUp, @ItemsDropped, @CashEarned, @CashSpent,
-                @LossBonus, @RoundStartMoney, @RoundEndMoney, @EquipmentValueStart, @EquipmentValueEnd,
-                @EnemiesFlashed, @TeammatesFlashed, @EffectiveFlashes, @EffectiveSmokes, @EffectiveHEGrenades,
-                @EffectiveMolotovs, @FlashWaste, @MultiKillNades, @NadeKills,
-                @EntryKills, @TradeKills, @TradedDeaths, @HighImpactKills, @LowImpactKills, @TradeOpportunities, @TradeWindowsMissed, @MultiKills, @OpeningDuelsWon, @OpeningDuelsLost,
-                @Revenges, @ClutchesWon, @ClutchesLost, @ClutchPoints, @MvpsEliminations, @MvpsBomb, @MvpsHostage,
-                @HeadshotsHit, @ChestHits, @StomachHits, @ArmHits, @LegHits,
-                @KDRatio, @HeadshotPercentage, @AccuracyPercentage, @KASTPercentage,
-                @AverageDamagePerRound, @HLTVRating, @ImpactRating, @SurvivalRating, @UtilityScore,
-                @NoscopeKills, @ThruSmokeKills, @AttackerBlindKills, @FlashAssistedKills, @WallbangKills,
-                @Pings, @Footsteps
-            )
+        var now = DateTime.UtcNow;
+        foreach (var s in snapshotList)
+        {
+            dataTable.Rows.Add(
+                s.SteamId, s.Name, s.Kills, s.Deaths, s.Assists, s.Headshots, s.DamageDealt, s.DamageTaken, s.DamageArmor,
+                s.ShotsFired, s.ShotsHit, s.Mvps, s.Score, s.RoundsPlayed, s.RoundsWon, s.TotalSpawns, s.PlaytimeSeconds,
+                s.CtRounds, s.TRounds, s.GrenadesThrown, s.FlashesThrown, s.SmokesThrown, s.MolotovsThrown,
+                s.HeGrenadesThrown, s.DecoysThrown, s.TacticalGrenadesThrown, s.PlayersBlinded, s.TimesBlinded,
+                s.FlashAssists, s.TotalBlindTime, s.TotalBlindTimeInflicted, s.UtilityDamageDealt, s.UtilityDamageTaken,
+                s.BombPlants, s.BombDefuses, s.BombPlantAttempts, s.BombPlantAborts, s.BombDefuseAttempts,
+                s.BombDefuseAborts, s.BombDefuseWithKit, s.BombDefuseWithoutKit, s.BombDrops, s.BombPickups,
+                s.DefuserDrops, s.DefuserPickups, s.ClutchDefuses, s.TotalPlantTime, s.TotalDefuseTime,
+                s.BombKills, s.BombDeaths, s.HostagesRescued, s.Jumps,
+                s.MoneySpent, s.EquipmentValue, s.ItemsPurchased, s.ItemsPickedUp, s.ItemsDropped, s.CashEarned, s.CashSpent,
+                s.LossBonus, s.RoundStartMoney, s.RoundEndMoney, s.EquipmentValueStart, s.EquipmentValueEnd,
+                s.EnemiesFlashed, s.TeammatesFlashed, s.EffectiveFlashes, s.EffectiveSmokes, s.EffectiveHEGrenades,
+                s.EffectiveMolotovs, s.FlashWaste, s.MultiKillNades, s.NadeKills,
+                s.EntryKills, s.TradeKills, s.TradedDeaths, s.HighImpactKills, s.LowImpactKills, s.TradeOpportunities, s.TradeWindowsMissed, s.MultiKills, s.OpeningDuelsWon, s.OpeningDuelsLost,
+                s.Revenges, s.ClutchesWon, s.ClutchesLost, s.ClutchPoints, s.MvpsEliminations, s.MvpsBomb, s.MvpsHostage,
+                s.HeadshotsHit, s.ChestHits, s.StomachHits, s.ArmHits, s.LegHits,
+                s.KDRatio, s.HeadshotPercentage, s.AccuracyPercentage, s.KASTPercentage,
+                s.AverageDamagePerRound, s.HLTVRating, s.ImpactRating, s.SurvivalRating, s.UtilityScore,
+                s.NoscopeKills, s.ThruSmokeKills, s.AttackerBlindKills, s.FlashAssistedKills, s.WallbangKills,
+                s.Pings, s.Footsteps,
+                now, 0
+            );
+        }
+
+        await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_player_stats LIKE player_stats;").ConfigureAwait(false);
+        
+        var bulkCopy = new MySqlBulkCopy(connection)
+        {
+            DestinationTableName = "temp_player_stats"
+        };
+        
+        await bulkCopy.WriteToServerAsync(dataTable, cancellationToken).ConfigureAwait(false);
+
+        const string mergeSql = """
+            INSERT INTO player_stats 
+            SELECT * FROM temp_player_stats
             ON DUPLICATE KEY UPDATE
                 name = VALUES(name), kills = VALUES(kills), deaths = VALUES(deaths), assists = VALUES(assists),
                 headshots = VALUES(headshots), damage_dealt = VALUES(damage_dealt), damage_taken = VALUES(damage_taken),
@@ -280,134 +469,13 @@ public sealed class StatsRepository : IStatsRepository
                 utility_score = VALUES(utility_score),
                 noscope_kills = VALUES(noscope_kills), thru_smoke_kills = VALUES(thru_smoke_kills),
                 attacker_blind_kills = VALUES(attacker_blind_kills), flash_assisted_kills = VALUES(flash_assisted_kills),
-                wallbang_kills = VALUES(wallbang_kills), pings = VALUES(pings), footsteps = VALUES(footsteps);
+                wallbang_kills = VALUES(wallbang_kills), pings = VALUES(pings), footsteps = VALUES(footsteps),
+                retry_count = retry_count + 1;
             """;
 
-        const string upsertWeaponStatsSql = """
-            INSERT INTO weapon_stats (steam_id, weapon_name, kills, deaths, shots, hits, headshots)
-            VALUES (@SteamId, @Weapon, @Kills, 0, @Shots, @Hits, 0)
-            ON DUPLICATE KEY UPDATE
-                kills = VALUES(kills),
-                shots = VALUES(shots),
-                hits = VALUES(hits);
-            """;
+        await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);
+        await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_player_stats;").ConfigureAwait(false);
 
-        const string insertAdvancedAnalyticsSql = """
-            INSERT INTO player_advanced_analytics (
-                match_id, steam_id, calculated_at, name, rating2, kills_per_round, deaths_per_round, impact_score, kast_percentage,
-                average_damage_per_round, utility_impact_score, clutch_success_rate, trade_success_rate, 
-                trade_windows_missed, flash_waste, entry_success_rate,
-                rounds_played, kd_ratio, headshot_percentage, opening_kill_ratio, trade_kill_ratio,
-                grenade_effectiveness_rate, flash_effectiveness_rate, utility_usage_per_round,
-                average_money_spent_per_round, performance_score, top_weapon_by_kills, survival_rating, utility_score, clutch_points,
-                flash_assisted_kills, wallbang_kills, idempotency_key
-            ) VALUES (
-                @MatchId, @SteamId, @CalculatedAt, @Name, @Rating2, @KillsPerRound, @DeathsPerRound, @ImpactScore, @KastPercentage,
-                @AverageDamagePerRound, @UtilityImpactScore, @ClutchSuccessRate, @TradeSuccessRate, 
-                @TradeWindowsMissed, @FlashWaste, @EntrySuccessRate,
-                @RoundsPlayed, @KdRatio, @HeadshotPercentage, @OpeningKillRatio, @TradeKillRatio,
-                @GrenadeEffectivenessRate, @FlashEffectivenessRate, @UtilityUsagePerRound,
-                @AverageMoneySpentPerRound, @PerformanceScore, @TopWeaponByKills, @SurvivalRating, @UtilityScore, @ClutchPoints,
-                @FlashAssistedKills, @WallbangKills, @IdempotencyKey
-            ) ON DUPLICATE KEY UPDATE
-                calculated_at = VALUES(calculated_at), name = VALUES(name), rating2 = VALUES(rating2),
-                kills_per_round = VALUES(kills_per_round), deaths_per_round = VALUES(deaths_per_round),
-                impact_score = VALUES(impact_score), kast_percentage = VALUES(kast_percentage),
-                average_damage_per_round = VALUES(average_damage_per_round), utility_impact_score = VALUES(utility_impact_score),
-                clutch_success_rate = VALUES(clutch_success_rate), trade_success_rate = VALUES(trade_success_rate),
-                trade_windows_missed = VALUES(trade_windows_missed), flash_waste = VALUES(flash_waste),
-                entry_success_rate = VALUES(entry_success_rate), rounds_played = VALUES(rounds_played),
-                kd_ratio = VALUES(kd_ratio), headshot_percentage = VALUES(headshot_percentage),
-                opening_kill_ratio = VALUES(opening_kill_ratio), trade_kill_ratio = VALUES(trade_kill_ratio),
-                grenade_effectiveness_rate = VALUES(grenade_effectiveness_rate),
-                flash_effectiveness_rate = VALUES(flash_effectiveness_rate),
-                utility_usage_per_round = VALUES(utility_usage_per_round),
-                average_money_spent_per_round = VALUES(average_money_spent_per_round),
-                performance_score = VALUES(performance_score), top_weapon_by_kills = VALUES(top_weapon_by_kills),
-                survival_rating = VALUES(survival_rating), utility_score = VALUES(utility_score),
-                clutch_points = VALUES(clutch_points), flash_assisted_kills = VALUES(flash_assisted_kills),
-                wallbang_kills = VALUES(wallbang_kills);
-            """;
-
-        await using var connection = await _connectionFactory.CreateConnectionAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-
-        try
-        {
-            _logger.LogDebug("Executing upsertPlayerInfoSql for {Count} players", snapshotList.Count);
-            var playerInfoCount = await connection.ExecuteAsync(new CommandDefinition(upsertPlayerInfoSql, snapshotList, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
-            _logger.LogDebug("upsertPlayerInfoSql affected {Count} rows", playerInfoCount);
-
-            _logger.LogDebug("Executing upsertPlayerStatsSql for {Count} players", snapshotList.Count);
-            var playerStatsCount = await connection.ExecuteAsync(new CommandDefinition(upsertPlayerStatsSql, snapshotList, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
-            _logger.LogDebug("upsertPlayerStatsSql affected {Count} rows", playerStatsCount);
-
-            var weaponData = snapshotList.SelectMany(s => s.WeaponKills.Select(kvp => new
-            {
-                s.SteamId,
-                Weapon = kvp.Key,
-                Kills = kvp.Value,
-                Shots = s.WeaponShots.GetValueOrDefault(kvp.Key, 0),
-                Hits = s.WeaponHits.GetValueOrDefault(kvp.Key, 0)
-            })).ToList();
-
-            if (weaponData.Count > 0)
-            {
-                _logger.LogDebug("Executing upsertWeaponStatsSql for {Count} weapon records", weaponData.Count);
-                var weaponStatsCount = await connection.ExecuteAsync(new CommandDefinition(upsertWeaponStatsSql, weaponData, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
-                _logger.LogDebug("upsertWeaponStatsSql affected {Count} rows", weaponStatsCount);
-            }
-
-            var now = DateTime.UtcNow;
-            var advancedData = snapshotList.Select(s => new
-            {
-                s.MatchId,
-                s.SteamId,
-                CalculatedAt = now,
-                s.Name,
-                Rating2 = s.HLTVRating,
-                KillsPerRound = s.AverageKillsPerRound,
-                DeathsPerRound = s.AverageDeathsPerRound,
-                ImpactScore = s.ImpactRating,
-                s.KASTPercentage,
-                s.AverageDamagePerRound,
-                s.UtilityImpactScore,
-                s.ClutchSuccessRate,
-                TradeSuccessRate = s.TradeKillRatio,
-                s.TradeWindowsMissed,
-                s.FlashWaste,
-                EntrySuccessRate = s.OpeningKillRatio,
-                s.RoundsPlayed,
-                KdRatio = s.KDRatio,
-                s.HeadshotPercentage,
-                s.OpeningKillRatio,
-                s.TradeKillRatio,
-                s.GrenadeEffectivenessRate,
-                s.FlashEffectivenessRate,
-                s.UtilityUsagePerRound,
-                s.AverageMoneySpentPerRound,
-                s.PerformanceScore,
-                s.TopWeaponByKills,
-                s.SurvivalRating,
-                s.UtilityScore,
-                s.ClutchPoints,
-                s.FlashAssistedKills,
-                s.WallbangKills,
-                IdempotencyKey = s.MatchUuid != null ? $"{s.MatchUuid}_{s.RoundNumber}_{s.SteamId}" : null
-            }).ToList();
-
-            _logger.LogDebug("Executing insertAdvancedAnalyticsSql for {Count} records", advancedData.Count);
-            var advancedAnalyticsCount = await connection.ExecuteAsync(new CommandDefinition(insertAdvancedAnalyticsSql, advancedData, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
-            _logger.LogDebug("insertAdvancedAnalyticsSql affected {Count} rows", advancedAnalyticsCount);
-
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            _logger.LogDebug("Transaction committed successfully");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Transaction failed, rolling back. Error: {Message}", ex.Message);
-            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-            throw;
-        }
+        _logger.LogInformation("Successfully completed high-performance bulk update for {Count} players using MySqlBulkCopy", snapshotList.Count);
     }
 }

@@ -35,15 +35,17 @@ public interface IRoundBackupService
 
 public sealed class RoundBackupService(
     ILogger<RoundBackupService> logger,
-    IPlayerSessionService playerSessions) : IRoundBackupService
+    IPlayerSessionService playerSessions,
+    IGameScheduler scheduler) : IRoundBackupService
 {
     private readonly ILogger<RoundBackupService> _logger = logger;
     private readonly IPlayerSessionService _playerSessions = playerSessions;
+    private readonly IGameScheduler _scheduler = scheduler;
     private readonly List<RoundSnapshot> _backups = [];
 
     public void CreateSnapshot(int roundNumber)
     {
-        Server.NextFrame(() =>
+        _scheduler.Schedule(() =>
         {
             var playerData = new Dictionary<ulong, PlayerRoundData>();
             
@@ -102,7 +104,7 @@ public sealed class RoundBackupService(
 
         _logger.LogInformation("Restoring round {RoundNumber}...", roundNumber);
 
-        Server.NextFrame(() =>
+        _scheduler.Schedule(() =>
         {
             // Restore team scores
             var teamManagers = Utilities.FindAllEntitiesByDesignerName<CCSTeam>("cs_team_manager");

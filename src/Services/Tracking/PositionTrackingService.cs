@@ -26,7 +26,7 @@ public interface IPositionTrackingService
 {
     void OnTick();
     Task TrackKillPositionAsync(
-        int? matchId,
+        string? matchUuid,
         ulong killerSteamId, 
         ulong victimSteamId, 
         Vector killerPos, 
@@ -41,10 +41,10 @@ public interface IPositionTrackingService
         int roundTime,
         CancellationToken cancellationToken = default);
 
-    Task BulkTrackKillPositionsAsync(int? matchId, IEnumerable<KillPositionEvent> events, CancellationToken cancellationToken = default);
+    Task BulkTrackKillPositionsAsync(IEnumerable<KillPositionEvent> events, CancellationToken cancellationToken = default);
 
     Task TrackDeathPositionAsync(
-        int? matchId,
+        string? matchUuid,
         ulong steamId,
         Vector position,
         string causeOfDeath,
@@ -55,10 +55,10 @@ public interface IPositionTrackingService
         int roundTime,
         CancellationToken cancellationToken = default);
 
-    Task BulkTrackDeathPositionsAsync(int? matchId, IEnumerable<DeathPositionEvent> events, CancellationToken cancellationToken = default);
+    Task BulkTrackDeathPositionsAsync(IEnumerable<DeathPositionEvent> events, CancellationToken cancellationToken = default);
 
     Task TrackUtilityPositionAsync(
-        int? matchId,
+        string? matchUuid,
         ulong steamId,
         Vector throwPos,
         Vector landPos,
@@ -71,7 +71,7 @@ public interface IPositionTrackingService
         int roundTime,
         CancellationToken cancellationToken = default);
 
-    Task BulkTrackUtilityPositionsAsync(int? matchId, IEnumerable<UtilityPositionEvent> events, CancellationToken cancellationToken = default);
+    Task BulkTrackUtilityPositionsAsync(IEnumerable<UtilityPositionEvent> events, CancellationToken cancellationToken = default);
 }
 
 public sealed class PositionTrackingService : IPositionTrackingService
@@ -81,7 +81,8 @@ public sealed class PositionTrackingService : IPositionTrackingService
     private readonly ResiliencePipeline _resiliencePipeline;
     private readonly IPlayerSessionService _playerSessions;
     private readonly IPositionPersistenceService _positionPersistence;
-    private readonly ITaskTracker _taskTracker;
+    private readonly IGameScheduler _scheduler;
+    private readonly IMatchTrackingService _matchTracker;
     private int _tickCount;
     private const int TrackIntervalTicks = 128; // Track every 1 second at 128 tick
 
@@ -91,14 +92,16 @@ public sealed class PositionTrackingService : IPositionTrackingService
         ILogger<PositionTrackingService> logger,
         IPlayerSessionService playerSessions,
         IPositionPersistenceService positionPersistence,
-        ITaskTracker taskTracker)
+        IGameScheduler scheduler,
+        IMatchTrackingService matchTracker)
     {
         _connectionFactory = connectionFactory;
         _logger = logger;
         _resiliencePipeline = pipelineProvider.GetPipeline("database");
         _playerSessions = playerSessions;
         _positionPersistence = positionPersistence;
-        _taskTracker = taskTracker;
+        _scheduler = scheduler;
+        _matchTracker = matchTracker;
     }
 
     public void OnTick()
@@ -139,7 +142,8 @@ public sealed class PositionTrackingService : IPositionTrackingService
             {
                 var batch = new PlayerPositionSnapshot[actualCount];
                 Array.Copy(positions, batch, actualCount);
-                _taskTracker.Track("PositionTickEnqueue", _positionPersistence.EnqueueAsync(new PositionTickEvent(CounterStrikeSharp.API.Server.MapName, batch), CancellationToken.None));
+                var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
+                _ = _positionPersistence.EnqueueAsync(new PositionTickEvent(CounterStrikeSharp.API.Server.MapName, matchUuid, batch), CancellationToken.None);
             }
         }
         catch (Exception ex)
@@ -153,7 +157,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
     }
 
     public async Task TrackKillPositionAsync(
-        int? matchId,
+        string? matchUuid,
         ulong killerSteamId,
         ulong victimSteamId,
         Vector killerPos,
@@ -176,13 +180,13 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 (match_id, killer_steam_id, victim_steam_id, killer_pos, killer_z, 
                  victim_pos, victim_z, weapon_used, is_headshot, is_wallbang,
                  distance, killer_team, victim_team, map_name, round_number, round_time_seconds)
-                VALUES 
-                (@MatchId, @KS, @VS, POINT(@KX, @KY), @KZ, POINT(@VX, @VY), @VZ, @W, @HS, @WB, @D, @KT, @VT, @M, @RN, @RT)
+                SELECT m.id, @KS, @VS, POINT(@KX, @KY), @KZ, POINT(@VX, @VY), @VZ, @W, @HS, @WB, @D, @KT, @VT, @M, @RN, @RT
+                FROM matches m WHERE m.match_uuid = @MatchUuid
                 """;
 
             var distance = CalculateDistance(killerPos, victimPos);
             var parameters = new {
-                MatchId = matchId,
+                MatchUuid = matchUuid,
                 KS = killerSteamId, VS = victimSteamId,
                 KX = killerPos.X, KY = killerPos.Y, KZ = killerPos.Z,
                 VX = victimPos.X, VY = victimPos.Y, VZ = victimPos.Z,
@@ -196,7 +200,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
         }, cancellationToken).ConfigureAwait(false);
     }
 
-        public async Task BulkTrackKillPositionsAsync(int? matchId, IEnumerable<KillPositionEvent> events, CancellationToken cancellationToken = default)
+    public async Task BulkTrackKillPositionsAsync(IEnumerable<KillPositionEvent> events, CancellationToken cancellationToken = default)
     {
         var eventList = events.ToList();
         if (eventList.Count == 0) return;
@@ -204,58 +208,72 @@ public sealed class PositionTrackingService : IPositionTrackingService
         await _resiliencePipeline.ExecuteAsync(async ct => 
         {
             using var activity = Instrumentation.ActivitySource.StartActivity("BulkTrackKillPositionsAsync");
-            _logger.LogDebug("Starting bulk track for {Count} kill positions (MatchId: {MatchId})", eventList.Count, matchId);
-            try
-            {
-                var sb = new System.Text.StringBuilder();
-                sb.Append(@"INSERT INTO kill_positions 
-                    (match_id, killer_steam_id, victim_steam_id, killer_pos, killer_z, 
-                     victim_pos, victim_z, weapon_used, is_headshot, is_wallbang,
-                     distance, killer_team, victim_team, map_name, round_number, round_time_seconds)
-                    VALUES ");
+            
+            await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            
+            var dataTable = new DataTable();
+            dataTable.Columns.Add("match_uuid", typeof(string));
+            dataTable.Columns.Add("killer_steam_id", typeof(ulong));
+            dataTable.Columns.Add("victim_steam_id", typeof(ulong));
+            dataTable.Columns.Add("killer_x", typeof(float));
+            dataTable.Columns.Add("killer_y", typeof(float));
+            dataTable.Columns.Add("killer_z", typeof(float));
+            dataTable.Columns.Add("victim_x", typeof(float));
+            dataTable.Columns.Add("victim_y", typeof(float));
+            dataTable.Columns.Add("victim_z", typeof(float));
+            dataTable.Columns.Add("weapon_used", typeof(string));
+            dataTable.Columns.Add("is_headshot", typeof(bool));
+            dataTable.Columns.Add("is_wallbang", typeof(bool));
+            dataTable.Columns.Add("distance", typeof(float));
+            dataTable.Columns.Add("killer_team", typeof(int));
+            dataTable.Columns.Add("victim_team", typeof(int));
+            dataTable.Columns.Add("map_name", typeof(string));
+            dataTable.Columns.Add("round_number", typeof(int));
+            dataTable.Columns.Add("round_time_seconds", typeof(int));
 
-                var parameters = new DynamicParameters();
-                for (int i = 0; i < eventList.Count; i++)
-                {
-                    if (i > 0) sb.Append(',');
-                    var e = eventList[i];
-                    sb.Append($"(@MatchId{i}, @KS{i}, @VS{i}, POINT(@KX{i}, @KY{i}), @KZ{i}, POINT(@VX{i}, @VY{i}), @VZ{i}, @W{i}, @HS{i}, @WB{i}, @D{i}, @KT{i}, @VT{i}, @M{i}, @RN{i}, @RT{i})");
-                    
-                    parameters.Add($"MatchId{i}", matchId);
-                    parameters.Add($"KS{i}", e.KillerSteamId);
-                    parameters.Add($"VS{i}", e.VictimSteamId);
-                    parameters.Add($"KX{i}", e.KillerX);
-                    parameters.Add($"KY{i}", e.KillerY);
-                    parameters.Add($"KZ{i}", e.KillerZ);
-                    parameters.Add($"VX{i}", e.VictimX);
-                    parameters.Add($"VY{i}", e.VictimY);
-                    parameters.Add($"VZ{i}", e.VictimZ);
-                    parameters.Add($"W{i}", e.Weapon);
-                    parameters.Add($"HS{i}", e.IsHeadshot);
-                    parameters.Add($"WB{i}", e.IsWallbang);
-                    parameters.Add($"D{i}", e.Distance);
-                    parameters.Add($"KT{i}", e.KillerTeam);
-                    parameters.Add($"VT{i}", e.VictimTeam);
-                    parameters.Add($"M{i}", e.MapName);
-                    parameters.Add($"RN{i}", e.RoundNumber);
-                    parameters.Add($"RT{i}", e.RoundTime);
-                }
-
-                await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-                var count = await connection.ExecuteAsync(new CommandDefinition(sb.ToString(), parameters, cancellationToken: ct)).ConfigureAwait(false);
-                _logger.LogDebug("Successfully tracked {Count} kill positions using bulk insert", count);
-                Instrumentation.PositionEventsTrackedCounter.Add(count, new KeyValuePair<string, object?>("type", "kill"));
-            }
-            catch (Exception ex)
+            foreach (var e in eventList)
             {
-                _logger.LogError(ex, "Failed to bulk track kill positions for {Count} events", eventList.Count);
-                throw;
+                dataTable.Rows.Add(
+                    e.MatchUuid, e.KillerSteamId, e.VictimSteamId,
+                    e.KillerX, e.KillerY, e.KillerZ,
+                    e.VictimX, e.VictimY, e.VictimZ,
+                    e.Weapon, e.IsHeadshot, e.IsWallbang,
+                    e.Distance, e.KillerTeam, e.VictimTeam,
+                    e.MapName, e.RoundNumber, e.RoundTime
+                );
             }
+
+            await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_kill_positions_uuid LIKE kill_positions;").ConfigureAwait(false);
+            // Wait, kill_positions table might not have match_uuid column. 
+            // The standard pattern we've used is to JOIN with matches table.
+            // Let's adjust to use a temp table that can resolve match_id.
+            
+            await connection.ExecuteAsync("ALTER TABLE temp_kill_positions_uuid ADD COLUMN match_uuid VARCHAR(64);").ConfigureAwait(false);
+            
+            using var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_kill_positions_uuid" };
+            await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false);
+
+            const string mergeSql = """
+                INSERT INTO kill_positions 
+                (match_id, killer_steam_id, victim_steam_id, killer_pos, killer_z, 
+                 victim_pos, victim_z, weapon_used, is_headshot, is_wallbang,
+                 distance, killer_team, victim_team, map_name, round_number, round_time_seconds)
+                SELECT m.id, t.killer_steam_id, t.victim_steam_id, POINT(t.killer_x, t.killer_y), t.killer_z, 
+                       POINT(t.victim_x, t.victim_y), t.victim_z, t.weapon_used, t.is_headshot, t.is_wallbang,
+                       t.distance, t.killer_team, t.victim_team, t.map_name, t.round_number, t.round_time_seconds
+                FROM temp_kill_positions_uuid t
+                JOIN matches m ON t.match_uuid = m.match_uuid;
+                """;
+
+            await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);
+            await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_kill_positions_uuid;").ConfigureAwait(false);
+            
+            Instrumentation.PositionEventsTrackedCounter.Add(eventList.Count, new KeyValuePair<string, object?>("type", "kill"));
         }, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task TrackDeathPositionAsync(
-        int? matchId,
+        string? matchUuid,
         ulong steamId,
         Vector position,
         string causeOfDeath,
@@ -272,12 +290,12 @@ public sealed class PositionTrackingService : IPositionTrackingService
             const string sql = """
                 INSERT INTO death_positions 
                 (match_id, steam_id, pos, z, cause_of_death, is_headshot, team, map_name, round_number, round_time_seconds)
-                VALUES 
-                (@MatchId, @S, POINT(@X, @Y), @Z, @C, @HS, @T, @M, @RN, @RT)
+                SELECT m.id, @S, POINT(@X, @Y), @Z, @C, @HS, @T, @M, @RN, @RT
+                FROM matches m WHERE m.match_uuid = @MatchUuid
                 """;
 
             var parameters = new {
-                MatchId = matchId, S = steamId,
+                MatchUuid = matchUuid, S = steamId,
                 X = position.X, Y = position.Y, Z = position.Z,
                 C = causeOfDeath, HS = isHeadshot, T = team,
                 M = mapName, RN = roundNumber, RT = roundTime
@@ -288,7 +306,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task BulkTrackDeathPositionsAsync(int? matchId, IEnumerable<DeathPositionEvent> events, CancellationToken cancellationToken = default)
+    public async Task BulkTrackDeathPositionsAsync(IEnumerable<DeathPositionEvent> events, CancellationToken cancellationToken = default)
     {
         var eventList = events.ToList();
         if (eventList.Count == 0) return;
@@ -296,49 +314,53 @@ public sealed class PositionTrackingService : IPositionTrackingService
         await _resiliencePipeline.ExecuteAsync(async ct => 
         {
             using var activity = Instrumentation.ActivitySource.StartActivity("BulkTrackDeathPositionsAsync");
-            _logger.LogDebug("Starting bulk track for {Count} death positions (MatchId: {MatchId})", eventList.Count, matchId);
-            try
-            {
-                var sb = new System.Text.StringBuilder();
-                sb.Append(@"INSERT INTO death_positions 
-                    (match_id, steam_id, pos, z, cause_of_death, is_headshot, team, map_name, round_number, round_time_seconds)
-                    VALUES ");
+            
+            await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            
+            var dataTable = new DataTable();
+            dataTable.Columns.Add("match_uuid", typeof(string));
+            dataTable.Columns.Add("steam_id", typeof(ulong));
+            dataTable.Columns.Add("x", typeof(float));
+            dataTable.Columns.Add("y", typeof(float));
+            dataTable.Columns.Add("z", typeof(float));
+            dataTable.Columns.Add("cause_of_death", typeof(string));
+            dataTable.Columns.Add("is_headshot", typeof(bool));
+            dataTable.Columns.Add("team", typeof(int));
+            dataTable.Columns.Add("map_name", typeof(string));
+            dataTable.Columns.Add("round_number", typeof(int));
+            dataTable.Columns.Add("round_time_seconds", typeof(int));
 
-                var parameters = new DynamicParameters();
-                for (int i = 0; i < eventList.Count; i++)
-                {
-                    if (i > 0) sb.Append(',');
-                    var e = eventList[i];
-                    sb.Append($"(@MatchId{i}, @S{i}, POINT(@X{i}, @Y{i}), @Z{i}, @C{i}, @HS{i}, @T{i}, @M{i}, @RN{i}, @RT{i})");
-                    
-                    parameters.Add($"MatchId{i}", matchId);
-                    parameters.Add($"S{i}", e.SteamId);
-                    parameters.Add($"X{i}", e.X);
-                    parameters.Add($"Y{i}", e.Y);
-                    parameters.Add($"Z{i}", e.Z);
-                    parameters.Add($"C{i}", e.CauseOfDeath);
-                    parameters.Add($"HS{i}", e.IsHeadshot);
-                    parameters.Add($"T{i}", e.Team);
-                    parameters.Add($"M{i}", e.MapName);
-                    parameters.Add($"RN{i}", e.RoundNumber);
-                    parameters.Add($"RT{i}", e.RoundTime);
-                }
-
-                await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-                var count = await connection.ExecuteAsync(new CommandDefinition(sb.ToString(), parameters, cancellationToken: ct)).ConfigureAwait(false);
-                _logger.LogDebug("Successfully tracked {Count} death positions using bulk insert", count);
-                Instrumentation.PositionEventsTrackedCounter.Add(count, new KeyValuePair<string, object?>("type", "death"));
-            }
-            catch (Exception ex)
+            foreach (var e in eventList)
             {
-                _logger.LogError(ex, "Failed to bulk track death positions for {Count} events", eventList.Count);
-                throw;
+                dataTable.Rows.Add(
+                    e.MatchUuid, e.SteamId, e.X, e.Y, e.Z,
+                    e.CauseOfDeath, e.IsHeadshot, e.Team,
+                    e.MapName, e.RoundNumber, e.RoundTime
+                );
             }
+
+            await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_death_positions_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, x FLOAT, y FLOAT, z FLOAT, cause_of_death VARCHAR(64), is_headshot TINYINT(1), team INT, map_name VARCHAR(64), round_number INT, round_time_seconds INT);").ConfigureAwait(false);
+            
+            using var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_death_positions_uuid" };
+            await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false);
+
+            const string mergeSql = """
+                INSERT INTO death_positions 
+                (match_id, steam_id, pos, z, cause_of_death, is_headshot, team, map_name, round_number, round_time_seconds)
+                SELECT m.id, t.steam_id, POINT(t.x, t.y), t.z, t.cause_of_death, t.is_headshot, t.team, t.map_name, t.round_number, t.round_time_seconds
+                FROM temp_death_positions_uuid t
+                JOIN matches m ON t.match_uuid = m.match_uuid;
+                """;
+
+            await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);
+            await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_death_positions_uuid;").ConfigureAwait(false);
+            
+            Instrumentation.PositionEventsTrackedCounter.Add(eventList.Count, new KeyValuePair<string, object?>("type", "death"));
         }, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task TrackUtilityPositionAsync(
-        int? matchId,
+        string? matchUuid,
         ulong steamId,
         Vector throwPos,
         Vector landPos,
@@ -359,14 +381,14 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 (match_id, steam_id, throw_pos, throw_z, land_pos, land_z,
                  utility_type, opponents_affected, teammates_affected, damage,
                  map_name, round_number, round_time_seconds)
-                VALUES 
-                (@MatchId, @SteamId, POINT(@ThrowX, @ThrowY), @ThrowZ, POINT(@LandX, @LandY), @LandZ,
-                 @UtilityType, @OpponentsAffected, @TeammatesAffected, @Damage,
-                 @MapName, @RoundNumber, @RoundTime)
+                SELECT m.id, @SteamId, POINT(@ThrowX, @ThrowY), @ThrowZ, POINT(@LandX, @LandY), @LandZ,
+                       @UtilityType, @OpponentsAffected, @TeammatesAffected, @Damage,
+                       @MapName, @RoundNumber, @RoundTime
+                FROM matches m WHERE m.match_uuid = @MatchUuid
                 """;
 
             var parameters = new {
-                MatchId = matchId, SteamId = steamId,
+                MatchUuid = matchUuid, SteamId = steamId,
                 ThrowX = throwPos.X, ThrowY = throwPos.Y, ThrowZ = throwPos.Z,
                 LandX = landPos.X, LandY = landPos.Y, LandZ = landPos.Z,
                 UtilityType = utilityType, OpponentsAffected = opponentsAffected,
@@ -379,7 +401,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task BulkTrackUtilityPositionsAsync(int? matchId, IEnumerable<UtilityPositionEvent> events, CancellationToken cancellationToken = default)
+    public async Task BulkTrackUtilityPositionsAsync(IEnumerable<UtilityPositionEvent> events, CancellationToken cancellationToken = default)
     {
         var eventList = events.ToList();
         if (eventList.Count == 0) return;
@@ -387,50 +409,58 @@ public sealed class PositionTrackingService : IPositionTrackingService
         await _resiliencePipeline.ExecuteAsync(async ct => 
         {
             using var activity = Instrumentation.ActivitySource.StartActivity("BulkTrackUtilityPositionsAsync");
-            _logger.LogDebug("Starting bulk track for {Count} utility positions (MatchId: {MatchId})", eventList.Count, matchId);
-            try
-            {
-                var sb = new System.Text.StringBuilder();
-                sb.Append(@"INSERT INTO utility_positions 
-                    (match_id, steam_id, throw_pos, throw_z, land_pos, land_z,
-                     utility_type, opponents_affected, teammates_affected, damage,
-                     map_name, round_number, round_time_seconds)
-                    VALUES ");
+            
+            await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            
+            var dataTable = new DataTable();
+            dataTable.Columns.Add("match_uuid", typeof(string));
+            dataTable.Columns.Add("steam_id", typeof(ulong));
+            dataTable.Columns.Add("throw_x", typeof(float));
+            dataTable.Columns.Add("throw_y", typeof(float));
+            dataTable.Columns.Add("throw_z", typeof(float));
+            dataTable.Columns.Add("land_x", typeof(float));
+            dataTable.Columns.Add("land_y", typeof(float));
+            dataTable.Columns.Add("land_z", typeof(float));
+            dataTable.Columns.Add("utility_type", typeof(int));
+            dataTable.Columns.Add("opponents_affected", typeof(int));
+            dataTable.Columns.Add("teammates_affected", typeof(int));
+            dataTable.Columns.Add("damage", typeof(int));
+            dataTable.Columns.Add("map_name", typeof(string));
+            dataTable.Columns.Add("round_number", typeof(int));
+            dataTable.Columns.Add("round_time_seconds", typeof(int));
 
-                var parameters = new DynamicParameters();
-                for (int i = 0; i < eventList.Count; i++)
-                {
-                    if (i > 0) sb.Append(',');
-                    var e = eventList[i];
-                    sb.Append($"(@MatchId{i}, @SteamId{i}, POINT(@ThrowX{i}, @ThrowY{i}), @ThrowZ{i}, POINT(@LandX{i}, @LandY{i}), @LandZ{i}, @UtilityType{i}, @OpponentsAffected{i}, @TeammatesAffected{i}, @Damage{i}, @MapName{i}, @RoundNumber{i}, @RoundTime{i})");
-                    
-                    parameters.Add($"MatchId{i}", matchId);
-                    parameters.Add($"SteamId{i}", e.SteamId);
-                    parameters.Add($"ThrowX{i}", e.ThrowX);
-                    parameters.Add($"ThrowY{i}", e.ThrowY);
-                    parameters.Add($"ThrowZ{i}", e.ThrowZ);
-                    parameters.Add($"LandX{i}", e.LandX);
-                    parameters.Add($"LandY{i}", e.LandY);
-                    parameters.Add($"LandZ{i}", e.LandZ);
-                    parameters.Add($"UtilityType{i}", e.UtilityType);
-                    parameters.Add($"OpponentsAffected{i}", e.OpponentsAffected);
-                    parameters.Add($"TeammatesAffected{i}", e.TeammatesAffected);
-                    parameters.Add($"Damage{i}", e.Damage);
-                    parameters.Add($"MapName{i}", e.MapName);
-                    parameters.Add($"RoundNumber{i}", e.RoundNumber);
-                    parameters.Add($"RoundTime{i}", e.RoundTime);
-                }
-
-                await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-                var count = await connection.ExecuteAsync(new CommandDefinition(sb.ToString(), parameters, cancellationToken: ct)).ConfigureAwait(false);
-                _logger.LogDebug("Successfully tracked {Count} utility positions", count);
-                Instrumentation.PositionEventsTrackedCounter.Add(count, new KeyValuePair<string, object?>("type", "utility"));
-            }
-            catch (Exception ex)
+            foreach (var e in eventList)
             {
-                _logger.LogError(ex, "Failed to bulk track utility positions for {Count} events", eventList.Count);
-                throw;
+                dataTable.Rows.Add(
+                    e.MatchUuid, e.SteamId, 
+                    e.ThrowX, e.ThrowY, e.ThrowZ,
+                    e.LandX, e.LandY, e.LandZ,
+                    e.UtilityType, e.OpponentsAffected, e.TeammatesAffected, e.Damage,
+                    e.MapName, e.RoundNumber, e.RoundTime
+                );
             }
+
+            await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_utility_positions_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, throw_x FLOAT, throw_y FLOAT, throw_z FLOAT, land_x FLOAT, land_y FLOAT, land_z FLOAT, utility_type INT, opponents_affected INT, teammates_affected INT, damage INT, map_name VARCHAR(64), round_number INT, round_time_seconds INT);").ConfigureAwait(false);
+            
+            using var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_utility_positions_uuid" };
+            await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false);
+
+            const string mergeSql = """
+                INSERT INTO utility_positions 
+                (match_id, steam_id, throw_pos, throw_z, land_pos, land_z,
+                 utility_type, opponents_affected, teammates_affected, damage,
+                 map_name, round_number, round_time_seconds)
+                SELECT m.id, t.steam_id, POINT(t.throw_x, t.throw_y), t.throw_z, POINT(t.land_x, t.land_y), t.land_z,
+                       t.utility_type, t.opponents_affected, t.teammates_affected, t.damage,
+                       t.map_name, t.round_number, t.round_time_seconds
+                FROM temp_utility_positions_uuid t
+                JOIN matches m ON t.match_uuid = m.match_uuid;
+                """;
+
+            await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);
+            await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_utility_positions_uuid;").ConfigureAwait(false);
+            
+            Instrumentation.PositionEventsTrackedCounter.Add(eventList.Count, new KeyValuePair<string, object?>("type", "utility"));
         }, cancellationToken).ConfigureAwait(false);
     }
 

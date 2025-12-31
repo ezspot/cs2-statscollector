@@ -79,10 +79,14 @@ public sealed class CombatStats
     private int _highImpactKills;
     private int _hostagesRescued;
 
+    private decimal _weightedKills;
+
     public CombatStats(Action markDirty)
     {
         _markDirty = markDirty;
     }
+
+    public decimal WeightedKills { get => _weightedKills; set { _weightedKills = value; _markDirty(); } }
 
     public int Kills { get => _kills; set { _kills = value; _markDirty(); } }
     public int Deaths { get => _deaths; set { _deaths = value; _markDirty(); } }
@@ -180,6 +184,7 @@ public sealed class CombatStats
         _lowImpactKills = _tradeOpportunities = 0;
         _currentRoundKills = _currentRoundDeaths = _currentRoundShotsFired = 0;
         _multiKillNades = _nadeKills = _highImpactKills = _hostagesRescued = 0;
+        _weightedKills = 0;
         _markDirty();
     }
 }

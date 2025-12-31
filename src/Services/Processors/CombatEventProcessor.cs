@@ -43,7 +43,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     private readonly IPositionPersistenceService _positionPersistence;
     private readonly IMatchTrackingService _matchTracker;
     private readonly IDamageReportService _damageReport;
-    private readonly ITaskTracker _taskTracker;
+    private readonly IPersistenceChannel _persistenceChannel;
+    private readonly IGameScheduler _scheduler;
 
     private readonly ObjectPool<HashSet<ulong>> _hashSetPool;
     private readonly ObjectPool<Dictionary<ulong, DateTime>> _dateTimeDictPool;
@@ -76,7 +77,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         IPositionPersistenceService positionPersistence,
         IMatchTrackingService matchTracker,
         IDamageReportService damageReport,
-        ITaskTracker taskTracker)
+        IPersistenceChannel persistenceChannel,
+        IGameScheduler scheduler)
     {
         _playerSessions = playerSessions;
         _config = config;
@@ -85,7 +87,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         _positionPersistence = positionPersistence;
         _matchTracker = matchTracker;
         _damageReport = damageReport;
-        _taskTracker = taskTracker;
+        _persistenceChannel = persistenceChannel;
+        _scheduler = scheduler;
 
         var policy = new DefaultObjectPoolProvider();
         _hashSetPool = policy.Create(new HashSetPooledObjectPolicy<ulong>());
@@ -180,6 +183,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             activity?.SetTag("headshot", isHeadshot);
 
             bool isGrenadeKill = GrenadeWeaponNames.Contains(weaponName.ToLowerInvariant());
+            bool isFlashAssist = flashAssisted;
 
             if (victimState.IsValid && !victimState.IsBot)
             {
@@ -189,9 +193,10 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 
                 if (victimState.PawnHandle != 0)
                 {
-                    var matchId = _matchTracker?.CurrentMatch?.MatchId;
-                    _taskTracker.Track("DeathPositionEnqueue", _positionPersistence.EnqueueAsync(new DeathPositionEvent(
-                        matchId,
+                    var matchUuid = _matchTracker?.CurrentMatch?.MatchUuid;
+                    
+                    _ = _positionPersistence.EnqueueAsync(new DeathPositionEvent(
+                        matchUuid,
                         victimState.SteamId,
                         victimState.Position.X,
                         victimState.Position.Y,
@@ -202,7 +207,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                         Server.MapName,
                         _currentRoundNumber,
                         (int)(now - _currentRoundStartUtc).TotalSeconds
-                    ), CancellationToken.None));
+                    ), CancellationToken.None);
                 }
 
                 _playerSessions.MutatePlayer(victimState.SteamId, stats =>
@@ -247,7 +252,13 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 var enemyAlive = attackerTeam == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
                 var teammatesAlive = attackerTeam == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
 
-                // Check for Revenge Kill
+                // HLTV Rating 3.0: Eco-Adjusted Kills
+                decimal killWeight = Math.Clamp((decimal)victimState.EquipmentValue / 5000m, 0.2m, 1.0m);
+
+                // Round Swing Impact: bonus for kills that change round outcome
+                // Simplified: Entry frags, clutch kills
+                if (_firstKillTimes.Count == 0) killWeight += 0.15m; // Entry kill bonus
+                if (teammatesAlive == 1 && enemyAlive >= 1) killWeight += 0.1m; // Clutch kill bonus
                 bool isRevengeKill = false;
                 if (victimState.IsValid && _lastKillerOfPlayer.TryGetValue(attackerState.SteamId, out var lastKiller) && lastKiller.KillerId == victimState.SteamId)
                 {
@@ -268,10 +279,10 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 if (attackerState.PawnHandle != 0 && victimState.PawnHandle != 0)
                 {
                     var killDistance = CalculateDistance(attackerState.Position, victimState.Position);
-                    var matchId = _matchTracker?.CurrentMatch?.MatchId;
+                    var matchUuid = _matchTracker?.CurrentMatch?.MatchUuid;
 
-                    _taskTracker.Track("KillPositionEnqueue", _positionPersistence.EnqueueAsync(new KillPositionEvent(
-                        matchId,
+                    _ = _positionPersistence.EnqueueAsync(new KillPositionEvent(
+                        matchUuid,
                         attackerState.SteamId,
                         victimState.SteamId,
                         attackerState.Position.X,
@@ -289,13 +300,14 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                         Server.MapName,
                         _currentRoundNumber,
                         (int)(now - _currentRoundStartUtc).TotalSeconds
-                    ), CancellationToken.None));
+                    ), CancellationToken.None);
                 }
 
                 _playerSessions.MutatePlayer(attackerState.SteamId, stats =>
                 {
                     stats.Round.HadKillThisRound = true;
                     stats.Combat.Kills++;
+                    stats.Combat.WeightedKills += killWeight;
                     stats.Combat.Headshots += isHeadshot ? 1 : 0;
                     stats.Weapon.RecordKill(weaponName);
                     stats.CurrentTeam = attackerTeam;
@@ -323,7 +335,16 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     if (noscope) stats.Combat.Noscopes++;
                     if (thruSmoke) stats.Combat.ThroughSmokeKills++;
                     if (attackerBlind) stats.Combat.BlindKills++;
-                    if (flashAssisted) stats.Utility.FlashAssists++;
+                    if (isFlashAssist) 
+                    {
+                        stats.Utility.FlashAssists++;
+                        // Capture victim's blind duration at time of death for Flash Assist Duration
+                        if (victim != null && victim.PlayerPawn.Value != null)
+                        {
+                            var blindRemaining = victim.PlayerPawn.Value.FlashDuration;
+                            stats.Utility.FlashAssistDuration += (int)(blindRemaining * 1000);
+                        }
+                    }
                     if (penetrated) stats.Combat.WallbangKills++;
 
                     if (isGrenadeKill)

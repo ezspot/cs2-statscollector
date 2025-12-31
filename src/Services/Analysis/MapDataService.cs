@@ -1,11 +1,11 @@
 using System.Collections.Generic;
 using System.Numerics;
+using Microsoft.Extensions.Options;
+using statsCollector.Config;
 using CounterStrikeSharp.API.Modules.Utils;
 using Vector = CounterStrikeSharp.API.Modules.Utils.Vector;
 
 namespace statsCollector.Services;
-
-public record ChokePoint(string Name, Vector Position, float Radius);
 
 public interface IMapDataService
 {
@@ -14,30 +14,19 @@ public interface IMapDataService
 
 public sealed class MapDataService : IMapDataService
 {
-    private readonly Dictionary<string, List<ChokePoint>> _chokePoints = new()
+    private readonly IOptionsMonitor<MapDataConfig> _config;
+
+    public MapDataService(IOptionsMonitor<MapDataConfig> config)
     {
-        ["de_mirage"] = new()
-        {
-            new ChokePoint("Window", new Vector(-1060, -420, -165), 150f),
-            new ChokePoint("Connector", new Vector(-750, -700, -160), 150f),
-            new ChokePoint("Palace", new Vector(1000, -1500, -160), 200f),
-            new ChokePoint("Apartments", new Vector(-1500, -800, -50), 250f)
-        },
-        ["de_inferno"] = new()
-        {
-            new ChokePoint("Banana", new Vector(1500, 500, 100), 300f),
-            new ChokePoint("Apartments", new Vector(-500, 2000, 150), 250f),
-            new ChokePoint("Pit", new Vector(1800, 2200, 50), 200f)
-        }
-        // Fallback for other maps can be added or loaded from JSON
-    };
+        _config = config;
+    }
 
     public bool IsInChokePoint(string mapName, Vector position, out string chokePointName)
     {
         chokePointName = string.Empty;
-        if (!_chokePoints.TryGetValue(mapName, out var points)) return false;
+        if (!_config.CurrentValue.Maps.TryGetValue(mapName, out var mapInfo)) return false;
 
-        foreach (var point in points)
+        foreach (var point in mapInfo.ChokePoints)
         {
             float dist = Vector3.Distance(
                 new Vector3(position.X, position.Y, position.Z),

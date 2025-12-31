@@ -37,7 +37,6 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
     private PluginConfig _config = new();
 
     private IPluginLifecycleService? _lifecycle;
-    private ITaskTracker? _taskTracker;
     private readonly CancellationTokenSource _cancellationTokenSource = new();
 
     private MeterProvider? _meterProvider;
@@ -142,7 +141,6 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             builder.AddPipeline(ResiliencePolicies.CreateDatabasePipeline(logger)); 
         });
 
-        services.AddSingleton<ITaskTracker, TaskTracker>();
         services.AddSingleton<IConnectionFactory, ConnectionFactory>();
         services.AddSingleton<IEventDispatcher, EventDispatcher>();
         services.AddSingleton<IAnalyticsService, AnalyticsService>();
@@ -165,17 +163,18 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddTransient<IEconomyEventProcessor>(sp => (IEconomyEventProcessor)sp.GetRequiredService<IEnumerable<IEventProcessor>>().First(p => p is EconomyEventProcessor));
 
         services.AddTransient<IPositionTrackingService, PositionTrackingService>();
-        services.AddSingleton<IPositionPersistenceService, PositionPersistenceService>();
-        services.AddSingleton<IStatsPersistenceService, StatsPersistenceService>();
-        services.AddSingleton<IMatchLifecyclePersistenceService, MatchLifecyclePersistenceService>();
-        services.AddSingleton<IPauseService, PauseService>();
+        services.AddSingleton<IGameScheduler, GameScheduler>();
+        services.AddSingleton<IPersistenceChannel, PersistenceChannel>();
+        services.AddHostedService(sp => (PersistenceChannel)sp.GetRequiredService<IPersistenceChannel>());
         services.AddSingleton<IJsonRecoveryService, JsonRecoveryService>();
-        services.AddSingleton<IConfigLoaderService, ConfigLoaderService>();
         services.AddSingleton<IMapDataService, MapDataService>();
+        services.AddSingleton<IConfigLoaderService, ConfigLoaderService>();
+        services.Configure<MapDataConfig>(config => _config.Bind(config)); 
         services.AddSingleton<IFlashEfficiencyService, FlashEfficiencyService>();
         services.AddSingleton<IRoundBackupService, RoundBackupService>();
         services.AddSingleton<IScrimManager, ScrimManager>();
         services.AddSingleton<IDamageReportService, DamageReportService>();
+        services.AddSingleton<IPauseService, PauseService>();
         services.AddSingleton<IMatchReadyService, MatchReadyService>();
         services.AddSingleton<IPluginLifecycleService, PluginLifecycleService>();
         services.AddSingleton<IGameEventHandlerService, GameEventHandlerService>();
@@ -189,31 +188,31 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
 
         // Resolve
         _lifecycle = _serviceProvider.GetRequiredService<IPluginLifecycleService>();
-        _taskTracker = _serviceProvider.GetRequiredService<ITaskTracker>();
         var matchTracker = _serviceProvider.GetRequiredService<IMatchTrackingService>();
+        var scheduler = _serviceProvider.GetRequiredService<IGameScheduler>();
         
         await _lifecycle.StartAsync(ct);
 
         // Initialize match tracking if server is already running
         if (hotReload)
         {
-            Server.NextFrame(async () => 
+            scheduler.Schedule(() => 
             {
                 if (Server.MapName != null)
                 {
-                    await matchTracker.StartMatchAsync(Server.MapName);
+                    matchTracker.StartMatch(Server.MapName);
                 }
             });
         }
 
         // Register listeners on the game thread
-        Server.NextFrame(() =>
+        scheduler.Schedule(() =>
         {
             _lifecycle.Initialize(this);
 
             RegisterListener<Listeners.OnMapStart>(mapName =>
             {
-                _taskTracker?.Track("StartMatch", matchTracker.StartMatchAsync(mapName));
+                matchTracker.StartMatch(mapName);
             });
 
             RegisterListener<Listeners.OnTick>(() =>
@@ -233,14 +232,8 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
 
         try
         {
-            if (hotReload)
-            {
-                _taskTracker?.Track("Cleanup", CleanupAsync());
-            }
-            else
-            {
-                _taskTracker?.Track("Cleanup", CleanupAsync());
-            }
+            // Use synchronous wait for cleanup to ensure it finishes before host process terminates
+            CleanupAsync().GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
@@ -253,7 +246,6 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         try
         {
             if (_lifecycle != null) await _lifecycle.StopAsync();
-            if (_taskTracker != null) await _taskTracker.WaitAllAsync(TimeSpan.FromSeconds(10));
 
             _cancellationTokenSource.Cancel();
             _tracerProvider?.Dispose();
@@ -275,6 +267,29 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
     #region Player Lifecycle Events
     #endregion
 
-    #region Round Events
-    #endregion
+    [ConsoleCommand("css_recover_scrim", "Recover the last active scrim state after a server crash")]
+    [CommandHelper(whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnRecoverScrimCommand(CCSPlayerController? player, CommandInfo info)
+    {
+        if (player != null && !AdminUtils.HasPermission(player, "@css/admin"))
+        {
+            player.PrintToChat(" [Scrim] You do not have permission to run this command.");
+            return;
+        }
+
+        if (_serviceProvider == null) return;
+        var scrimManager = _serviceProvider.GetRequiredService<IScrimManager>();
+        
+        Task.Run(async () => 
+        {
+            try
+            {
+                await scrimManager.RecoverAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error during scrim recovery command");
+            }
+        });
+    }
 }

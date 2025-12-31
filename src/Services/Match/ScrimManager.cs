@@ -20,7 +20,7 @@ public class ScrimManager : IScrimManager
     private readonly IConfigLoaderService _configLoader;
     private readonly IMatchTrackingService _matchTracker;
     private readonly IJsonRecoveryService _recovery;
-    private readonly ITaskTracker _taskTracker;
+    private readonly IGameScheduler _scheduler;
     private readonly StateMachine<ScrimState, ScrimTrigger> _machine;
 
     private PluginConfig _config => _configMonitor.CurrentValue;
@@ -68,14 +68,14 @@ public class ScrimManager : IScrimManager
         IConfigLoaderService configLoader,
         IMatchTrackingService matchTracker,
         IJsonRecoveryService recovery,
-        ITaskTracker taskTracker)
+        IGameScheduler scheduler)
     {
         _logger = logger;
         _configMonitor = configMonitor;
         _configLoader = configLoader;
         _matchTracker = matchTracker;
         _recovery = recovery;
-        _taskTracker = taskTracker;
+        _scheduler = scheduler;
 
         _playersPerTeam = _config.Scrim.PlayersPerTeam;
         _minReadyPlayers = _config.Scrim.MinReadyPlayers;
@@ -90,7 +90,7 @@ public class ScrimManager : IScrimManager
         {
             _logger.LogInformation("Scrim State Transition: {From} -> {To} via {Trigger}", 
                 transition.Source, transition.Destination, transition.Trigger);
-            _taskTracker.Track("ScrimStateSave", SaveCurrentStateAsync());
+            _scheduler.Schedule(() => _ = SaveCurrentStateAsync());
         });
 
         _machine.Configure(ScrimState.Idle)
@@ -105,7 +105,7 @@ public class ScrimManager : IScrimManager
             .Permit(ScrimTrigger.StopScrim, ScrimState.Idle);
 
         _machine.Configure(ScrimState.Veto)
-            .OnEntry(() => Server.NextFrame(() => Server.PrintToChatAll(" [Scrim] Map Veto started!")))
+            .OnEntry(() => _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Map Veto started!")))
             .Permit(ScrimTrigger.VetoFinished, ScrimState.Picking)
             .Permit(ScrimTrigger.StopScrim, ScrimState.Idle);
 
@@ -113,14 +113,14 @@ public class ScrimManager : IScrimManager
             .OnEntryAsync(async () => 
             {
                 await _configLoader.LoadAndExecuteConfigAsync("practice.cfg");
-                Server.NextFrame(() => Server.PrintToChatAll(" [Scrim] Practice Mode enabled! God, noclip, and infinite ammo active."));
+                _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Practice Mode enabled! God, noclip, and infinite ammo active."));
             })
             .OnExitAsync(async () => await _configLoader.LoadAndExecuteConfigAsync("live.cfg"))
             .Permit(ScrimTrigger.ExitPractice, ScrimState.Idle)
             .Permit(ScrimTrigger.StopScrim, ScrimState.Idle);
 
         _machine.Configure(ScrimState.CaptainSetup)
-            .OnEntry(() => Server.NextFrame(() => Server.PrintToChatAll(" [Scrim] Ready players confirmed. Admins, please appoint captains (.scrim setcaptain team1/team2 <name>).")))
+            .OnEntry(() => _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Ready players confirmed. Admins, please appoint captains (.scrim setcaptain team1/team2 <name>).")))
             .Permit(ScrimTrigger.CaptainsAssigned, ScrimState.MapVote)
             .Permit(ScrimTrigger.StopScrim, ScrimState.Idle);
 
@@ -160,11 +160,39 @@ public class ScrimManager : IScrimManager
 
     public async Task RecoverAsync()
     {
-        var data = await _recovery.LoadScrimStateAsync();
+        var data = await _recovery.LoadScrimStateAsync<ScrimRecoveryData>();
         if (data == null)
         {
             _logger.LogWarning("No scrim recovery data found.");
-            Server.NextFrame(() => Server.PrintToChatAll(" [Scrim] No recovery data found to restore."));
+            _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] No recovery data found to restore."));
+            return;
+        }
+
+        // 1. Validate Match Status in DB if MatchId exists
+        if (data.MatchId.HasValue)
+        {
+            var status = await _matchTracker.GetMatchStatusAsync(data.MatchId.Value);
+            if (status is "COMPLETED" or "CANCELLED")
+            {
+                _logger.LogWarning("Recovery aborted: Match {MatchId} is already {Status}", data.MatchId, status);
+                _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] Recovery aborted: Match {data.MatchId} is already {status}."));
+                await _recovery.ClearScrimStateAsync();
+                return;
+            }
+        }
+
+        // 2. Capture currently connected players
+        var connectedSteamIds = await _scheduler.ExecuteAsync(() => 
+            Utilities.GetPlayers().Where(p => p is { IsValid: true, IsBot: false }).Select(p => p.SteamID).ToHashSet());
+
+        // 3. Verify enough players are still connected
+        var recoveredPlayers = data.Team1.Concat(data.Team2).ToHashSet();
+        var stillConnected = recoveredPlayers.Intersect(connectedSteamIds).Count();
+        
+        if (stillConnected < (data.Team1.Count + data.Team2.Count) / 2)
+        {
+            _logger.LogWarning("Recovery aborted: Not enough players connected. Found {Count}, expected near {Total}", stillConnected, data.Team1.Count + data.Team2.Count);
+            _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Recovery aborted: Not enough players from the previous session are connected."));
             return;
         }
 
@@ -181,12 +209,12 @@ public class ScrimManager : IScrimManager
         if (data.MatchId.HasValue && _matchTracker.CurrentMatch == null)
         {
             _logger.LogInformation("Restoring match tracking for MatchID: {MatchId}", data.MatchId);
-            // Internal match tracker recovery would go here if implemented
+            // Internal match tracker recovery logic if needed
         }
 
         // Use FireAsync to transition state machine safely
         await _machine.FireAsync(ScrimTrigger.RecoverState);
-        Server.NextFrame(() => Server.PrintToChatAll($" [Scrim] Scrim recovered to state: {data.State}."));
+        _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] Scrim successfully recovered to state: {data.State}."));
     }
 
     private async Task OnLobbyEntry()
@@ -198,14 +226,14 @@ public class ScrimManager : IScrimManager
         _pickPool.Clear();
         await _configLoader.LoadAndExecuteConfigAsync("config.cfg");
         await _configLoader.LoadAndExecuteConfigAsync("warmup.cfg");
-        Server.NextFrame(() => Server.PrintToChatAll(" [Scrim] Lobby started! Type .ready to prepare."));
+        _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Lobby started! Type .ready to prepare."));
     }
 
     private Task OnMapVoteEntry()
     {
         _mapVotes.Clear();
         _playerVotes.Clear();
-        Server.NextFrame(() => Server.PrintToChatAll(" [Scrim] Map voting started! Type .vote <map>."));
+        _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Map voting started! Type .vote <map>."));
         return Task.CompletedTask;
     }
 
@@ -220,7 +248,7 @@ public class ScrimManager : IScrimManager
         _pickTurn = 0;
         _team1Picking = true;
 
-        Server.NextFrame(() =>
+        _scheduler.Schedule(() =>
         {
             var captain1 = Utilities.GetPlayerFromSteamId(_captains[1]);
             Server.PrintToChatAll($" [Scrim] Picking phase started! Captain {captain1?.PlayerName} (Team 1) picks first.");
@@ -231,7 +259,7 @@ public class ScrimManager : IScrimManager
     private void NotifyPickTurn()
     {
         var captainSteamId = _team1Picking ? _captains[1] : _captains[2];
-        Server.NextFrame(() =>
+        _scheduler.Schedule(() =>
         {
             var captain = Utilities.GetPlayerFromSteamId(captainSteamId);
             captain?.PrintToChat(" [Scrim] It's YOUR turn to pick a player (.pick <name/index>).");
@@ -244,7 +272,7 @@ public class ScrimManager : IScrimManager
     private async Task OnLiveEntry()
     {
         // Move players to their respective teams
-        Server.NextFrame(() =>
+        _scheduler.Schedule(() =>
         {
             foreach (var steamId in _team1)
             {
@@ -261,13 +289,13 @@ public class ScrimManager : IScrimManager
         if (_config.Scrim.KnifeRoundEnabled)
         {
             await _configLoader.LoadAndExecuteConfigAsync(_config.Scrim.KnifeConfigPath);
-            Server.NextFrame(() => Server.PrintToChatAll(" [Scrim] Knife round started!"));
+            _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Knife round started!"));
         }
         else
         {
             var liveCfg = _playersPerTeam == 2 ? "live_wingman.cfg" : _config.Scrim.LiveConfigPath;
             await _configLoader.LoadAndExecuteConfigAsync(liveCfg);
-            Server.NextFrame(() => Server.PrintToChatAll(" [Scrim] Match is LIVE!"));
+            _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Match is LIVE!"));
             if (_selectedMap != null) await _matchTracker.StartMatchAsync(_selectedMap);
         }
     }
@@ -291,7 +319,7 @@ public class ScrimManager : IScrimManager
 
         if (!_configLoader.IsPlayerWhitelisted(steamId))
         {
-            Server.NextFrame(() => 
+            _scheduler.Schedule(() => 
             {
                 var player = Utilities.GetPlayerFromSteamId(steamId);
                 player?.PrintToChat(" [Scrim] You are not whitelisted for this scrim.");
@@ -301,7 +329,7 @@ public class ScrimManager : IScrimManager
 
         _readyPlayers[steamId] = ready;
         var readyCount = _readyPlayers.Values.Count(v => v);
-        Server.NextFrame(() => Server.PrintToChatAll($" [Scrim] Player {(ready ? "ready" : "unready")}. ({readyCount}/{_minReadyPlayers})"));
+        _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] Player {(ready ? "ready" : "unready")}. ({readyCount}/{_minReadyPlayers})"));
 
         if (readyCount >= _minReadyPlayers)
         {
@@ -316,7 +344,7 @@ public class ScrimManager : IScrimManager
         if (team != 1 && team != 2) return Task.CompletedTask;
         
         _captains[team] = steamId;
-        Server.NextFrame(() => 
+        _scheduler.Schedule(() => 
         {
             var player = Utilities.GetPlayerFromSteamId(steamId);
             Server.PrintToChatAll($" [Scrim] {player?.PlayerName} appointed as Captain for Team {team}.");
@@ -336,7 +364,7 @@ public class ScrimManager : IScrimManager
         var normalizedMap = mapName.ToLower();
         if (!_config.Scrim.MapPool.Contains(normalizedMap))
         {
-            Server.NextFrame(() => 
+            _scheduler.Schedule(() => 
             {
                 var player = Utilities.GetPlayerFromSteamId(steamId);
                 player?.PrintToChat($" [Scrim] Invalid map. Pool: {string.Join(", ", _config.Scrim.MapPool)}");
@@ -356,7 +384,7 @@ public class ScrimManager : IScrimManager
         if (_playerVotes.Count >= _readyPlayers.Count(p => p.Value))
         {
             _selectedMap = _mapVotes.OrderByDescending(x => x.Value).First().Key;
-            Server.NextFrame(() => Server.PrintToChatAll($" [Scrim] Map selected: {_selectedMap}"));
+            _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] Map selected: {_selectedMap}"));
             await _machine.FireAsync(ScrimTrigger.MapSelected);
         }
     }
@@ -374,7 +402,7 @@ public class ScrimManager : IScrimManager
         if (_team1Picking) _team1.Add(targetSteamId);
         else _team2.Add(targetSteamId);
 
-        Server.NextFrame(() => 
+        _scheduler.Schedule(() => 
         {
             var player = Utilities.GetPlayerFromSteamId(targetSteamId);
             Server.PrintToChatAll($" [Scrim] Captain {(_team1Picking ? "1" : "2")} picked {player?.PlayerName}.");
@@ -403,7 +431,7 @@ public class ScrimManager : IScrimManager
         _knifeWinnerTeam = winnerTeam;
         var winnerName = winnerTeam == 2 ? "Terrorists" : "Counter-Terrorists";
         
-        Server.NextFrame(async () => 
+        _scheduler.Schedule(async () => 
         {
             Server.PrintToChatAll($" [Scrim] {winnerName} won the knife round!");
             
@@ -420,7 +448,7 @@ public class ScrimManager : IScrimManager
             _sideSelectionTimer = new CounterStrikeSharp.API.Modules.Timers.Timer(30.0f, () => 
             {
                 _logger.LogInformation("Side selection timed out. Auto-assigning sides.");
-                Server.NextFrame(async () => 
+                _scheduler.Schedule(async () => 
                 {
                     Server.PrintToChatAll(" [Scrim] Side selection timed out. Proceeding with current sides.");
                     await _machine.FireAsync(ScrimTrigger.KnifeRoundFinished);
@@ -438,7 +466,7 @@ public class ScrimManager : IScrimManager
         var winningCaptainId = _knifeWinnerTeam == 2 ? _team1.FirstOrDefault() : _team2.FirstOrDefault();
         if (steamId != winningCaptainId) return;
 
-        Server.NextFrame(async () => 
+        _scheduler.Schedule(async () => 
         {
             _sideSelectionTimer?.Kill();
 
@@ -489,11 +517,11 @@ public class ScrimManager : IScrimManager
             _readyPlayers[steamId] = false;
             if (CurrentState == ScrimState.Lobby)
             {
-                Server.NextFrame(() => Server.PrintToChatAll($" [Scrim] Player disconnected. ({_readyPlayers.Values.Count(v => v)}/{_minReadyPlayers})"));
+                _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] Player disconnected. ({_readyPlayers.Values.Count(v => v)}/{_minReadyPlayers})"));
             }
             else if (CurrentState != ScrimState.Idle && CurrentState != ScrimState.Live)
             {
-                Server.NextFrame(() => Server.PrintToChatAll(" [Scrim] Critical player disconnected. Scrim aborted."));
+                _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Critical player disconnected. Scrim aborted."));
                 _machine.Fire(ScrimTrigger.StopScrim);
             }
         }

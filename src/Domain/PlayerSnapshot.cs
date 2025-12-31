@@ -135,6 +135,11 @@ public sealed record PlayerSnapshot
     int Pings,
     int Footsteps,
 
+    decimal WeightedKills,
+    int TeamFlashDuration,
+    int FlashAssistDuration,
+    int WastedFlashes,
+
     IReadOnlyDictionary<string, int> WeaponKills,
     IReadOnlyDictionary<string, int> WeaponShots,
     IReadOnlyDictionary<string, int> WeaponHits,

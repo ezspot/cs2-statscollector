@@ -15,15 +15,14 @@ public sealed class MatchFlowHandler : IGameHandler
     private readonly ILogger<MatchFlowHandler> _logger;
     private readonly IEnumerable<IEventProcessor> _processors;
     private readonly IMatchTrackingService _matchTracker;
-    private readonly IMatchLifecyclePersistenceService _matchLifecyclePersistence;
-    private readonly IStatsPersistenceService _statsPersistence;
     private readonly IPlayerSessionService _playerSessions;
     private readonly IScrimManager _scrimManager;
     private readonly IPauseService _pauseService;
     private readonly IRoundBackupService _roundBackup;
     private readonly IOptionsMonitor<PluginConfig> _configMonitor;
     private readonly IDamageReportService _damageReport;
-    private readonly ITaskTracker _taskTracker;
+    private readonly IPersistenceChannel _persistenceChannel;
+    private readonly IGameScheduler _scheduler;
     
     private PluginConfig _config => _configMonitor.CurrentValue;
     private int _currentRoundNumber = 0;
@@ -32,28 +31,26 @@ public sealed class MatchFlowHandler : IGameHandler
         ILogger<MatchFlowHandler> logger,
         IEnumerable<IEventProcessor> processors,
         IMatchTrackingService matchTracker,
-        IMatchLifecyclePersistenceService matchLifecyclePersistence,
-        IStatsPersistenceService statsPersistence,
         IPlayerSessionService playerSessions,
         IScrimManager scrimManager,
         IPauseService pauseService,
         IRoundBackupService roundBackup,
         IOptionsMonitor<PluginConfig> configMonitor,
         IDamageReportService damageReport,
-        ITaskTracker taskTracker)
+        IPersistenceChannel persistenceChannel,
+        IGameScheduler scheduler)
     {
         _logger = logger;
         _processors = processors;
         _matchTracker = matchTracker;
-        _matchLifecyclePersistence = matchLifecyclePersistence;
-        _statsPersistence = statsPersistence;
         _playerSessions = playerSessions;
         _scrimManager = scrimManager;
         _pauseService = pauseService;
         _roundBackup = roundBackup;
         _configMonitor = configMonitor;
         _damageReport = damageReport;
-        _taskTracker = taskTracker;
+        _persistenceChannel = persistenceChannel;
+        _scheduler = scheduler;
     }
 
     public void Register(BasePlugin plugin)
@@ -68,7 +65,7 @@ public sealed class MatchFlowHandler : IGameHandler
     {
         _logger.LogInformation("Match start announced. Live tracking enabled.");
         _currentRoundNumber = 1;
-        _taskTracker.Track("StartMatch", _matchTracker.StartMatchAsync(Server.MapName));
+        _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.MatchStart, (Server.MapName, (string?)null)));
         return HookResult.Continue;
     }
 
@@ -76,23 +73,17 @@ public sealed class MatchFlowHandler : IGameHandler
     {
         if (_config.DeathmatchMode) return HookResult.Continue;
         
+        // We only initialize round-specific resets here
         _damageReport.ResetRound();
         _currentRoundNumber = @event.GetIntValue("round_number", 0);
         
-        // We use RoundFreezeEnd for actual start timing, but reset stats here
         _playerSessions.ForEachPlayer(stats =>
         {
             stats.ResetRoundStats();
         });
 
         _roundBackup.CreateSnapshot(_currentRoundNumber);
-
-        if (_matchTracker.CurrentMatch != null)
-        {
-            var matchId = _matchTracker.CurrentMatch.MatchId;
-            var roundNumber = _currentRoundNumber;
-            _taskTracker.Track("EnqueueStartRound", _matchLifecyclePersistence.EnqueueStartRoundAsync(matchId, roundNumber));
-        }
+        _matchTracker.StartRound(_currentRoundNumber);
 
         return HookResult.Continue;
     }
@@ -100,6 +91,11 @@ public sealed class MatchFlowHandler : IGameHandler
     private HookResult OnRoundFreezeEnd(EventRoundFreezeEnd @event, GameEventInfo info)
     {
         if (_config.DeathmatchMode) return HookResult.Continue;
+        if (_scrimManager.CurrentState is not (ScrimState.InProgress or ScrimState.Live))
+        {
+            _logger.LogDebug("Skipping RoundFreezeEnd logic: Scrim is not InProgress or Live.");
+            return HookResult.Continue;
+        }
 
         var roundStartUtc = DateTime.UtcNow;
         var ctAlive = 0;
@@ -178,20 +174,25 @@ public sealed class MatchFlowHandler : IGameHandler
             }
         });
         
-        if (_matchTracker.CurrentRoundId != null)
-        {
-            var roundId = _matchTracker.CurrentRoundId.Value;
-            _taskTracker.Track("EnqueueEndRound", _matchLifecyclePersistence.EnqueueEndRoundAsync(roundId, winningTeamInt, winReason));
-        }
+        _matchTracker.EndRound(_currentRoundNumber, winningTeamInt, winReason);
 
-        _taskTracker.Track("SaveStatsAtRoundEnd", SaveStatsAtRoundEndAsync());
+        SaveStatsAtRoundEnd();
         return HookResult.Continue;
     }
 
-    private async Task SaveStatsAtRoundEndAsync()
+    private void SaveStatsAtRoundEnd()
     {
         var match = _matchTracker.CurrentMatch;
         var snapshots = _playerSessions.CaptureSnapshots(true, match?.MatchId, match?.MatchUuid);
-        if (snapshots.Length > 0) await _statsPersistence.EnqueueAsync(snapshots, default);
+        
+        foreach (var snapshot in snapshots)
+        {
+            _persistenceChannel.TryWrite(new StatsUpdate(
+                UpdateType.PlayerStats, 
+                snapshot, 
+                match?.MatchUuid ?? "none", 
+                snapshot.RoundNumber, 
+                snapshot.SteamId));
+        }
     }
 }

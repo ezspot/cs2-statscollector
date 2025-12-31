@@ -14,13 +14,12 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     private readonly ILogger<PluginLifecycleService> _logger;
     private readonly IOptionsMonitor<PluginConfig> _config;
     private readonly IMatchTrackingService _matchTracker;
-    private readonly IMatchLifecyclePersistenceService _matchLifecyclePersistence;
-    private readonly IStatsPersistenceService _statsPersistence;
     private readonly IPositionPersistenceService _positionPersistence;
     private readonly IPlayerSessionService _playerSessions;
     private readonly IPositionTrackingService _positionTracking;
     private readonly IGameEventHandlerService _eventHandler;
-    private readonly ITaskTracker _taskTracker;
+    private readonly IPersistenceChannel _persistenceChannel;
+    private readonly IGameScheduler _scheduler;
     
     private CounterStrikeSharp.API.Modules.Timers.Timer? _autoSaveTimer;
     private BasePlugin? _plugin;
@@ -29,24 +28,22 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         ILogger<PluginLifecycleService> logger,
         IOptionsMonitor<PluginConfig> config,
         IMatchTrackingService matchTracker,
-        IMatchLifecyclePersistenceService matchLifecyclePersistence,
-        IStatsPersistenceService statsPersistence,
         IPositionPersistenceService positionPersistence,
         IPlayerSessionService playerSessions,
         IPositionTrackingService positionTracking,
         IGameEventHandlerService eventHandler,
-        ITaskTracker taskTracker)
+        IPersistenceChannel persistenceChannel,
+        IGameScheduler scheduler)
     {
         _logger = logger;
         _config = config;
         _matchTracker = matchTracker;
-        _matchLifecyclePersistence = matchLifecyclePersistence;
-        _statsPersistence = statsPersistence;
         _positionPersistence = positionPersistence;
         _playerSessions = playerSessions;
         _positionTracking = positionTracking;
         _eventHandler = eventHandler;
-        _taskTracker = taskTracker;
+        _persistenceChannel = persistenceChannel;
+        _scheduler = scheduler;
     }
 
     public void Initialize(BasePlugin plugin)
@@ -58,7 +55,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         var autoSaveInterval = Math.Max(30, _config.CurrentValue.AutoSaveSeconds);
         _autoSaveTimer = plugin.AddTimer(autoSaveInterval, () => 
         {
-            _taskTracker.Track("AutoSave", SaveAllStatsAsync());
+            _ = SaveAllStatsAsync();
         }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.REPEAT);
 
         _logger.LogInformation("Plugin lifecycle initialized.");
@@ -66,10 +63,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
 
     public async Task StartAsync(CancellationToken ct)
     {
-        await _statsPersistence.StartAsync(ct);
         await _positionPersistence.StartAsync(ct);
-        await _matchLifecyclePersistence.StartAsync(ct);
-        
         _logger.LogInformation("Background persistence services started.");
     }
 
@@ -81,12 +75,11 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
 
         if (_matchTracker.CurrentMatch != null)
         {
-            await _matchTracker.EndMatchAsync(_matchTracker.CurrentMatch.MatchId, CancellationToken.None);
+            _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.MatchEnd, _matchTracker.CurrentMatch.MatchId));
         }
 
-        await _statsPersistence.StopAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
+        await _persistenceChannel.FlushAsync(CancellationToken.None);
         await _positionPersistence.StopAsync(TimeSpan.FromSeconds(3), CancellationToken.None);
-        await _matchLifecyclePersistence.StopAsync();
         
         _logger.LogInformation("Plugin lifecycle stopped.");
     }
@@ -100,9 +93,15 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     {
         var match = _matchTracker.CurrentMatch;
         var snapshots = _playerSessions.CaptureSnapshots(true, match?.MatchId, match?.MatchUuid);
-        if (snapshots.Length > 0)
+        
+        foreach (var snapshot in snapshots)
         {
-            await _statsPersistence.EnqueueAsync(snapshots, CancellationToken.None);
+            _persistenceChannel.TryWrite(new StatsUpdate(
+                UpdateType.PlayerStats, 
+                snapshot, 
+                match?.MatchUuid ?? "none", 
+                snapshot.RoundNumber, 
+                snapshot.SteamId));
         }
     }
 }

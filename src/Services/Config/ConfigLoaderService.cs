@@ -14,13 +14,18 @@ public class ConfigLoaderService : IConfigLoaderService
 {
     private readonly ILogger<ConfigLoaderService> _logger;
     private readonly PluginConfig _config;
+    private readonly IGameScheduler _scheduler;
     private readonly HashSet<ulong> _whitelistedSteamIds = new();
     private readonly string _gameDir;
 
-    public ConfigLoaderService(ILogger<ConfigLoaderService> logger, IOptions<PluginConfig> config)
+    public ConfigLoaderService(
+        ILogger<ConfigLoaderService> logger, 
+        IOptions<PluginConfig> config,
+        IGameScheduler scheduler)
     {
         _logger = logger;
         _config = config.Value;
+        _scheduler = scheduler;
         _gameDir = Server.GameDirectory;
     }
 
@@ -41,7 +46,7 @@ public class ConfigLoaderService : IConfigLoaderService
 
     public Task ExecuteLinesAsync(string[] lines)
     {
-        Server.NextFrame(() =>
+        _scheduler.Schedule(() =>
         {
             foreach (var line in lines)
             {

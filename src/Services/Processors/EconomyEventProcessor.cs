@@ -36,13 +36,19 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
 
     private readonly IPlayerSessionService _playerSessions;
     private readonly ILogger<EconomyEventProcessor> _logger;
+    private readonly IPersistenceChannel _persistenceChannel;
+    private readonly IGameScheduler _scheduler;
 
     public EconomyEventProcessor(
         IPlayerSessionService playerSessions,
-        ILogger<EconomyEventProcessor> logger)
+        ILogger<EconomyEventProcessor> logger,
+        IPersistenceChannel persistenceChannel,
+        IGameScheduler scheduler)
     {
         _playerSessions = playerSessions;
         _logger = logger;
+        _persistenceChannel = persistenceChannel;
+        _scheduler = scheduler;
     }
 
     public void RegisterEvents(IEventDispatcher dispatcher)

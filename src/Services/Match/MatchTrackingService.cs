@@ -7,80 +7,113 @@ using Dapper;
 
 namespace statsCollector.Services;
 
-public record MatchContext(int MatchId, string MatchUuid, string MapName, string? SeriesUuid = null);
+public record MatchContext(string MatchUuid, string MapName, string? SeriesUuid = null, int? MatchId = null);
 
 public interface IMatchTrackingService
 {
-    Task<MatchContext> StartMatchAsync(string mapName, string? seriesUuid = null, CancellationToken ct = default);
-    Task EndMatchAsync(int matchId, CancellationToken ct = default);
-    Task<int> StartRoundAsync(int matchId, int roundNumber, CancellationToken ct = default);
-    Task EndRoundAsync(int roundId, int winnerTeam, int winType, CancellationToken ct = default);
+    void StartMatch(string mapName, string? seriesUuid = null);
+    void EndMatch();
+    void StartRound(int roundNumber);
+    void EndRound(int roundNumber, int winnerTeam, int winType);
+    Task<string?> GetMatchStatusAsync(int matchId, CancellationToken ct = default);
     float GetRoundWinProbability(int ctAlive, int tAlive);
     MatchContext? CurrentMatch { get; }
-    int? CurrentRoundId { get; }
+    int? CurrentRoundNumber { get; }
 }
 
 public sealed class MatchTrackingService : IMatchTrackingService
 {
-    private readonly IConnectionFactory _connectionFactory;
     private readonly ILogger<MatchTrackingService> _logger;
+    private readonly IPersistenceChannel _persistenceChannel;
+    private readonly IConnectionFactory _connectionFactory;
+    private readonly object _lock = new();
     private MatchContext? _currentMatch;
-    private int? _currentRoundId;
+    private int? _currentRoundNumber;
 
-    public MatchContext? CurrentMatch => _currentMatch;
-    public int? CurrentRoundId => _currentRoundId;
+    public MatchContext? CurrentMatch 
+    { 
+        get { lock (_lock) return _currentMatch; } 
+    }
+    
+    public int? CurrentRoundNumber 
+    { 
+        get { lock (_lock) return _currentRoundNumber; } 
+    }
 
-    public MatchTrackingService(IConnectionFactory connectionFactory, ILogger<MatchTrackingService> logger)
+    public MatchTrackingService(
+        IConnectionFactory connectionFactory, 
+        ILogger<MatchTrackingService> logger,
+        IPersistenceChannel persistenceChannel)
     {
         _connectionFactory = connectionFactory;
         _logger = logger;
+        _persistenceChannel = persistenceChannel;
     }
 
-    public async Task<MatchContext> StartMatchAsync(string mapName, string? seriesUuid = null, CancellationToken ct = default)
+    public void StartMatch(string mapName, string? seriesUuid = null)
     {
         var uuid = Guid.NewGuid().ToString();
         _logger.LogInformation("Starting new match tracking: {Uuid} (Series: {Series}) on {Map}", uuid, seriesUuid ?? "None", mapName);
 
-        // Capture local variables to avoid closure issues with potentially modified state
-        var localMapName = mapName;
-        var localSeriesUuid = seriesUuid;
+        lock (_lock)
+        {
+            _currentMatch = new MatchContext(uuid, mapName, seriesUuid);
+            _currentRoundNumber = null;
+        }
 
-        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-        const string sql = "INSERT INTO matches (match_uuid, series_uuid, map_name, status) VALUES (@Uuid, @SeriesUuid, @MapName, 'IN_PROGRESS'); SELECT LAST_INSERT_ID();";
-        
-        var id = await connection.ExecuteScalarAsync<int>(sql, new { Uuid = uuid, SeriesUuid = localSeriesUuid, MapName = localMapName }).ConfigureAwait(false);
-        
-        var context = new MatchContext(id, uuid, localMapName, localSeriesUuid);
-        _currentMatch = context;
-        _currentRoundId = null;
-        
-        return context;
+        _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.MatchStart, (mapName, uuid, seriesUuid)));
     }
 
-    public async Task EndMatchAsync(int matchId, CancellationToken ct = default)
+    public void EndMatch()
     {
-        _logger.LogInformation("Ending match tracking: {MatchId}", matchId);
-        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-        const string sql = "UPDATE matches SET end_time = CURRENT_TIMESTAMP, status = 'COMPLETED' WHERE id = @MatchId";
-        await connection.ExecuteAsync(new CommandDefinition(sql, new { MatchId = matchId }, cancellationToken: ct)).ConfigureAwait(false);
-        _currentMatch = null;
+        string? uuid;
+        lock (_lock)
+        {
+            uuid = _currentMatch?.MatchUuid;
+            _currentMatch = null;
+        }
+
+        if (uuid != null)
+        {
+            _logger.LogInformation("Ending match tracking: {Uuid}", uuid);
+            _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.MatchEnd, uuid));
+        }
     }
 
-    public async Task<int> StartRoundAsync(int matchId, int roundNumber, CancellationToken ct = default)
+    public void StartRound(int roundNumber)
     {
-        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-        const string sql = "INSERT INTO rounds (match_id, round_number) VALUES (@MatchId, @RoundNumber) ON DUPLICATE KEY UPDATE start_time = CURRENT_TIMESTAMP; SELECT id FROM rounds WHERE match_id = @MatchId AND round_number = @RoundNumber;";
-        
-        var roundId = await connection.ExecuteScalarAsync<int>(sql, new { MatchId = matchId, RoundNumber = roundNumber }).ConfigureAwait(false);
-        _currentRoundId = roundId;
-        return roundId;
+        string? uuid;
+        lock (_lock)
+        {
+            uuid = _currentMatch?.MatchUuid;
+            _currentRoundNumber = roundNumber;
+        }
+
+        if (uuid != null)
+        {
+            _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.RoundStart, (uuid, roundNumber)));
+        }
     }
 
-    public async Task EndRoundAsync(int roundId, int winnerTeam, int winType, CancellationToken ct = default)
+    public void EndRound(int roundNumber, int winnerTeam, int winType)
+    {
+        string? uuid;
+        lock (_lock)
+        {
+            uuid = _currentMatch?.MatchUuid;
+        }
+
+        if (uuid != null)
+        {
+            _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.RoundEnd, (uuid, roundNumber, winnerTeam, winType)));
+        }
+    }
+
+    public async Task<string?> GetMatchStatusAsync(int matchId, CancellationToken ct = default)
     {
         await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-        const string sql = "UPDATE rounds SET end_time = CURRENT_TIMESTAMP, winner_team = @Winner, win_type = @WinType WHERE id = @RoundId";
-        await connection.ExecuteAsync(new CommandDefinition(sql, new { RoundId = roundId, Winner = winnerTeam, WinType = winType }, cancellationToken: ct)).ConfigureAwait(false);
+        const string sql = "SELECT status FROM matches WHERE id = @MatchId";
+        return await connection.ExecuteScalarAsync<string>(new CommandDefinition(sql, new { MatchId = matchId }, cancellationToken: ct)).ConfigureAwait(false);
     }
 
     public float GetRoundWinProbability(int ctAlive, int tAlive)

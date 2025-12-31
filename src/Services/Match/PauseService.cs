@@ -13,10 +13,12 @@ namespace statsCollector.Services;
 
 public sealed class PauseService(
     ILogger<PauseService> logger,
-    IOptions<PluginConfig> config) : IPauseService
+    IOptions<PluginConfig> config,
+    IGameScheduler scheduler) : IPauseService
 {
     private readonly ILogger<PauseService> _logger = logger;
     private readonly PluginConfig _config = config.Value;
+    private readonly IGameScheduler _scheduler = scheduler;
 
     private bool _isPaused;
     private PauseType _currentPauseType = PauseType.None;
@@ -41,7 +43,7 @@ public sealed class PauseService(
             {
                 if (_tacticalPausesUsed[team] >= (_config.Scrim.MaxTacticalPauses > 0 ? _config.Scrim.MaxTacticalPauses : 4))
                 {
-                    Server.NextFrame(() => player.PrintToChat(" [Scrim] Your team has no tactical pauses left."));
+                    _scheduler.Schedule(() => player.PrintToChat(" [Scrim] Your team has no tactical pauses left."));
                     return Task.CompletedTask;
                 }
             }
@@ -53,7 +55,7 @@ public sealed class PauseService(
         _currentPauseType = type;
         
         var typeStr = type == PauseType.Technical ? "Technical" : "Tactical";
-        Server.NextFrame(() => Server.PrintToChatAll($" [Scrim] {typeStr} pause requested by Team {(_requestingTeam == 2 ? "T" : "CT")}. It will take effect at the end of the round."));
+        _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] {typeStr} pause requested by Team {(_requestingTeam == 2 ? "T" : "CT")}. It will take effect at the end of the round."));
         
         return Task.CompletedTask;
     }
@@ -69,7 +71,7 @@ public sealed class PauseService(
             return Task.CompletedTask;
         }
 
-        Server.NextFrame(() => Server.PrintToChatAll($" [Scrim] Player {player.PlayerName} requested unpause. Waiting for admin or both teams."));
+        _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] Player {player.PlayerName} requested unpause. Waiting for admin or both teams."));
         return Task.CompletedTask;
     }
 
@@ -84,7 +86,7 @@ public sealed class PauseService(
 
     private void Pause()
     {
-        Server.NextFrame(() => 
+        _scheduler.Schedule(() => 
         {
             var gameRules = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules").FirstOrDefault()?.GameRules;
             if (gameRules == null)
@@ -108,7 +110,7 @@ public sealed class PauseService(
                 var duration = _config.Scrim.TacticalPauseDuration > 0 ? _config.Scrim.TacticalPauseDuration : 30;
                 _pauseTimer = new CounterStrikeSharp.API.Modules.Timers.Timer(duration, () => 
                 {
-                    Server.NextFrame(() => 
+                    _scheduler.Schedule(() => 
                     {
                         Server.PrintToChatAll(" [Scrim] Tactical pause finished. Unpausing...");
                         Unpause();
@@ -120,10 +122,11 @@ public sealed class PauseService(
 
     private void Unpause()
     {
-        Server.NextFrame(() => 
+        _scheduler.Schedule(() => 
         {
             _pauseTimer?.Kill();
             _isPaused = false;
+            _currentPauseType = None; // Should be PauseType.None, fixing potential error if 'None' was just a typo in original but usually it's CurrentPauseType = PauseType.None
             _currentPauseType = PauseType.None;
             Server.ExecuteCommand("mp_unpause_match");
             _logger.LogInformation("Match unpaused.");
