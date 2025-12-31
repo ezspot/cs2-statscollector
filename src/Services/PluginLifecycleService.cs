@@ -14,6 +14,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     private readonly ILogger<PluginLifecycleService> _logger;
     private readonly IOptionsMonitor<PluginConfig> _config;
     private readonly IMatchTrackingService _matchTracker;
+    private readonly IMatchLifecyclePersistenceService _matchLifecyclePersistence;
     private readonly IStatsPersistenceService _statsPersistence;
     private readonly IPositionPersistenceService _positionPersistence;
     private readonly IPlayerSessionService _playerSessions;
@@ -27,6 +28,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         ILogger<PluginLifecycleService> logger,
         IOptionsMonitor<PluginConfig> config,
         IMatchTrackingService matchTracker,
+        IMatchLifecyclePersistenceService matchLifecyclePersistence,
         IStatsPersistenceService statsPersistence,
         IPositionPersistenceService positionPersistence,
         IPlayerSessionService playerSessions,
@@ -36,6 +38,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         _logger = logger;
         _config = config;
         _matchTracker = matchTracker;
+        _matchLifecyclePersistence = matchLifecyclePersistence;
         _statsPersistence = statsPersistence;
         _positionPersistence = positionPersistence;
         _playerSessions = playerSessions;
@@ -62,6 +65,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     {
         await _statsPersistence.StartAsync(ct);
         await _positionPersistence.StartAsync(ct);
+        await _matchLifecyclePersistence.StartAsync(ct);
         
         _logger.LogInformation("Background persistence services started.");
     }
@@ -79,6 +83,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
 
         await _statsPersistence.StopAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
         await _positionPersistence.StopAsync(TimeSpan.FromSeconds(3), CancellationToken.None);
+        await _matchLifecyclePersistence.StopAsync();
         
         _logger.LogInformation("Plugin lifecycle stopped.");
     }

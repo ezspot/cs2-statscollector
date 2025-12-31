@@ -209,7 +209,8 @@ public sealed class StatsRepository : IStatsRepository
                 headshots_hit, chest_hits, stomach_hits, arm_hits, leg_hits,
                 kd_ratio, headshot_percentage, accuracy_percentage, kast_percentage,
                 average_damage_per_round, hltv_rating, impact_rating, survival_rating, utility_score,
-                noscope_kills, thru_smoke_kills, attacker_blind_kills, flash_assisted_kills, wallbang_kills
+                noscope_kills, thru_smoke_kills, attacker_blind_kills, flash_assisted_kills, wallbang_kills,
+                pings, footsteps
             ) VALUES (
                 @SteamId, @Name, @Kills, @Deaths, @Assists, @Headshots, @DamageDealt, @DamageTaken, @DamageArmor,
                 @ShotsFired, @ShotsHit, @Mvps, @Score, @RoundsPlayed, @RoundsWon, @TotalSpawns, @PlaytimeSeconds,
@@ -229,7 +230,8 @@ public sealed class StatsRepository : IStatsRepository
                 @HeadshotsHit, @ChestHits, @StomachHits, @ArmHits, @LegHits,
                 @KDRatio, @HeadshotPercentage, @AccuracyPercentage, @KASTPercentage,
                 @AverageDamagePerRound, @HLTVRating, @ImpactRating, @SurvivalRating, @UtilityScore,
-                @NoscopeKills, @ThruSmokeKills, @AttackerBlindKills, @FlashAssistedKills, @WallbangKills
+                @NoscopeKills, @ThruSmokeKills, @AttackerBlindKills, @FlashAssistedKills, @WallbangKills,
+                @Pings, @Footsteps
             )
             ON DUPLICATE KEY UPDATE
                 name = VALUES(name), kills = VALUES(kills), deaths = VALUES(deaths), assists = VALUES(assists),
@@ -278,7 +280,7 @@ public sealed class StatsRepository : IStatsRepository
                 utility_score = VALUES(utility_score),
                 noscope_kills = VALUES(noscope_kills), thru_smoke_kills = VALUES(thru_smoke_kills),
                 attacker_blind_kills = VALUES(attacker_blind_kills), flash_assisted_kills = VALUES(flash_assisted_kills),
-                wallbang_kills = VALUES(wallbang_kills);
+                wallbang_kills = VALUES(wallbang_kills), pings = VALUES(pings), footsteps = VALUES(footsteps);
             """;
 
         const string upsertWeaponStatsSql = """

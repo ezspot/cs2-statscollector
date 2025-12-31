@@ -67,10 +67,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
                 _planterSteamId = player.SteamID;
                 _playerSessions.MutatePlayer(player.SteamID, stats =>
                 {
-                    lock (stats.SyncRoot)
-                    {
-                        stats.BombPlantAttempts++;
-                    }
+                    stats.Bomb.BombPlantAttempts++;
                 });
                 _logger.LogDebug("Player {SteamId} started planting bomb at site {Site}", player.SteamID, @event.GetIntValue("site", 0));
             }
@@ -89,10 +86,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
                 _planterSteamId = null;
                 _playerSessions.MutatePlayer(player.SteamID, stats =>
                 {
-                    lock (stats.SyncRoot)
-                    {
-                        stats.BombPlantAborts++;
-                    }
+                    stats.Bomb.BombPlantAborts++;
                 });
                 _logger.LogDebug("Player {SteamId} aborted bomb plant", player.SteamID);
             }
@@ -116,11 +110,8 @@ public sealed class BombEventProcessor : IBombEventProcessor
                 Instrumentation.BombPlantDurationsRecorder.Record(plantDuration, new KeyValuePair<string, object?>("site", @event.GetIntValue("site", 0)));
                 _playerSessions.MutatePlayer(player.SteamID, stats =>
                 {
-                    lock (stats.SyncRoot)
-                    {
-                        stats.BombPlants++;
-                        stats.TotalPlantTime += (int)(plantDuration * 1000);
-                    }
+                    stats.Bomb.BombPlants++;
+                    stats.Bomb.TotalPlantTime += (int)(plantDuration * 1000);
                 });
 
                 _logger.LogInformation("Bomb planted by {SteamId} at site {Site}", player.SteamID, @event.GetIntValue("site", 0));
@@ -148,12 +139,9 @@ public sealed class BombEventProcessor : IBombEventProcessor
                 Instrumentation.BombDefuseDurationsRecorder.Record(defuseDuration);
                 _playerSessions.MutatePlayer(player.SteamID, stats =>
                 {
-                    lock (stats.SyncRoot)
-                    {
-                        stats.BombDefuses++;
-                        stats.TotalDefuseTime += (int)(defuseDuration * 1000);
-                        if (isClutchDefuse) stats.ClutchDefuses++;
-                    }
+                    stats.Bomb.BombDefuses++;
+                    stats.Bomb.TotalDefuseTime += (int)(defuseDuration * 1000);
+                    if (isClutchDefuse) stats.Bomb.ClutchDefuses++;
                 });
 
                 _logger.LogInformation("Bomb defused by {SteamId} (Clutch: {Clutch})", player.SteamID, isClutchDefuse);
@@ -181,10 +169,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         {
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                lock (stats.SyncRoot)
-                {
-                    stats.BombDrops++;
-                }
+                stats.Bomb.BombDrops++;
             });
         }
     }
@@ -196,10 +181,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         {
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                lock (stats.SyncRoot)
-                {
-                    stats.BombPickups++;
-                }
+                stats.Bomb.BombPickups++;
             });
         }
     }
@@ -214,12 +196,9 @@ public sealed class BombEventProcessor : IBombEventProcessor
             var hasKit = @event.GetBoolValue("haskit", false);
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                lock (stats.SyncRoot)
-                {
-                    stats.BombDefuseAttempts++;
-                    if (hasKit) stats.BombDefuseWithKit++;
-                    else stats.BombDefuseWithoutKit++;
-                }
+                stats.Bomb.BombDefuseAttempts++;
+                if (hasKit) stats.Bomb.BombDefuseWithKit++;
+                else stats.Bomb.BombDefuseWithoutKit++;
             });
         }
     }
@@ -233,10 +212,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
             _defuserSteamId = null;
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                lock (stats.SyncRoot)
-                {
-                    stats.BombDefuseAborts++;
-                }
+                stats.Bomb.BombDefuseAborts++;
             });
         }
     }
@@ -248,10 +224,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         {
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                lock (stats.SyncRoot)
-                {
-                    stats.DefuserDrops++;
-                }
+                stats.Bomb.DefuserDrops++;
             });
         }
     }
@@ -263,10 +236,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         {
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                lock (stats.SyncRoot)
-                {
-                    stats.DefuserPickups++;
-                }
+                stats.Bomb.DefuserPickups++;
             });
         }
     }
@@ -283,10 +253,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         {
             _playerSessions.MutatePlayer(victim.SteamID, stats =>
             {
-                lock (stats.SyncRoot)
-                {
-                    stats.BombDeaths++;
-                }
+                stats.Bomb.BombDeaths++;
             });
         }
 
@@ -295,10 +262,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         {
             _playerSessions.MutatePlayer(attacker.SteamID, stats =>
             {
-                lock (stats.SyncRoot)
-                {
-                    stats.BombKills++;
-                }
+                stats.Bomb.BombKills++;
             });
         }
     }

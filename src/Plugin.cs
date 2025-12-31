@@ -151,6 +151,8 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddTransient<IEventProcessor, UtilityEventProcessor>();
         services.AddTransient<IEventProcessor, BombEventProcessor>();
         services.AddTransient<IEventProcessor, EconomyEventProcessor>();
+        services.AddTransient<IEventProcessor, MovementEventProcessor>();
+        services.AddTransient<IEventProcessor, CommunicationEventProcessor>();
 
         // Specific interface registrations for direct usage if needed
         services.AddTransient<ICombatEventProcessor>(sp => (ICombatEventProcessor)sp.GetRequiredService<IEnumerable<IEventProcessor>>().First(p => p is CombatEventProcessor));
@@ -161,6 +163,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddTransient<IPositionTrackingService, PositionTrackingService>();
         services.AddSingleton<IPositionPersistenceService, PositionPersistenceService>();
         services.AddSingleton<IStatsPersistenceService, StatsPersistenceService>();
+        services.AddSingleton<IMatchLifecyclePersistenceService, MatchLifecyclePersistenceService>();
         services.AddSingleton<IPauseService, PauseService>();
         services.AddSingleton<IScrimPersistenceService, ScrimPersistenceService>();
         services.AddSingleton<IConfigLoaderService, ConfigLoaderService>();
@@ -168,6 +171,8 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddSingleton<IFlashEfficiencyService, FlashEfficiencyService>();
         services.AddSingleton<IRoundBackupService, RoundBackupService>();
         services.AddSingleton<IScrimManager, ScrimManager>();
+        services.AddSingleton<IDamageReportService, DamageReportService>();
+        services.AddSingleton<IMatchReadyService, MatchReadyService>();
         services.AddSingleton<IPluginLifecycleService, PluginLifecycleService>();
         services.AddSingleton<IGameEventHandlerService, GameEventHandlerService>();
 

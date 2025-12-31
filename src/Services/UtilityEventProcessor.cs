@@ -68,11 +68,7 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
             {
                 _playerSessions.MutatePlayer(player.SteamID, stats =>
                 {
-                    lock (stats.SyncRoot)
-                    {
-                        stats.TimesBlinded++;
-                        stats.TotalBlindTime += (int)blindDurationMs;
-                    }
+                    stats.Utility.BlindDuration += (int)blindDurationMs;
                 });
             }
 
@@ -84,27 +80,23 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
                 
                 _playerSessions.MutatePlayer(attacker.SteamID, stats =>
                 {
-                    lock (stats.SyncRoot)
+                    stats.Utility.EnemiesBlinded++;
+                    stats.Utility.BlindDuration += (int)blindDurationMs; // TotalBlindTimeInflicted
+                    
+                    if (player != null)
                     {
-                        stats.PlayersBlinded++;
-                        stats.TotalBlindTimeInflicted += (int)blindDurationMs;
-                        
-                        if (player != null)
+                        if (attacker.TeamNum != player.TeamNum)
                         {
-                            if (attacker.TeamNum != player.TeamNum)
+                            if (player.PlayerPawn.Value?.FlashDuration > 1.0f) 
                             {
-                                stats.EnemiesFlashed++;
-                                if (player.PlayerPawn.Value?.FlashDuration > 1.0f) 
-                                {
-                                    stats.FlashWaste++;
-                                    Instrumentation.FlashWasteCounter.Add(1);
-                                }
-                                if (blindDuration > 1.5f) stats.EffectiveFlashes++;
+                                stats.Utility.UtilityWasteCount++;
+                                Instrumentation.FlashWasteCounter.Add(1);
                             }
-                            else
-                            {
-                                stats.TeammatesFlashed++;
-                            }
+                            if (blindDuration > 1.5f) stats.Utility.UtilitySuccessCount++;
+                        }
+                        else
+                        {
+                            stats.Utility.TeammatesBlinded++;
                         }
                     }
                 });

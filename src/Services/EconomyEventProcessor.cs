@@ -73,12 +73,8 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
 
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                lock (stats.SyncRoot)
-                {
-                    stats.ItemsPurchased++;
-                    stats.MoneySpent += cost;
-                    stats.CashSpent += cost;
-                }
+                stats.Economy.ItemsPurchased++;
+                stats.Economy.MoneySpent += cost;
             });
 
             _logger.LogTrace("Player {SteamId} purchased {Weapon} for ${Cost} (Dynamic)", player.SteamID, weapon, cost);
@@ -129,10 +125,7 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
             var item = @event.GetStringValue("item", string.Empty);
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                lock (stats.SyncRoot)
-                {
-                    stats.ItemsPickedUp++;
-                }
+                stats.Economy.ItemsPickedUp++;
             });
             _logger.LogTrace("Player {SteamId} picked up {Item}", player.SteamID, item);
         }
@@ -150,13 +143,10 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
             var hasDefuser = @event.GetBoolValue("hasdefuser", false);
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                lock (stats.SyncRoot)
-                {
-                    var value = GetItemValue(item);
-                    if (hasHelmet) value += 350;
-                    if (hasDefuser) value += 400;
-                    stats.EquipmentValue = value;
-                }
+                var value = GetItemValue(item);
+                if (hasHelmet) value += 350;
+                if (hasDefuser) value += 400;
+                stats.Economy.EquipmentValue = value;
             });
         }
         catch (Exception ex) { _logger.LogError(ex, "Error processing item equip event"); }

@@ -44,20 +44,26 @@ public static class ResiliencePolicies
                 FailureRatio = 0.5,
                 SamplingDuration = TimeSpan.FromSeconds(30),
                 MinimumThroughput = 5,
-                BreakDuration = TimeSpan.FromSeconds(30),
+                BreakDuration = TimeSpan.FromSeconds(60),
                 OnOpened = args =>
                 {
-                    logger.LogWarning(args.Outcome.Exception, "DB circuit opened for {Duration}s", args.BreakDuration.TotalSeconds);
+                    logger.LogCritical(args.Outcome.Exception, 
+                        "🔴 DATABASE CIRCUIT BREAKER OPENED - Stats persistence disabled for {Duration}s. " +
+                        "Server will continue operating but stats will be lost until circuit recovers.", 
+                        args.BreakDuration.TotalSeconds);
+                    Instrumentation.CircuitBreakerStateCounter.Add(1, new("state", "open"));
                     return default;
                 },
                 OnClosed = _ =>
                 {
-                    logger.LogInformation("DB circuit closed");
+                    logger.LogInformation("🟢 DATABASE CIRCUIT BREAKER CLOSED - Stats persistence restored");
+                    Instrumentation.CircuitBreakerStateCounter.Add(1, new("state", "closed"));
                     return default;
                 },
                 OnHalfOpened = _ =>
                 {
-                    logger.LogInformation("DB circuit half-opened");
+                    logger.LogInformation("🟡 DATABASE CIRCUIT BREAKER HALF-OPEN - Testing connection recovery");
+                    Instrumentation.CircuitBreakerStateCounter.Add(1, new("state", "half_open"));
                     return default;
                 }
             })

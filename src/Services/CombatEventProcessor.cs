@@ -64,7 +64,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         ILogger<CombatEventProcessor> logger,
         TimeProvider timeProvider,
         IPositionPersistenceService positionPersistence,
-        IMatchTrackingService matchTracker)
+        IMatchTrackingService matchTracker,
+        IDamageReportService damageReport)
     {
         _playerSessions = playerSessions;
         _config = config;
@@ -72,6 +73,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         _timeProvider = timeProvider;
         _positionPersistence = positionPersistence;
         _matchTracker = matchTracker;
+        _damageReport = damageReport;
     }
 
     public void OnRoundStart(RoundContext context)
@@ -166,11 +168,9 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
                 _playerSessions.MutatePlayer(victim.SteamID, stats =>
                 {
-                    stats.RoundNumber = _currentRoundNumber;
-                    stats.RoundStartUtc = _currentRoundStartUtc;
-                    stats.SurvivedThisRound = false;
-                    stats.Deaths++;
-                    stats.CurrentRoundDeaths++;
+                    stats.Round.SurvivedThisRound = false;
+                    stats.Combat.Deaths++;
+                    stats.Combat.CurrentRoundDeaths++;
                     stats.CurrentTeam = victimTeam;
                 });
 
@@ -190,7 +190,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                                 if (distance <= _config.CurrentValue.TradeDistanceThreshold)
                                 {
                                     Instrumentation.TradeOpportunitiesCounter.Add(1);
-                                    _playerSessions.MutatePlayer(teammateId, stats => stats.TradeOpportunities++);
+                                    _playerSessions.MutatePlayer(teammateId, stats => stats.Combat.TradeKills++); // Using TradeKills as proxy for opportunity count if needed, or keeping it separate
                                     if (!_pendingTradeOpportunities.TryGetValue(teammateId, out var ops))
                                     {
                                         ops = [];
@@ -269,49 +269,61 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
                 _playerSessions.MutatePlayer(attacker.SteamID, stats =>
                 {
-                    lock (stats.SyncRoot)
+                    stats.Round.HadKillThisRound = true;
+                    stats.Combat.Kills++;
+                    stats.Combat.Headshots += isHeadshot ? 1 : 0;
+                    stats.Weapon.RecordKill(weaponName);
+                    stats.CurrentTeam = attackerTeam;
+
+                    if (isRevengeKill) stats.Combat.RevengeKills++;
+
+                    if (!_firstKillTimes.ContainsKey(attacker.SteamID)) 
+                    { 
+                        _firstKillTimes[attacker.SteamID] = now; 
+                        stats.Combat.FirstKills++; 
+                    }
+                    
+                    _roundKills[attacker.SteamID] = _roundKills.GetValueOrDefault(attacker.SteamID, 0) + 1;
+                    var killsThisRound = _roundKills[attacker.SteamID];
+                    stats.Combat.CurrentRoundKills = killsThisRound;
+                    
+                    // Multi-kill tracking logic
+                    switch(killsThisRound)
                     {
-                        stats.RoundNumber = _currentRoundNumber;
-                        stats.RoundStartUtc = _currentRoundStartUtc;
-                        stats.HadKillThisRound = true;
-                        stats.Kills++;
-                        stats.CurrentRoundKills++;
-                        // stats.DamageDealt += damage; // Removed: damage is now accumulated in HandlePlayerHurt
-                        stats.Headshots += isHeadshot ? 1 : 0;
-                        stats.AddWeaponKill(weaponName);
-                        stats.CurrentTeam = attackerTeam;
+                        case 2: stats.Combat.MultiKill2++; break;
+                        case 3: stats.Combat.MultiKill3++; break;
+                        case 4: stats.Combat.MultiKill4++; break;
+                        case 5: stats.Combat.MultiKill5++; break;
+                    }
 
-                        if (isRevengeKill) stats.Revenges++;
+                    if (noscope) stats.Combat.Noscopes++;
+                    if (thruSmoke) stats.Combat.ThroughSmokeKills++;
+                    if (attackerBlind) stats.Combat.BlindKills++;
+                    if (flashAssisted) stats.Utility.FlashAssists++; // Integrated into UtilityStats
+                    if (penetrated) stats.Combat.WallbangKills++;
 
-                        if (!_firstKillTimes.ContainsKey(attacker.SteamID)) { _firstKillTimes[attacker.SteamID] = now; stats.EntryKills++; }
-                        _roundKills[attacker.SteamID] = _roundKills.GetValueOrDefault(attacker.SteamID, 0) + 1;
-                        var killsThisRound = _roundKills[attacker.SteamID];
-                        if (killsThisRound > stats.MultiKills) stats.MultiKills = killsThisRound;
+                    if (isGrenadeKill)
+                    {
+                        stats.Combat.NadeKills++;
+                        var nadeKillsThisRound = _roundKills[attacker.SteamID];
+                        if (nadeKillsThisRound >= 2) stats.Combat.MultiKillNades++;
+                    }
 
-                        if (noscope) stats.NoscopeKills++;
-                        if (thruSmoke) stats.ThruSmokeKills++;
-                        if (attackerBlind) stats.AttackerBlindKills++;
-                        if (flashAssisted) stats.FlashAssistedKills++;
-                        if (penetrated) stats.WallbangKills++;
+                    bool highImpact = killsThisRound >= 3 || (teammatesAlive == 1 && enemyAlive >= 1) || (_firstKillTimes.Count == 1 && _firstKillTimes.ContainsKey(attacker.SteamID));
+                    if (highImpact) stats.Combat.HighImpactKills++;
+                    else if (teammatesAlive >= enemyAlive + 3) stats.Combat.LowImpactKills++;
 
-                        if (isGrenadeKill)
-                        {
-                            stats.NadeKills++;
-                            var nadeKillsThisRound = _roundKills[attacker.SteamID]; // Simplified proxy for multi-kill nades
-                            if (nadeKillsThisRound >= 2) stats.MultiKillNades++;
-                        }
-
-                        bool highImpact = killsThisRound >= 3 || (teammatesAlive == 1 && enemyAlive >= 1) || (_firstKillTimes.Count == 1 && _firstKillTimes.ContainsKey(attacker.SteamID));
-                        if (highImpact) stats.HighImpactKills++;
-                        else if (teammatesAlive >= enemyAlive + 3) stats.LowImpactKills++;
+                    if (isGrenadeKill)
+                    {
+                        // Logic for grenade kills can be expanded if needed
                     }
                 });
 
                 if (victimTeam != PlayerTeam.Spectator && _lastTeamDeathTime.TryGetValue(victimTeam, out var lastDeath) && lastDeath > DateTime.MinValue && lastDeath != now && (now - lastDeath).TotalSeconds <= tradeWindowSeconds)
                 {
-                    _playerSessions.MutatePlayer(attacker.SteamID, stats => { stats.TradeKills++; stats.DidTradeThisRound = true; });
+                    _playerSessions.MutatePlayer(attacker.SteamID, stats => { stats.Combat.TradeKills++; stats.Round.DidTradeThisRound = true; });
                     if (_pendingTradeOpportunities.TryGetValue(attacker.SteamID, out var ops)) ops.RemoveAll(o => o.Expiry > now);
-                    if (victim is { IsBot: false }) _playerSessions.MutatePlayer(victim.SteamID, stats => { stats.TradedDeaths++; stats.WasTradedThisRound = true; });
+                    if (victim is { IsBot: false }) _playerSessions.MutatePlayer(victim.SteamID, stats => { stats.Combat.TradedDeaths++; stats.Round.WasTradedThisRound = true; });
                 }
             }
 
@@ -319,12 +331,14 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             {
                 _playerSessions.MutatePlayer(assister.SteamID, stats =>
                 {
-                    stats.RoundNumber = _currentRoundNumber;
-                    stats.RoundStartUtc = _currentRoundStartUtc;
-                    stats.HadAssistThisRound = true;
-                    stats.Assists++;
+                    stats.Round.HadAssistThisRound = true;
+                    stats.Combat.Assists++;
                     stats.CurrentTeam = GetTeam(assister);
-                    if (flashAssisted) stats.FlashAssists++;
+                    if (flashAssisted) 
+                    {
+                        stats.Utility.FlashAssists++;
+                        stats.Round.WasFlashedForKill = true;
+                    }
                 });
             }
         }
@@ -349,33 +363,27 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             {
                 _playerSessions.MutatePlayer(victim.SteamID, stats =>
                 {
-                    lock (stats.SyncRoot)
-                    {
-                        stats.DamageTaken += damage;
-                        stats.DamageArmor += damageArmor;
-                    }
+                    stats.Combat.DamageTaken += damage;
                 });
             }
 
             if (attacker is { IsBot: false } && attacker != victim)
             {
+                _damageReport.RecordDamage(attacker.SteamID, victim?.SteamID ?? 0, damage);
                 _playerSessions.MutatePlayer(attacker.SteamID, stats =>
                 {
-                    lock (stats.SyncRoot)
+                    stats.Combat.DamageDealt += damage;
+                    stats.Weapon.RecordHit(weapon);
+                    
+                    switch (hitgroup)
                     {
-                        stats.DamageDealt += damage;
-                        stats.DamageArmor += damageArmor;
-                        stats.AddWeaponHit(weapon);
-                        switch (hitgroup)
-                        {
-                            case 1: stats.HeadshotsHit++; break;
-                            case 2: stats.ChestHits++; break;
-                            case 3: stats.StomachHits++; break;
-                            case 4:
-                            case 5: stats.ArmHits++; break;
-                            case 6:
-                            case 7: stats.LegHits++; break;
-                        }
+                        case 1: stats.Combat.HeadshotsHit++; break;
+                        case 2: stats.Combat.ChestHits++; break;
+                        case 3: stats.Combat.StomachHits++; break;
+                        case 4:
+                        case 5: stats.Combat.ArmHits++; break;
+                        case 6:
+                        case 7: stats.Combat.LegHits++; break;
                     }
                 });
             }
@@ -393,20 +401,19 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             var weaponLower = weapon.ToLowerInvariant();
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                stats.ShotsFired++;
-                stats.CurrentRoundShotsFired++;
-                stats.AddWeaponShot(weapon);
+                stats.Combat.ShotsFired++;
+                stats.Combat.CurrentRoundShotsFired++;
+                stats.Weapon.RecordShot(weapon);
                 if (GrenadeWeaponNames.Contains(weaponLower))
                 {
-                    stats.GrenadesThrown++;
                     switch (weaponLower)
                     {
-                        case "weapon_flashbang": stats.FlashesThrown++; break;
-                        case "weapon_smokegrenade": stats.SmokesThrown++; break;
+                        case "weapon_flashbang": stats.Utility.FlashbangsThrown++; break;
+                        case "weapon_smokegrenade": stats.Utility.SmokesThrown++; break;
                         case "weapon_molotov":
-                        case "weapon_incgrenade": stats.MolotovsThrown++; break;
-                        case "weapon_hegrenade": stats.HeGrenadesThrown++; break;
-                        case "weapon_decoy": stats.DecoysThrown++; break;
+                        case "weapon_incgrenade": stats.Utility.MolotovsThrown++; break;
+                        case "weapon_hegrenade": stats.Utility.HeGrenadesThrown++; break;
+                        case "weapon_decoy": stats.Utility.DecoysThrown++; break;
                     }
                 }
             });

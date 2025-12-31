@@ -131,6 +131,8 @@ public sealed record PlayerSnapshot
     bool DidTradeThisRound,
     bool WasFlashedForKill,
     int KASTRounds,
+    int Pings,
+    int Footsteps,
 
     IReadOnlyDictionary<string, int> WeaponKills,
     IReadOnlyDictionary<string, int> WeaponShots,

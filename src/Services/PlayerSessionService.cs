@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using Microsoft.Extensions.Logging;
 using CounterStrikeSharp.API.Core;
 using statsCollector.Domain;
@@ -21,11 +22,10 @@ public interface IPlayerSessionService
     bool TryGetSnapshot(ulong steamId, out PlayerSnapshot snapshot, int? matchId = null);
 }
 
-public sealed class PlayerSessionService : IPlayerSessionService
+public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
 {
-    private readonly ConcurrentDictionary<ulong, PlayerStats> _playerStats = [];
+    private readonly ConcurrentDictionary<ulong, PlayerStatsWrapper> _playerStats = [];
     private readonly ILogger<PlayerSessionService> _logger;
-
     private readonly IAnalyticsService _analytics;
 
     public PlayerSessionService(ILogger<PlayerSessionService> logger, IAnalyticsService analytics)
@@ -36,65 +36,95 @@ public sealed class PlayerSessionService : IPlayerSessionService
 
     public PlayerStats EnsurePlayer(ulong steamId, string name)
     {
-        var stats = _playerStats.GetOrAdd(steamId, id => 
+        var wrapper = _playerStats.GetOrAdd(steamId, id => 
         {
             _logger.LogInformation("Creating new session for player: {Name} (SteamID: {SteamID})", name, id);
-            return new PlayerStats { SteamId = id };
+            return new PlayerStatsWrapper(new PlayerStats { SteamId = id });
         });
         
-        lock (stats.SyncRoot)
+        wrapper.Lock.EnterWriteLock();
+        try
         {
-            if (stats.Name != name)
+            if (wrapper.Stats.Name != name)
             {
-                _logger.LogDebug("Updating player name in session: {OldName} -> {NewName} (SteamID: {SteamID})", stats.Name, name, steamId);
-                stats.Name = name;
+                _logger.LogDebug("Updating player name in session: {OldName} -> {NewName} (SteamID: {SteamID})", wrapper.Stats.Name, name, steamId);
+                wrapper.Stats.Name = name;
             }
+            return wrapper.Stats;
         }
-        return stats;
+        finally
+        {
+            wrapper.Lock.ExitWriteLock();
+        }
     }
 
-    public bool TryGetPlayer(ulong steamId, out PlayerStats stats) => _playerStats.TryGetValue(steamId, out stats!);
+    public bool TryGetPlayer(ulong steamId, out PlayerStats stats)
+    {
+        if (_playerStats.TryGetValue(steamId, out var wrapper))
+        {
+            stats = wrapper.Stats;
+            return true;
+        }
+        stats = null!;
+        return false;
+    }
 
     public bool TryRemovePlayer(ulong steamId, out PlayerStats? stats)
     {
-        var removed = _playerStats.TryRemove(steamId, out var existing);
-        stats = existing;
+        var removed = _playerStats.TryRemove(steamId, out var wrapper);
+        stats = wrapper?.Stats;
+        wrapper?.Dispose();
         return removed;
     }
 
     public void MutatePlayer(ulong steamId, Action<PlayerStats> mutation)
     {
-        if (!_playerStats.TryGetValue(steamId, out var stats))
+        if (!_playerStats.TryGetValue(steamId, out var wrapper))
         {
             return;
         }
 
-        lock (stats.SyncRoot)
+        wrapper.Lock.EnterWriteLock();
+        try
         {
-            mutation(stats);
+            mutation(wrapper.Stats);
+        }
+        finally
+        {
+            wrapper.Lock.ExitWriteLock();
         }
     }
 
     public T WithPlayer<T>(ulong steamId, Func<PlayerStats, T> accessor, T defaultValue = default!)
     {
-        if (!_playerStats.TryGetValue(steamId, out var stats))
+        if (!_playerStats.TryGetValue(steamId, out var wrapper))
         {
             return defaultValue;
         }
 
-        lock (stats.SyncRoot)
+        wrapper.Lock.EnterReadLock();
+        try
         {
-            return accessor(stats);
+            return accessor(wrapper.Stats);
+        }
+        finally
+        {
+            wrapper.Lock.ExitReadLock();
         }
     }
 
     public void ForEachPlayer(Action<PlayerStats> action)
     {
-        foreach (var stats in _playerStats.Values)
+        foreach (var wrapper in _playerStats.Values)
         {
-            lock (stats.SyncRoot)
+            wrapper.Lock.EnterWriteLock();
+            try
             {
-                action(stats);
+                action(wrapper.Stats);
+            }
+            finally
+            {
+                wrapper.Lock.ExitWriteLock();
             }
         }
     }
@@ -102,15 +132,31 @@ public sealed class PlayerSessionService : IPlayerSessionService
     public PlayerSnapshot[] CaptureSnapshots(bool onlyDirty = false, int? matchId = null)
     {
         var snapshots = new List<PlayerSnapshot>();
-        foreach (var stats in _playerStats.Values)
+        foreach (var wrapper in _playerStats.Values)
         {
-            lock (stats.SyncRoot)
+            wrapper.Lock.EnterUpgradeableReadLock();
+            try
             {
-                if (!onlyDirty || stats.IsDirty)
+                if (!onlyDirty || wrapper.Stats.IsDirty)
                 {
-                    snapshots.Add(_analytics.CreateSnapshot(stats, matchId));
-                    if (onlyDirty) stats.ClearDirty();
+                    snapshots.Add(_analytics.CreateSnapshot(wrapper.Stats, matchId));
+                    if (onlyDirty)
+                    {
+                        wrapper.Lock.EnterWriteLock();
+                        try
+                        {
+                            wrapper.Stats.ClearDirty();
+                        }
+                        finally
+                        {
+                            wrapper.Lock.ExitWriteLock();
+                        }
+                    }
                 }
+            }
+            finally
+            {
+                wrapper.Lock.ExitUpgradeableReadLock();
             }
         }
         return snapshots.ToArray();
@@ -120,14 +166,46 @@ public sealed class PlayerSessionService : IPlayerSessionService
 
     public bool TryGetSnapshot(ulong steamId, out PlayerSnapshot snapshot, int? matchId = null)
     {
-        if (_playerStats.TryGetValue(steamId, out var stats))
+        if (_playerStats.TryGetValue(steamId, out var wrapper))
         {
-            snapshot = _analytics.CreateSnapshot(stats, matchId);
-            return true;
+            wrapper.Lock.EnterReadLock();
+            try
+            {
+                snapshot = _analytics.CreateSnapshot(wrapper.Stats, matchId);
+                return true;
+            }
+            finally
+            {
+                wrapper.Lock.ExitReadLock();
+            }
         }
         snapshot = null!;
         return false;
     }
 
-    public void Clear() => _playerStats.Clear();
+    public void Dispose()
+    {
+        foreach (var wrapper in _playerStats.Values)
+        {
+            wrapper.Dispose();
+        }
+        _playerStats.Clear();
+    }
+
+    private sealed class PlayerStatsWrapper : IDisposable
+    {
+        public PlayerStats Stats { get; }
+        public ReaderWriterLockSlim Lock { get; }
+
+        public PlayerStatsWrapper(PlayerStats stats)
+        {
+            Stats = stats;
+            Lock = new ReaderWriterLockSlim(LockRecursionPolicy.NoRecursion);
+        }
+
+        public void Dispose()
+        {
+            Lock?.Dispose();
+        }
+    }
 }

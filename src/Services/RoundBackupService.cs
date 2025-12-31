@@ -130,12 +130,9 @@ public sealed class RoundBackupService(
 
                     _playerSessions.MutatePlayer(steamId, stats =>
                     {
-                        lock (stats.SyncRoot)
-                        {
-                            stats.Kills = data.Kills;
-                            stats.Deaths = data.Deaths;
-                            stats.Assists = data.Assists;
-                        }
+                        stats.Combat.Kills = data.Kills;
+                        stats.Combat.Deaths = data.Deaths;
+                        stats.Combat.Assists = data.Assists;
                     });
                 }
             }

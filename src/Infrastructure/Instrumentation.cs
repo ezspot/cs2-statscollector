@@ -7,7 +7,7 @@ namespace statsCollector.Infrastructure;
 public static class Instrumentation
 {
     public const string ServiceName = "cs2-statscollector";
-    public const string ServiceVersion = "1.7.0";
+    public const string ServiceVersion = "2.0.0";
 
     public static readonly ActivitySource ActivitySource = new(ServiceName, ServiceVersion);
     public static readonly Meter Meter = new(ServiceName, ServiceVersion);
@@ -42,4 +42,11 @@ public static class Instrumentation
     public static readonly Counter<long> PositionEventsEnqueuedCounter = Meter.CreateCounter<long>("cs2_position_events_enqueued_total", description: "Total position events enqueued");
     public static readonly Counter<long> PositionEventsDroppedCounter = Meter.CreateCounter<long>("cs2_position_events_dropped_total", description: "Total position events dropped due to full channel");
     public static readonly Counter<long> PositionEventsTrackedCounter = Meter.CreateCounter<long>("cs2_position_events_tracked_total", description: "Total position events tracked in DB");
+    
+    // Match Lifecycle Counters
+    public static readonly Counter<long> MatchLifecycleEventsCounter = Meter.CreateCounter<long>("cs2_match_lifecycle_events_total", description: "Total match lifecycle events enqueued");
+    public static readonly Counter<long> MatchLifecycleErrorsCounter = Meter.CreateCounter<long>("cs2_match_lifecycle_errors_total", description: "Total match lifecycle event processing errors");
+    
+    // Circuit Breaker Counters
+    public static readonly Counter<long> CircuitBreakerStateCounter = Meter.CreateCounter<long>("cs2_circuit_breaker_state_changes_total", description: "Total circuit breaker state changes");
 }

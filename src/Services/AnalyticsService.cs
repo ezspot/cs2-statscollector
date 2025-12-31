@@ -24,71 +24,71 @@ public sealed class AnalyticsService : IAnalyticsService
 {
     public decimal CalculateHLTVRating(PlayerStats stats)
     {
-        if (stats.RoundsPlayed == 0) return 0m;
+        if (stats.Round.RoundsPlayed == 0) return 0m;
 
-        var killsRating = (stats.Kills / (decimal)stats.RoundsPlayed) * 0.6m;
-        var deathsRating = (0.7m - (stats.Deaths / (decimal)stats.RoundsPlayed) * 0.5m);
+        var killsRating = (stats.Combat.Kills / (decimal)stats.Round.RoundsPlayed) * 0.6m;
+        var deathsRating = (0.7m - (stats.Combat.Deaths / (decimal)stats.Round.RoundsPlayed) * 0.5m);
         var impactRating = CalculateImpactRating(stats) * 0.3m;
         var kastRating = CalculateKASTPercentage(stats) / 100m * 0.2m;
-        var survivalRating = stats.RoundsPlayed > 0 ? ((decimal)(stats.RoundsPlayed - stats.Deaths) / stats.RoundsPlayed) * 0.154m : 0m;
+        var survivalRating = stats.Round.RoundsPlayed > 0 ? ((decimal)(stats.Round.RoundsPlayed - stats.Combat.Deaths) / stats.Round.RoundsPlayed) * 0.154m : 0m;
         
         return Math.Max(0m, killsRating + deathsRating + impactRating + kastRating + survivalRating);
     }
 
     public decimal CalculateImpactRating(PlayerStats stats)
     {
-        if (stats.RoundsPlayed == 0) return 0m;
+        if (stats.Round.RoundsPlayed == 0) return 0m;
 
-        var multiKillImpact = stats.MultiKills * 0.1m;
-        var clutchImpact = (decimal)stats.ClutchPoints * 0.2m;
-        var openingImpact = stats.EntryKills * 0.15m;
-        var mvpImpact = stats.Mvps * 0.05m;
+        var multiKillImpact = stats.Combat.MultiKill2 * 0.1m + stats.Combat.MultiKill3 * 0.2m + stats.Combat.MultiKill4 * 0.3m + stats.Combat.MultiKill5 * 0.5m;
+        var clutchImpact = (decimal)stats.Combat.ClutchKills * 0.2m;
+        var openingImpact = stats.Combat.FirstKills * 0.15m;
+        var mvpImpact = stats.Combat.MVPs * 0.05m;
 
         return Math.Min(2.0m, multiKillImpact + clutchImpact + openingImpact + mvpImpact);
     }
 
     public decimal CalculateKASTPercentage(PlayerStats stats)
     {
-        return stats.RoundsPlayed > 0 ? (decimal)stats.KASTRounds / stats.RoundsPlayed * 100m : 0m;
+        return stats.Round.RoundsPlayed > 0 ? (decimal)stats.Round.KASTRounds / stats.Round.RoundsPlayed * 100m : 0m;
     }
 
     public decimal CalculateADR(PlayerStats stats)
     {
-        return stats.RoundsPlayed > 0 ? (decimal)stats.DamageDealt / stats.RoundsPlayed : 0m;
+        return stats.Round.RoundsPlayed > 0 ? (decimal)stats.Combat.DamageDealt / stats.Round.RoundsPlayed : 0m;
     }
 
     public decimal CalculateKDRatio(PlayerStats stats)
     {
-        return stats.Deaths > 0 ? (decimal)stats.Kills / stats.Deaths : stats.Kills;
+        return stats.Combat.Deaths > 0 ? (decimal)stats.Combat.Kills / stats.Combat.Deaths : stats.Combat.Kills;
     }
 
     public decimal CalculateHeadshotPercentage(PlayerStats stats)
     {
-        return stats.Kills > 0 ? (decimal)stats.Headshots / stats.Kills * 100m : 0m;
+        return stats.Combat.Kills > 0 ? (decimal)stats.Combat.Headshots / stats.Combat.Kills * 100m : 0m;
     }
 
     public decimal CalculateAccuracyPercentage(PlayerStats stats)
     {
-        return stats.ShotsFired > 0 ? (decimal)stats.ShotsHit / stats.ShotsFired * 100m : 0m;
+        return stats.Combat.ShotsFired > 0 ? (decimal)stats.Combat.ShotsHit / stats.Combat.ShotsFired * 100m : 0m;
     }
 
     public decimal CalculateUtilityScore(PlayerStats stats)
     {
-        if (stats.RoundsPlayed == 0) return 0m;
-        var damageScore = (stats.UtilityDamageDealt / (decimal)stats.RoundsPlayed) * 0.4m;
-        var blindScore = (stats.TotalBlindTimeInflicted / 1000m / (decimal)stats.RoundsPlayed) * 0.4m;
-        var smokeScore = (stats.EffectiveSmokes / (decimal)stats.RoundsPlayed) * 0.2m;
+        if (stats.Round.RoundsPlayed == 0) return 0m;
+        var damageScore = (stats.Utility.UtilityDamage / (decimal)stats.Round.RoundsPlayed) * 0.4m;
+        var blindScore = (stats.Utility.BlindDuration / 1000m / (decimal)stats.Round.RoundsPlayed) * 0.4m;
+        var smokeScore = (stats.Utility.SmokeAssists / (decimal)stats.Round.RoundsPlayed) * 0.2m;
         return damageScore + blindScore + smokeScore;
     }
 
     public decimal CalculatePerformanceScore(PlayerStats stats)
     {
-        if (stats.RoundsPlayed == 0) return 0m;
+        if (stats.Round.RoundsPlayed == 0) return 0m;
 
         var kdScore = Math.Min(30m, CalculateKDRatio(stats) * 10m);
         var adrScore = Math.Min(20m, CalculateADR(stats) / 2m);
         var kastScore = Math.Min(20m, CalculateKASTPercentage(stats) / 5m);
-        var mvpScore = Math.Min(15m, (decimal)stats.Mvps / stats.RoundsPlayed * 15m);
+        var mvpScore = Math.Min(15m, (decimal)stats.Combat.MVPs / stats.Round.RoundsPlayed * 15m);
         var impactScoreValue = Math.Min(15m, CalculateImpactRating(stats) * 7.5m);
 
         return kdScore + adrScore + kastScore + mvpScore + impactScoreValue;
@@ -124,148 +124,151 @@ public sealed class AnalyticsService : IAnalyticsService
         var utilityScore = CalculateUtilityScore(stats);
         var rank = GetPlayerRank(perfScore);
 
-        var clutchSuccessRate = (stats.ClutchesWon + stats.ClutchesLost) > 0 
-            ? (decimal)stats.ClutchesWon / (stats.ClutchesWon + stats.ClutchesLost) * 100m
+        var clutchSuccessRate = (stats.Combat.ClutchesWon + stats.Combat.ClutchesLost) > 0 
+            ? (decimal)stats.Combat.ClutchesWon / (stats.Combat.ClutchesWon + stats.Combat.ClutchesLost) * 100m
             : 0m;
         
-        var tradeKillRatio = (stats.TradeKills + stats.TradedDeaths) > 0 
-            ? (decimal)stats.TradeKills / (stats.TradeKills + stats.TradedDeaths) 
+        var tradeKillRatio = (stats.Combat.TradeKills + stats.Combat.TradedDeaths) > 0 
+            ? (decimal)stats.Combat.TradeKills / (stats.Combat.TradeKills + stats.Combat.TradedDeaths) 
             : 0m;
 
-        var openingKillRatio = (stats.OpeningDuelsWon + stats.OpeningDuelsLost) > 0 
-            ? (decimal)stats.OpeningDuelsWon / (stats.OpeningDuelsWon + stats.OpeningDuelsLost) 
+        var openingKillRatio = (stats.Combat.FirstKills + stats.Combat.FirstDeaths) > 0 
+            ? (decimal)stats.Combat.FirstKills / (stats.Combat.FirstKills + stats.Combat.FirstDeaths) 
             : 0m;
 
-        var grenadeEffectivenessRate = stats.GrenadesThrown > 0 
-            ? (decimal)(stats.EffectiveFlashes + stats.EffectiveSmokes + stats.EffectiveHEGrenades + stats.EffectiveMolotovs) / stats.GrenadesThrown * 100m 
+        var totalGrenadesThrown = stats.Utility.FlashbangsThrown + stats.Utility.SmokesThrown + stats.Utility.HeGrenadesThrown + stats.Utility.MolotovsThrown + stats.Utility.DecoysThrown;
+        var grenadeEffectivenessRate = totalGrenadesThrown > 0 
+            ? (decimal)(stats.Utility.UtilitySuccessCount) / totalGrenadesThrown * 100m 
             : 0m;
 
-        var flashEffectivenessRate = stats.FlashesThrown > 0 ? (decimal)stats.EnemiesFlashed / stats.FlashesThrown : 0m;
-        var utilityUsagePerRound = stats.RoundsPlayed > 0 ? (decimal)stats.GrenadesThrown / stats.RoundsPlayed : 0m;
-        var averageMoneySpentPerRound = stats.RoundsPlayed > 0 ? (decimal)stats.MoneySpent / stats.RoundsPlayed : 0m;
-        var survivalRating = stats.RoundsPlayed > 0 ? ((decimal)(stats.RoundsPlayed - stats.Deaths) / stats.RoundsPlayed) * 0.154m : 0m;
-        var utilityImpactScore = stats.RoundsPlayed > 0 ? (decimal)stats.UtilityDamageDealt / stats.RoundsPlayed : 0m;
-        var topWeapon = stats.WeaponKills.OrderByDescending(x => x.Value).FirstOrDefault().Key ?? "None";
+        var flashEffectivenessRate = stats.Utility.FlashbangsThrown > 0 ? (decimal)stats.Utility.EnemiesBlinded / stats.Utility.FlashbangsThrown : 0m;
+        var utilityUsagePerRound = stats.Round.RoundsPlayed > 0 ? (decimal)totalGrenadesThrown / stats.Round.RoundsPlayed : 0m;
+        var averageMoneySpentPerRound = stats.Round.RoundsPlayed > 0 ? (decimal)stats.Economy.MoneySpent / stats.Round.RoundsPlayed : 0m;
+        var survivalRating = stats.Round.RoundsPlayed > 0 ? ((decimal)(stats.Round.RoundsPlayed - stats.Combat.Deaths) / stats.Round.RoundsPlayed) * 0.154m : 0m;
+        var utilityImpactScore = stats.Round.RoundsPlayed > 0 ? (decimal)stats.Utility.UtilityDamage / stats.Round.RoundsPlayed : 0m;
+        var topWeapon = stats.Weapon.KillsByWeapon.OrderByDescending(x => x.Value).FirstOrDefault().Key ?? "None";
 
         return new PlayerSnapshot(
             matchId,
-            stats.RoundNumber,
-            stats.RoundStartUtc,
-            stats.AliveOnTeamAtRoundStart,
-            stats.AliveEnemyAtRoundStart,
+            stats.Round.RoundNumber,
+            stats.Round.RoundStartUtc,
+            stats.Round.AliveOnTeamAtRoundStart,
+            stats.Round.AliveEnemyAtRoundStart,
             stats.SteamId,
             stats.Name,
-            stats.Kills,
-            stats.Deaths,
-            stats.Assists,
-            stats.Headshots,
-            stats.DamageDealt,
-            stats.DamageTaken,
-            stats.DamageArmor,
-            stats.ShotsFired,
-            stats.ShotsHit,
-            stats.Mvps,
-            stats.Score,
-            stats.RoundsPlayed,
-            stats.RoundsWon,
-            stats.CtRounds,
-            stats.TRounds,
-            stats.BombPlants,
-            stats.BombDefuses,
-            stats.BombPlantAttempts,
-            stats.BombPlantAborts,
-            stats.BombDefuseAttempts,
-            stats.BombDefuseAborts,
-            stats.BombDefuseWithKit,
-            stats.BombDefuseWithoutKit,
-            stats.BombDrops,
-            stats.BombPickups,
-            stats.DefuserDrops,
-            stats.DefuserPickups,
-            stats.ClutchDefuses,
-            stats.TotalPlantTime,
-            stats.TotalDefuseTime,
-            stats.HostagesRescued,
-            stats.GrenadesThrown,
-            stats.FlashesThrown,
-            stats.SmokesThrown,
-            stats.MolotovsThrown,
-            stats.HeGrenadesThrown,
-            stats.DecoysThrown,
-            stats.TacticalGrenadesThrown,
-            stats.PlayersBlinded,
-            stats.TimesBlinded,
-            stats.FlashAssists,
-            stats.TotalBlindTime,
-            stats.TotalBlindTimeInflicted,
-            stats.UtilityDamageDealt,
-            stats.UtilityDamageTaken,
-            stats.BombKills,
-            stats.BombDeaths,
-            stats.Jumps,
-            stats.TotalSpawns,
-            stats.PlaytimeSeconds,
-            stats.MoneySpent,
-            stats.EquipmentValue,
-            stats.ItemsPurchased,
-            stats.ItemsPickedUp,
-            stats.ItemsDropped,
-            stats.CashEarned,
-            stats.CashSpent,
-            stats.LossBonus,
-            stats.RoundStartMoney,
-            stats.RoundEndMoney,
-            stats.EquipmentValueStart,
-            stats.EquipmentValueEnd,
-            stats.EnemiesFlashed,
-            stats.TeammatesFlashed,
-            stats.EffectiveFlashes,
-            stats.EffectiveSmokes,
-            stats.EffectiveHEGrenades,
-            stats.EffectiveMolotovs,
-            stats.MultiKillNades,
-            stats.NadeKills,
-            stats.TradeWindowsMissed,
-            stats.FlashWaste,
-            stats.EntryKills,
-            stats.TradeKills,
-            stats.TradedDeaths,
-            stats.HighImpactKills,
-            stats.LowImpactKills,
-            stats.TradeOpportunities,
-            stats.MultiKills,
-            stats.OpeningDuelsWon,
-            stats.OpeningDuelsLost,
-            stats.NoscopeKills,
-            stats.ThruSmokeKills,
-            stats.AttackerBlindKills,
-            stats.FlashAssistedKills,
-            stats.WallbangKills,
-            stats.Revenges,
-            stats.ClutchesWon,
-            stats.ClutchesLost,
-            stats.ClutchPoints,
-            stats.MvpsEliminations,
-            stats.MvpsBomb,
-            stats.MvpsHostage,
-            stats.HeadshotsHit,
-            stats.ChestHits,
-            stats.StomachHits,
-            stats.ArmHits,
-            stats.LegHits,
-            stats.CurrentRoundKills,
-            stats.CurrentRoundDeaths,
-            stats.CurrentRoundShotsFired,
-            stats.HadKillThisRound,
-            stats.HadAssistThisRound,
-            stats.SurvivedThisRound,
-            stats.WasTradedThisRound,
-            stats.DidTradeThisRound,
-            stats.WasFlashedForKill,
-            stats.KASTRounds,
-            new Dictionary<string, int>(stats.WeaponKills),
-            new Dictionary<string, int>(stats.WeaponShots),
-            new Dictionary<string, int>(stats.WeaponHits),
+            stats.Combat.Kills,
+            stats.Combat.Deaths,
+            stats.Combat.Assists,
+            stats.Combat.Headshots,
+            stats.Combat.DamageDealt,
+            stats.Combat.DamageTaken,
+            stats.Combat.DamageArmor,
+            stats.Combat.ShotsFired,
+            stats.Combat.ShotsHit,
+            stats.Combat.MVPs,
+            stats.Combat.Score,
+            stats.Round.RoundsPlayed,
+            stats.Round.RoundsWon,
+            stats.Round.CtRounds,
+            stats.Round.TRounds,
+            stats.Bomb.BombPlants,
+            stats.Bomb.BombDefuses,
+            stats.Bomb.BombPlantAttempts,
+            stats.Bomb.BombPlantAborts,
+            stats.Bomb.BombDefuseAttempts,
+            stats.Bomb.BombDefuseAborts,
+            stats.Bomb.BombDefuseWithKit,
+            stats.Bomb.BombDefuseWithoutKit,
+            stats.Bomb.BombDrops,
+            stats.Bomb.BombPickups,
+            stats.Bomb.DefuserDrops,
+            stats.Bomb.DefuserPickups,
+            stats.Bomb.ClutchDefuses,
+            stats.Bomb.TotalPlantTime,
+            stats.Bomb.TotalDefuseTime,
+            stats.Combat.HostagesRescued,
+            totalGrenadesThrown,
+            stats.Utility.FlashbangsThrown,
+            stats.Utility.SmokesThrown,
+            stats.Utility.MolotovsThrown,
+            stats.Utility.HeGrenadesThrown,
+            stats.Utility.DecoysThrown,
+            stats.Utility.TacticalGrenadesThrown,
+            stats.Utility.EnemiesBlinded,
+            stats.Utility.TimesBlinded,
+            stats.Utility.FlashAssists,
+            stats.Utility.TotalBlindTime,
+            stats.Utility.TotalBlindTimeInflicted,
+            stats.Utility.UtilityDamage,
+            stats.Utility.UtilityDamageTaken,
+            stats.Bomb.BombKills,
+            stats.Bomb.BombDeaths,
+            stats.Round.Jumps,
+            stats.Round.TotalSpawns,
+            stats.Round.PlaytimeSeconds,
+            stats.Economy.MoneySpent,
+            stats.Economy.EquipmentValue,
+            stats.Economy.ItemsPurchased,
+            stats.Economy.ItemsPickedUp,
+            stats.Round.ItemsDropped,
+            stats.Round.CashEarned,
+            stats.Economy.MoneySpent, // CashSpent
+            stats.Economy.LossBonus,
+            stats.Economy.RoundStartMoney,
+            stats.Economy.RoundEndMoney,
+            stats.Economy.EquipmentValueStart,
+            stats.Economy.EquipmentValueEnd,
+            stats.Utility.EnemiesBlinded,
+            stats.Utility.TeammatesBlinded,
+            stats.Utility.EffectiveFlashes,
+            stats.Utility.EffectiveSmokes,
+            stats.Utility.EffectiveHEGrenades,
+            stats.Utility.EffectiveMolotovs,
+            stats.Combat.MultiKillNades,
+            stats.Combat.NadeKills,
+            stats.Round.TradeWindowsMissed,
+            stats.Utility.UtilityWasteCount,
+            stats.Combat.EntryKills,
+            stats.Combat.TradeKills,
+            stats.Combat.TradedDeaths,
+            stats.Combat.HighImpactKills,
+            stats.Combat.LowImpactKills,
+            stats.Combat.TradeOpportunities,
+            stats.Combat.MultiKill2 + stats.Combat.MultiKill3 + stats.Combat.MultiKill4 + stats.Combat.MultiKill5,
+            stats.Combat.FirstKills, // OpeningDuelsWon
+            stats.Combat.FirstDeaths, // OpeningDuelsLost
+            stats.Combat.Noscopes,
+            stats.Combat.ThroughSmokeKills,
+            stats.Combat.BlindKills,
+            stats.Utility.FlashAssists,
+            stats.Combat.WallbangKills,
+            stats.Combat.Revenges,
+            stats.Combat.ClutchesWon,
+            stats.Combat.ClutchesLost,
+            stats.Combat.ClutchPoints,
+            stats.Combat.MvpsEliminations,
+            stats.Combat.MvpsBomb,
+            stats.Combat.MvpsHostage,
+            stats.Combat.HeadshotsHit,
+            stats.Combat.ChestHits,
+            stats.Combat.StomachHits,
+            stats.Combat.ArmHits,
+            stats.Combat.LegHits,
+            stats.Combat.CurrentRoundKills,
+            stats.Combat.CurrentRoundDeaths,
+            stats.Combat.CurrentRoundShotsFired,
+            stats.Round.HadKillThisRound,
+            stats.Round.HadAssistThisRound,
+            stats.Round.SurvivedThisRound,
+            stats.Round.WasTradedThisRound,
+            stats.Round.DidTradeThisRound,
+            stats.Round.WasFlashedForKill,
+            stats.Round.KASTRounds,
+            stats.Round.Pings,
+            stats.Round.Footsteps,
+            new Dictionary<string, int>(stats.Weapon.KillsByWeapon),
+            new Dictionary<string, int>(stats.Weapon.ShotsByWeapon),
+            new Dictionary<string, int>(stats.Weapon.HitsByWeapon),
             kdRatio,
             hsPercentage,
             accuracyPercentage,
@@ -276,9 +279,9 @@ public sealed class AnalyticsService : IAnalyticsService
             utilityScore,
             perfScore,
             rank,
-            stats.RoundsPlayed > 0 ? (decimal)stats.Kills / stats.RoundsPlayed : 0m,
-            stats.RoundsPlayed > 0 ? (decimal)stats.Deaths / stats.RoundsPlayed : 0m,
-            stats.RoundsPlayed > 0 ? (decimal)stats.Assists / stats.RoundsPlayed : 0m,
+            stats.Round.RoundsPlayed > 0 ? (decimal)stats.Combat.Kills / stats.Round.RoundsPlayed : 0m,
+            stats.Round.RoundsPlayed > 0 ? (decimal)stats.Combat.Deaths / stats.Round.RoundsPlayed : 0m,
+            stats.Round.RoundsPlayed > 0 ? (decimal)stats.Combat.Assists / stats.Round.RoundsPlayed : 0m,
             clutchSuccessRate,
             tradeKillRatio,
             openingKillRatio,

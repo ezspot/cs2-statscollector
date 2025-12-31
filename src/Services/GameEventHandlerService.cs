@@ -26,6 +26,7 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
     private readonly IEventDispatcher _dispatcher;
     private readonly IEnumerable<IEventProcessor> _processors;
     private readonly IMatchTrackingService _matchTracker;
+    private readonly IMatchLifecyclePersistenceService _matchLifecyclePersistence;
     private readonly IStatsPersistenceService _statsPersistence;
     private readonly IStatsRepository _statsRepository;
     private readonly IScrimManager _scrimManager;
@@ -33,6 +34,8 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
     private readonly IRoundBackupService _roundBackup;
     private readonly IOptionsMonitor<PluginConfig> _configMonitor;
     private readonly IAnalyticsService _analytics;
+    private readonly IDamageReportService _damageReport;
+    private readonly IMatchReadyService _matchReady;
     private int _currentRoundNumber = 0;
 
     private PluginConfig _config => _configMonitor.CurrentValue;
@@ -43,18 +46,22 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
         IEventDispatcher dispatcher,
         IEnumerable<IEventProcessor> processors,
         IMatchTrackingService matchTracker,
+        IMatchLifecyclePersistenceService matchLifecyclePersistence,
         IStatsPersistenceService statsPersistence,
         IStatsRepository statsRepository,
         IScrimManager scrimManager,
         IPauseService pauseService,
         IRoundBackupService roundBackup,
         IOptionsMonitor<PluginConfig> configMonitor,
-        IAnalyticsService analytics)
+        IAnalyticsService analytics,
+        IDamageReportService damageReport,
+        IMatchReadyService matchReady)
     {
         _logger = logger;
         _playerSessions = playerSessions;
         _dispatcher = dispatcher;
         _matchTracker = matchTracker;
+        _matchLifecyclePersistence = matchLifecyclePersistence;
         _statsPersistence = statsPersistence;
         _statsRepository = statsRepository;
         _scrimManager = scrimManager;
@@ -63,6 +70,8 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
         _configMonitor = configMonitor;
         _analytics = analytics;
         _processors = processors;
+        _damageReport = damageReport;
+        _matchReady = matchReady;
 
         // Register all processors for event dispatching
         foreach (var processor in _processors)
@@ -107,6 +116,11 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
         plugin.RegisterEventHandler<EventBombPickup>((e, i) => _dispatcher.Dispatch(e, i));
         plugin.RegisterEventHandler<EventBombBegindefuse>((e, i) => _dispatcher.Dispatch(e, i));
         plugin.RegisterEventHandler<EventBombAbortdefuse>((e, i) => _dispatcher.Dispatch(e, i));
+
+        // Movement and Communication
+        plugin.RegisterEventHandler<EventPlayerFootstep>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventPlayerPing>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventPlayerJump>((e, i) => _dispatcher.Dispatch(e, i));
 
         // Round events (Hybrid handling)
         plugin.RegisterEventHandler<EventRoundStart>(OnRoundStart);
@@ -153,7 +167,7 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
         if (player != null && !player.IsBot)
         {
             _scrimManager.HandleDisconnect(player.SteamID);
-            SafeExecute(() => SavePlayerStatsOnDisconnectAsync(player), "SaveStatsOnDisconnect");
+            _ = SavePlayerStatsOnDisconnectAsync(player);
         }
         return HookResult.Continue;
     }
@@ -176,8 +190,8 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
             _playerSessions.EnsurePlayer(player.SteamID, player.PlayerName);
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                stats.TotalSpawns++;
-                stats.PlaytimeSeconds = (int)(DateTime.UtcNow - new DateTime(2020, 1, 1)).TotalSeconds;
+                stats.Round.TotalSpawns++;
+                stats.Round.PlaytimeSeconds = (int)(DateTime.UtcNow - new DateTime(2020, 1, 1)).TotalSeconds;
             });
         }
         return HookResult.Continue;
@@ -191,8 +205,8 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
             var team = @event.GetIntValue("team", 0);
             _playerSessions.MutatePlayer(player.SteamID, stats =>
             {
-                if (team == 2) stats.TRounds++;
-                else if (team == 3) stats.CtRounds++;
+                if (team == 2) stats.Round.TRounds++;
+                else if (team == 3) stats.Round.CtRounds++;
             });
         }
         return HookResult.Continue;
@@ -210,6 +224,7 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
     {
         if (_config.DeathmatchMode) return HookResult.Continue;
         
+        _damageReport.ResetRound();
         _currentRoundNumber = @event.GetIntValue("round_number", 0);
         var roundStartUtc = DateTime.UtcNow;
 
@@ -232,21 +247,19 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
 
         if (_matchTracker.CurrentMatch != null)
         {
-            SafeExecute(() => _matchTracker.StartRoundAsync(_matchTracker.CurrentMatch.MatchId, _currentRoundNumber), "StartRoundTracking");
+            _ = _matchLifecyclePersistence.EnqueueStartRoundAsync(_matchTracker.CurrentMatch.MatchId, _currentRoundNumber);
         }
 
         _playerSessions.ForEachPlayer(stats =>
         {
-            stats.RoundNumber = _currentRoundNumber;
-            stats.RoundStartUtc = roundStartUtc;
-            stats.AliveOnTeamAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
-            stats.AliveEnemyAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
+            stats.Round.AliveOnTeamAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
+            stats.Round.AliveEnemyAtRoundStart = stats.CurrentTeam == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
             
             var player = Utilities.GetPlayerFromSteamId(stats.SteamId);
             if (player is { IsValid: true, InGameMoneyServices: not null })
             {
-                stats.RoundStartMoney = player.InGameMoneyServices.Account;
-                stats.EquipmentValueStart = stats.EquipmentValue;
+                stats.Economy.RoundStartMoney = player.InGameMoneyServices.Account;
+                stats.Economy.EquipmentValueStart = stats.Economy.EquipmentValue;
             }
             
             stats.ResetRoundStats();
@@ -277,26 +290,28 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
             processor.OnRoundEnd(winningTeamInt, winReason);
         }
 
+        _damageReport.ReportToPlayers();
+
         _playerSessions.ForEachPlayer(stats =>
         {
-            stats.RoundsPlayed++;
-            if (winningTeam != PlayerTeam.Spectator && stats.CurrentTeam == winningTeam) stats.RoundsWon++;
-            if (stats.HadKillThisRound || stats.HadAssistThisRound || stats.SurvivedThisRound || stats.DidTradeThisRound) stats.KASTRounds++;
+            stats.Round.RoundsPlayed++;
+            if (winningTeam != PlayerTeam.Spectator && stats.CurrentTeam == winningTeam) stats.Round.RoundsWon++;
+            if (stats.Round.HadKillThisRound || stats.Round.HadAssistThisRound || stats.Round.SurvivedThisRound || stats.Round.DidTradeThisRound) stats.Round.KASTRounds++;
             
             var player = Utilities.GetPlayerFromSteamId(stats.SteamId);
             if (player is { IsValid: true, InGameMoneyServices: not null })
             {
-                stats.RoundEndMoney = player.InGameMoneyServices.Account;
-                stats.EquipmentValueEnd = stats.EquipmentValue;
+                stats.Economy.RoundEndMoney = player.InGameMoneyServices.Account;
+                stats.Economy.EquipmentValueEnd = stats.Economy.EquipmentValue;
             }
         });
         
         if (_matchTracker.CurrentRoundId != null)
         {
-            SafeExecute(() => _matchTracker.EndRoundAsync(_matchTracker.CurrentRoundId.Value, winningTeamInt, winReason), "EndRoundTracking");
+            _ = _matchLifecyclePersistence.EnqueueEndRoundAsync(_matchTracker.CurrentRoundId.Value, winningTeamInt, winReason);
         }
 
-        SafeExecute(SaveStatsAtRoundEndAsync, "SaveStatsAtRoundEnd");
+        _ = SaveStatsAtRoundEndAsync();
         return HookResult.Continue;
     }
 
@@ -324,25 +339,10 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
             var perfScore = _analytics.CalculatePerformanceScore(stats);
             var rank = _analytics.GetPlayerRank(perfScore);
             
-            player.PrintToChat($" [statsCollector] K:{stats.Kills} D:{stats.Deaths} A:{stats.Assists} ADR:{adr:F0} Rating:{rating:F2} Rank:{rank}");
+            player.PrintToChat($" [statsCollector] K:{stats.Combat.Kills} D:{stats.Combat.Deaths} A:{stats.Combat.Assists} ADR:{adr:F0} Rating:{rating:F2} Rank:{rank}");
         }
     }
 
-    private void SafeExecute(Func<Task> action, string operationName)
-    {
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                using var activity = Instrumentation.ActivitySource.StartActivity(operationName);
-                await action();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error during async operation: {Operation}", operationName);
-            }
-        });
-    }
 
     private void OnScrimCommand(CCSPlayerController? player, CommandInfo command)
     {
@@ -358,22 +358,22 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
 
             switch (subCommand)
             {
-                case "start": SafeExecute(() => _scrimManager.StartScrimAsync(), "StartScrim"); break;
-                case "stop": SafeExecute(() => _scrimManager.StopScrimAsync(), "StopScrim"); break;
-                case "recover": SafeExecute(() => _scrimManager.RecoverAsync(), "RecoverScrim"); break;
+                case "start": _ = _scrimManager.StartScrimAsync(); break;
+                case "stop": _ = _scrimManager.StopScrimAsync(); break;
+                case "recover": _ = _scrimManager.RecoverAsync(); break;
                 case "practice":
                     if (command.ArgCount < 3) return;
                     var enable = command.GetArg(2).ToLower() == "on";
-                    SafeExecute(() => _scrimManager.SetPracticeModeAsync(enable), "SetPracticeMode");
+                    _ = _scrimManager.SetPracticeModeAsync(enable);
                     break;
                 case "veto":
-                    SafeExecute(() => _scrimManager.StartVetoAsync(), "StartVeto");
+                    _ = _scrimManager.StartVetoAsync();
                     break;
                 case "setcaptain":
                     if (command.ArgCount < 4) return;
                     var team = int.Parse(command.GetArg(2));
                     var target = Utilities.GetPlayerFromSteamId(ulong.Parse(command.GetArg(3)));
-                    if (target != null) SafeExecute(() => _scrimManager.SetCaptainAsync(team, target.SteamID), "SetCaptain");
+                    if (target != null) _ = _scrimManager.SetCaptainAsync(team, target.SteamID);
                     break;
                 case "set":
                     if (command.ArgCount < 4) return;
@@ -387,57 +387,62 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
 
         switch (subCommand)
         {
-            case "ready": SafeExecute(() => _scrimManager.SetReadyAsync(player.SteamID, true), "SetReady"); break;
-            case "unready": SafeExecute(() => _scrimManager.SetReadyAsync(player.SteamID, false), "SetUnready"); break;
+            case "ready": _ = _scrimManager.SetReadyAsync(player.SteamID, true); break;
+            case "unready": _ = _scrimManager.SetReadyAsync(player.SteamID, false); break;
             case "vote":
                 if (command.ArgCount < 3) return;
-                SafeExecute(() => _scrimManager.VoteMapAsync(player.SteamID, command.GetArg(2)), "VoteMap");
+                _ = _scrimManager.VoteMapAsync(player.SteamID, command.GetArg(2));
                 break;
             case "pick":
                 if (command.ArgCount < 3) return;
                 var pickTarget = Utilities.GetPlayerFromSteamId(ulong.Parse(command.GetArg(2)));
-                if (pickTarget != null) SafeExecute(() => _scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID), "PickPlayer");
+                if (pickTarget != null) _ = _scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID);
                 break;
-            case "ct": SafeExecute(() => _scrimManager.SelectSideAsync(player.SteamID, "ct"), "SelectSideCT"); break;
-            case "t": SafeExecute(() => _scrimManager.SelectSideAsync(player.SteamID, "t"), "SelectSideT"); break;
+            case "ct": _ = _scrimManager.SelectSideAsync(player.SteamID, "ct"); break;
+            case "t": _ = _scrimManager.SelectSideAsync(player.SteamID, "t"); break;
         }
     }
 
     private void OnReadyCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null) return;
-        SafeExecute(() => _scrimManager.SetReadyAsync(player.SteamID, true), "ReadyCommand");
+        _matchReady.SetReady(player.SteamID, true);
+        if (_matchReady.AreAllReady())
+        {
+            Server.PrintToChatAll($" {ChatColors.Green}[Ready]{ChatColors.Default} All players are ready! Match starting...");
+            _ = _scrimManager.StartScrimAsync();
+        }
     }
 
     private void OnUnreadyCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null) return;
-        SafeExecute(() => _scrimManager.SetReadyAsync(player.SteamID, false), "UnreadyCommand");
+        _matchReady.SetReady(player.SteamID, false);
     }
 
     private void OnVoteCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null || command.ArgCount < 2) return;
-        SafeExecute(() => _scrimManager.VoteMapAsync(player.SteamID, command.GetArg(1)), "VoteCommand");
+        _ = _scrimManager.VoteMapAsync(player.SteamID, command.GetArg(1));
     }
 
     private void OnPickCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null || command.ArgCount < 2) return;
         var pickTarget = Utilities.GetPlayerFromSteamId(ulong.Parse(command.GetArg(1)));
-        if (pickTarget != null) SafeExecute(() => _scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID), "PickCommand");
+        if (pickTarget != null) _ = _scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID);
     }
 
     private void OnCtCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null) return;
-        SafeExecute(() => _scrimManager.SelectSideAsync(player.SteamID, "ct"), "CtCommand");
+        _ = _scrimManager.SelectSideAsync(player.SteamID, "ct");
     }
 
     private void OnTCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null) return;
-        SafeExecute(() => _scrimManager.SelectSideAsync(player.SteamID, "t"), "TCommand");
+        _ = _scrimManager.SelectSideAsync(player.SteamID, "t");
     }
 
     private void OnPauseCommand(CCSPlayerController? player, CommandInfo command)
@@ -460,12 +465,12 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
             return;
         }
 
-        SafeExecute(() => _pauseService.RequestPauseAsync(player, type), "PauseCommand");
+        _ = _pauseService.RequestPauseAsync(player, type);
     }
 
     private void OnUnpauseCommand(CCSPlayerController? player, CommandInfo command)
     {
-        SafeExecute(() => _pauseService.RequestUnpauseAsync(player), "UnpauseCommand");
+        _ = _pauseService.RequestUnpauseAsync(player);
     }
 
     private void OnRestoreCommand(CCSPlayerController player, CommandInfo command)

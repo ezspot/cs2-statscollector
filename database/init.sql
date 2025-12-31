@@ -121,6 +121,8 @@ CREATE TABLE IF NOT EXISTS player_stats (
     flash_assisted_kills INT DEFAULT 0,
     wallbang_kills INT DEFAULT 0,
     revenges INT DEFAULT 0,
+    pings INT DEFAULT 0,
+    footsteps INT DEFAULT 0,
     clutches_won INT DEFAULT 0,
     clutches_lost INT DEFAULT 0,
     clutch_points DECIMAL(5,3) DEFAULT 0,
