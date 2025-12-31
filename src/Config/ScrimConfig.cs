@@ -14,6 +14,8 @@ public class ScrimConfig
     public bool KnifeRoundEnabled { get; set; } = true;
     public bool WhitelistEnabled { get; set; } = false;
     public string MatchZyConfigPath { get; set; } = "/cfg";
+    public string LiveConfigPath { get; set; } = "live.cfg";
+    public string KnifeConfigPath { get; set; } = "knife.cfg";
     public int VoteTimeoutSeconds { get; set; } = 60;
     public int MaxTacticalPauses { get; set; } = 4;
     public int TacticalPauseDuration { get; set; } = 30;

@@ -150,6 +150,7 @@ public sealed class CombatStats
     public int CurrentRoundKills { get => _currentRoundKills; set { _currentRoundKills = value; _markDirty(); } }
     public int CurrentRoundDeaths { get => _currentRoundDeaths; set { _currentRoundDeaths = value; _markDirty(); } }
     public int CurrentRoundShotsFired { get => _currentRoundShotsFired; set { _currentRoundShotsFired = value; _markDirty(); } }
+    public int ShotsFiredWhileStationary { get; set; } // Auto-property since we just need simple tracking for now, or backing field if we want dirty flag logic
 
     public int MultiKillNades { get => _multiKillNades; set { _multiKillNades = value; _markDirty(); } }
     public int NadeKills { get => _nadeKills; set { _nadeKills = value; _markDirty(); } }

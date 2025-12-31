@@ -26,6 +26,7 @@ using statsCollector.Domain;
 using statsCollector.Infrastructure;
 using statsCollector.Infrastructure.Database;
 using statsCollector.Services;
+using statsCollector.Services.Handlers;
 
 namespace statsCollector;
 
@@ -175,6 +176,11 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddSingleton<IMatchReadyService, MatchReadyService>();
         services.AddSingleton<IPluginLifecycleService, PluginLifecycleService>();
         services.AddSingleton<IGameEventHandlerService, GameEventHandlerService>();
+
+        // Game Handlers
+        services.AddSingleton<IGameHandler, MatchFlowHandler>();
+        services.AddSingleton<IGameHandler, PlayerLifecycleHandler>();
+        services.AddSingleton<IGameHandler, CombatHandler>();
 
         _serviceProvider = services.BuildServiceProvider();
 

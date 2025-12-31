@@ -257,12 +257,12 @@ public class ScrimManager : IScrimManager
 
         if (_config.Scrim.KnifeRoundEnabled)
         {
-            await _configLoader.LoadAndExecuteConfigAsync("knife.cfg");
+            await _configLoader.LoadAndExecuteConfigAsync(_config.Scrim.KnifeConfigPath);
             Server.NextFrame(() => Server.PrintToChatAll(" [Scrim] Knife round started!"));
         }
         else
         {
-            var liveCfg = _playersPerTeam == 2 ? "live_wingman.cfg" : "live.cfg";
+            var liveCfg = _playersPerTeam == 2 ? "live_wingman.cfg" : _config.Scrim.LiveConfigPath;
             await _configLoader.LoadAndExecuteConfigAsync(liveCfg);
             Server.NextFrame(() => Server.PrintToChatAll(" [Scrim] Match is LIVE!"));
             if (_selectedMap != null) await _matchTracker.StartMatchAsync(_selectedMap);

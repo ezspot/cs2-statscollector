@@ -403,6 +403,13 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             {
                 stats.Combat.ShotsFired++;
                 stats.Combat.CurrentRoundShotsFired++;
+                
+                if (player.PlayerPawn.Value != null)
+                {
+                    var velocity = player.PlayerPawn.Value.AbsVelocity.Length();
+                    if (velocity < 15.0f) stats.Combat.ShotsFiredWhileStationary++;
+                }
+
                 stats.Weapon.RecordShot(weapon);
                 if (GrenadeWeaponNames.Contains(weaponLower))
                 {

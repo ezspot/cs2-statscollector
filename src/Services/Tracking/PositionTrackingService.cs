@@ -193,7 +193,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task BulkTrackKillPositionsAsync(int? matchId, IEnumerable<KillPositionEvent> events, CancellationToken cancellationToken = default)
+        public async Task BulkTrackKillPositionsAsync(int? matchId, IEnumerable<KillPositionEvent> events, CancellationToken cancellationToken = default)
     {
         var eventList = events.ToList();
         if (eventList.Count == 0) return;
@@ -204,20 +204,20 @@ public sealed class PositionTrackingService : IPositionTrackingService
             _logger.LogDebug("Starting bulk track for {Count} kill positions (MatchId: {MatchId})", eventList.Count, matchId);
             try
             {
-                const string sqlBase = """
-                    INSERT INTO kill_positions 
+                var sb = new System.Text.StringBuilder();
+                sb.Append(@"INSERT INTO kill_positions 
                     (match_id, killer_steam_id, victim_steam_id, killer_pos, killer_z, 
                      victim_pos, victim_z, weapon_used, is_headshot, is_wallbang,
                      distance, killer_team, victim_team, map_name, round_number, round_time_seconds)
-                    VALUES 
-                    """;
+                    VALUES ");
 
-                var rows = new List<string>();
                 var parameters = new DynamicParameters();
                 for (int i = 0; i < eventList.Count; i++)
                 {
+                    if (i > 0) sb.Append(',');
                     var e = eventList[i];
-                    rows.Add($"(@MatchId{i}, @KS{i}, @VS{i}, POINT(@KX{i}, @KY{i}), @KZ{i}, POINT(@VX{i}, @VY{i}), @VZ{i}, @W{i}, @HS{i}, @WB{i}, @D{i}, @KT{i}, @VT{i}, @M{i}, @RN{i}, @RT{i})");
+                    sb.Append($"(@MatchId{i}, @KS{i}, @VS{i}, POINT(@KX{i}, @KY{i}), @KZ{i}, POINT(@VX{i}, @VY{i}), @VZ{i}, @W{i}, @HS{i}, @WB{i}, @D{i}, @KT{i}, @VT{i}, @M{i}, @RN{i}, @RT{i})");
+                    
                     parameters.Add($"MatchId{i}", matchId);
                     parameters.Add($"KS{i}", e.KillerSteamId);
                     parameters.Add($"VS{i}", e.VictimSteamId);
@@ -238,10 +238,8 @@ public sealed class PositionTrackingService : IPositionTrackingService
                     parameters.Add($"RT{i}", e.RoundTime);
                 }
 
-                var sql = sqlBase + string.Join(", ", rows);
-
                 await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-                var count = await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)).ConfigureAwait(false);
+                var count = await connection.ExecuteAsync(new CommandDefinition(sb.ToString(), parameters, cancellationToken: ct)).ConfigureAwait(false);
                 _logger.LogDebug("Successfully tracked {Count} kill positions using bulk insert", count);
                 Instrumentation.PositionEventsTrackedCounter.Add(count, new KeyValuePair<string, object?>("type", "kill"));
             }
@@ -298,18 +296,18 @@ public sealed class PositionTrackingService : IPositionTrackingService
             _logger.LogDebug("Starting bulk track for {Count} death positions (MatchId: {MatchId})", eventList.Count, matchId);
             try
             {
-                const string sqlBase = """
-                    INSERT INTO death_positions 
+                var sb = new System.Text.StringBuilder();
+                sb.Append(@"INSERT INTO death_positions 
                     (match_id, steam_id, pos, z, cause_of_death, is_headshot, team, map_name, round_number, round_time_seconds)
-                    VALUES 
-                    """;
+                    VALUES ");
 
-                var rows = new List<string>();
                 var parameters = new DynamicParameters();
                 for (int i = 0; i < eventList.Count; i++)
                 {
+                    if (i > 0) sb.Append(',');
                     var e = eventList[i];
-                    rows.Add($"(@MatchId{i}, @S{i}, POINT(@X{i}, @Y{i}), @Z{i}, @C{i}, @HS{i}, @T{i}, @M{i}, @RN{i}, @RT{i})");
+                    sb.Append($"(@MatchId{i}, @S{i}, POINT(@X{i}, @Y{i}), @Z{i}, @C{i}, @HS{i}, @T{i}, @M{i}, @RN{i}, @RT{i})");
+                    
                     parameters.Add($"MatchId{i}", matchId);
                     parameters.Add($"S{i}", e.SteamId);
                     parameters.Add($"X{i}", e.X);
@@ -323,10 +321,8 @@ public sealed class PositionTrackingService : IPositionTrackingService
                     parameters.Add($"RT{i}", e.RoundTime);
                 }
 
-                var sql = sqlBase + string.Join(", ", rows);
-
                 await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-                var count = await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)).ConfigureAwait(false);
+                var count = await connection.ExecuteAsync(new CommandDefinition(sb.ToString(), parameters, cancellationToken: ct)).ConfigureAwait(false);
                 _logger.LogDebug("Successfully tracked {Count} death positions using bulk insert", count);
                 Instrumentation.PositionEventsTrackedCounter.Add(count, new KeyValuePair<string, object?>("type", "death"));
             }
@@ -391,26 +387,39 @@ public sealed class PositionTrackingService : IPositionTrackingService
             _logger.LogDebug("Starting bulk track for {Count} utility positions (MatchId: {MatchId})", eventList.Count, matchId);
             try
             {
-                const string sql = """
-                    INSERT INTO utility_positions 
+                var sb = new System.Text.StringBuilder();
+                sb.Append(@"INSERT INTO utility_positions 
                     (match_id, steam_id, throw_pos, throw_z, land_pos, land_z,
                      utility_type, opponents_affected, teammates_affected, damage,
                      map_name, round_number, round_time_seconds)
-                    VALUES 
-                    (@MatchId, @SteamId, POINT(@ThrowX, @ThrowY), @ThrowZ, POINT(@LandX, @LandY), @LandZ,
-                     @UtilityType, @OpponentsAffected, @TeammatesAffected, @Damage,
-                     @MapName, @RoundNumber, @RoundTime)
-                    """;
+                    VALUES ");
 
-                var parameters = eventList.Select(e => new {
-                    MatchId = matchId,
-                    e.SteamId, e.ThrowX, e.ThrowY, e.ThrowZ, e.LandX, e.LandY, e.LandZ,
-                    e.UtilityType, e.OpponentsAffected, e.TeammatesAffected, e.Damage,
-                    e.MapName, e.RoundNumber, e.RoundTime
-                });
+                var parameters = new DynamicParameters();
+                for (int i = 0; i < eventList.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    var e = eventList[i];
+                    sb.Append($"(@MatchId{i}, @SteamId{i}, POINT(@ThrowX{i}, @ThrowY{i}), @ThrowZ{i}, POINT(@LandX{i}, @LandY{i}), @LandZ{i}, @UtilityType{i}, @OpponentsAffected{i}, @TeammatesAffected{i}, @Damage{i}, @MapName{i}, @RoundNumber{i}, @RoundTime{i})");
+                    
+                    parameters.Add($"MatchId{i}", matchId);
+                    parameters.Add($"SteamId{i}", e.SteamId);
+                    parameters.Add($"ThrowX{i}", e.ThrowX);
+                    parameters.Add($"ThrowY{i}", e.ThrowY);
+                    parameters.Add($"ThrowZ{i}", e.ThrowZ);
+                    parameters.Add($"LandX{i}", e.LandX);
+                    parameters.Add($"LandY{i}", e.LandY);
+                    parameters.Add($"LandZ{i}", e.LandZ);
+                    parameters.Add($"UtilityType{i}", e.UtilityType);
+                    parameters.Add($"OpponentsAffected{i}", e.OpponentsAffected);
+                    parameters.Add($"TeammatesAffected{i}", e.TeammatesAffected);
+                    parameters.Add($"Damage{i}", e.Damage);
+                    parameters.Add($"MapName{i}", e.MapName);
+                    parameters.Add($"RoundNumber{i}", e.RoundNumber);
+                    parameters.Add($"RoundTime{i}", e.RoundTime);
+                }
 
                 await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-                var count = await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)).ConfigureAwait(false);
+                var count = await connection.ExecuteAsync(new CommandDefinition(sb.ToString(), parameters, cancellationToken: ct)).ConfigureAwait(false);
                 _logger.LogDebug("Successfully tracked {Count} utility positions", count);
                 Instrumentation.PositionEventsTrackedCounter.Add(count, new KeyValuePair<string, object?>("type", "utility"));
             }

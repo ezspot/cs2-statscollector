@@ -11,7 +11,7 @@
     <PackageProjectUrl>https://github.com/ezspot/cs2-statscollector</PackageProjectUrl>
     <Company>Anders 'spot' Hagen</Company>
     <Description>Comprehensive CS2 stats collection to MySQL</Description>
-    <Version>2.0.0</Version>
+    <Version>2.1.0</Version>
     <SuppressTrimAnalysisWarnings>true</SuppressTrimAnalysisWarnings>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
@@ -35,5 +35,11 @@
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.9.0" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.9.0" />
     <PackageReference Include="Stateless" Version="5.20.0" />
+  </ItemGroup>
+  
+  <ItemGroup>
+    <None Update="cfg\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 </Project>

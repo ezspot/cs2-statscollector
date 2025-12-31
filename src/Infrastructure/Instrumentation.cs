@@ -7,7 +7,7 @@ namespace statsCollector.Infrastructure;
 public static class Instrumentation
 {
     public const string ServiceName = "cs2-statscollector";
-    public const string ServiceVersion = "2.0.0";
+    public const string ServiceVersion = "2.1.0";
 
     public static readonly ActivitySource ActivitySource = new(ServiceName, ServiceVersion);
     public static readonly Meter Meter = new(ServiceName, ServiceVersion);
