@@ -300,7 +300,7 @@ public sealed class StatsRepository : IStatsRepository
                 rounds_played, kd_ratio, headshot_percentage, opening_kill_ratio, trade_kill_ratio,
                 grenade_effectiveness_rate, flash_effectiveness_rate, utility_usage_per_round,
                 average_money_spent_per_round, performance_score, top_weapon_by_kills, survival_rating, utility_score, clutch_points,
-                flash_assisted_kills, wallbang_kills
+                flash_assisted_kills, wallbang_kills, idempotency_key
             ) VALUES (
                 @MatchId, @SteamId, @CalculatedAt, @Name, @Rating2, @KillsPerRound, @DeathsPerRound, @ImpactScore, @KastPercentage,
                 @AverageDamagePerRound, @UtilityImpactScore, @ClutchSuccessRate, @TradeSuccessRate, 
@@ -308,8 +308,25 @@ public sealed class StatsRepository : IStatsRepository
                 @RoundsPlayed, @KdRatio, @HeadshotPercentage, @OpeningKillRatio, @TradeKillRatio,
                 @GrenadeEffectivenessRate, @FlashEffectivenessRate, @UtilityUsagePerRound,
                 @AverageMoneySpentPerRound, @PerformanceScore, @TopWeaponByKills, @SurvivalRating, @UtilityScore, @ClutchPoints,
-                @FlashAssistedKills, @WallbangKills
-            );
+                @FlashAssistedKills, @WallbangKills, @IdempotencyKey
+            ) ON DUPLICATE KEY UPDATE
+                calculated_at = VALUES(calculated_at), name = VALUES(name), rating2 = VALUES(rating2),
+                kills_per_round = VALUES(kills_per_round), deaths_per_round = VALUES(deaths_per_round),
+                impact_score = VALUES(impact_score), kast_percentage = VALUES(kast_percentage),
+                average_damage_per_round = VALUES(average_damage_per_round), utility_impact_score = VALUES(utility_impact_score),
+                clutch_success_rate = VALUES(clutch_success_rate), trade_success_rate = VALUES(trade_success_rate),
+                trade_windows_missed = VALUES(trade_windows_missed), flash_waste = VALUES(flash_waste),
+                entry_success_rate = VALUES(entry_success_rate), rounds_played = VALUES(rounds_played),
+                kd_ratio = VALUES(kd_ratio), headshot_percentage = VALUES(headshot_percentage),
+                opening_kill_ratio = VALUES(opening_kill_ratio), trade_kill_ratio = VALUES(trade_kill_ratio),
+                grenade_effectiveness_rate = VALUES(grenade_effectiveness_rate),
+                flash_effectiveness_rate = VALUES(flash_effectiveness_rate),
+                utility_usage_per_round = VALUES(utility_usage_per_round),
+                average_money_spent_per_round = VALUES(average_money_spent_per_round),
+                performance_score = VALUES(performance_score), top_weapon_by_kills = VALUES(top_weapon_by_kills),
+                survival_rating = VALUES(survival_rating), utility_score = VALUES(utility_score),
+                clutch_points = VALUES(clutch_points), flash_assisted_kills = VALUES(flash_assisted_kills),
+                wallbang_kills = VALUES(wallbang_kills);
             """;
 
         await using var connection = await _connectionFactory.CreateConnectionAsync(cancellationToken);
@@ -375,7 +392,8 @@ public sealed class StatsRepository : IStatsRepository
                 s.UtilityScore,
                 s.ClutchPoints,
                 s.FlashAssistedKills,
-                s.WallbangKills
+                s.WallbangKills,
+                IdempotencyKey = s.MatchUuid != null ? $"{s.MatchUuid}_{s.RoundNumber}_{s.SteamId}" : null
             }).ToList();
 
             _logger.LogDebug("Executing insertAdvancedAnalyticsSql for {Count} records", advancedData.Count);

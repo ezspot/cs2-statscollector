@@ -21,6 +21,7 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
     private readonly IPositionPersistenceService _positionPersistence;
     private readonly IMatchTrackingService _matchTracker;
     private readonly IMapDataService _mapData;
+    private readonly ITaskTracker _taskTracker;
 
     private DateTime _roundStartUtc;
     private int _currentRoundNumber;
@@ -30,13 +31,15 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
         ILogger<UtilityEventProcessor> logger,
         IPositionPersistenceService positionPersistence,
         IMatchTrackingService matchTracker,
-        IMapDataService mapData)
+        IMapDataService mapData,
+        ITaskTracker taskTracker)
     {
         _playerSessions = playerSessions;
         _logger = logger;
         _positionPersistence = positionPersistence;
         _matchTracker = matchTracker;
         _mapData = mapData;
+        _taskTracker = taskTracker;
     }
 
     public void OnRoundStart(RoundContext context)
@@ -128,7 +131,7 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
                 if (player.PlayerPawn.Value != null)
                 {
                     var matchId = _matchTracker?.CurrentMatch?.MatchId;
-                    _ = _positionPersistence.EnqueueAsync(new UtilityPositionEvent(
+                    _taskTracker.Track("UtilityPositionEnqueue", _positionPersistence.EnqueueAsync(new UtilityPositionEvent(
                         matchId,
                         player.SteamID,
                         player.PlayerPawn.Value.AbsOrigin?.X ?? 0,
@@ -142,7 +145,7 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
                         CounterStrikeSharp.API.Server.MapName,
                         _currentRoundNumber,
                         (int)(DateTime.UtcNow - _roundStartUtc).TotalSeconds
-                    ), CancellationToken.None);
+                    ), CancellationToken.None));
                 }
 
                 _playerSessions.MutatePlayer(player.SteamID, stats =>

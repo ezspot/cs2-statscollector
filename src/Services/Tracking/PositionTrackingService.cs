@@ -81,6 +81,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
     private readonly ResiliencePipeline _resiliencePipeline;
     private readonly IPlayerSessionService _playerSessions;
     private readonly IPositionPersistenceService _positionPersistence;
+    private readonly ITaskTracker _taskTracker;
     private int _tickCount;
     private const int TrackIntervalTicks = 128; // Track every 1 second at 128 tick
 
@@ -89,13 +90,15 @@ public sealed class PositionTrackingService : IPositionTrackingService
         ResiliencePipelineProvider<string> pipelineProvider,
         ILogger<PositionTrackingService> logger,
         IPlayerSessionService playerSessions,
-        IPositionPersistenceService positionPersistence)
+        IPositionPersistenceService positionPersistence,
+        ITaskTracker taskTracker)
     {
         _connectionFactory = connectionFactory;
         _logger = logger;
         _resiliencePipeline = pipelineProvider.GetPipeline("database");
         _playerSessions = playerSessions;
         _positionPersistence = positionPersistence;
+        _taskTracker = taskTracker;
     }
 
     public void OnTick()
@@ -136,7 +139,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
             {
                 var batch = new PlayerPositionSnapshot[actualCount];
                 Array.Copy(positions, batch, actualCount);
-                _ = _positionPersistence.EnqueueAsync(new PositionTickEvent(CounterStrikeSharp.API.Server.MapName, batch), CancellationToken.None);
+                _taskTracker.Track("PositionTickEnqueue", _positionPersistence.EnqueueAsync(new PositionTickEvent(CounterStrikeSharp.API.Server.MapName, batch), CancellationToken.None));
             }
         }
         catch (Exception ex)

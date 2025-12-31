@@ -14,24 +14,28 @@ public sealed class PlayerLifecycleHandler : IGameHandler
     private readonly IScrimManager _scrimManager;
     private readonly IMatchTrackingService _matchTracker;
     private readonly IStatsRepository _statsRepository;
+    private readonly ITaskTracker _taskTracker;
 
     public PlayerLifecycleHandler(
         ILogger<PlayerLifecycleHandler> logger,
         IPlayerSessionService playerSessions,
         IScrimManager scrimManager,
         IMatchTrackingService matchTracker,
-        IStatsRepository statsRepository)
+        IStatsRepository statsRepository,
+        ITaskTracker taskTracker)
     {
         _logger = logger;
         _playerSessions = playerSessions;
         _scrimManager = scrimManager;
         _matchTracker = matchTracker;
         _statsRepository = statsRepository;
+        _taskTracker = taskTracker;
     }
 
     public void Register(BasePlugin plugin)
     {
         plugin.RegisterEventHandler<EventPlayerConnect>(OnPlayerConnect);
+        plugin.RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
         plugin.RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
         plugin.RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
         plugin.RegisterEventHandler<EventPlayerTeam>(OnPlayerTeam);
@@ -39,9 +43,22 @@ public sealed class PlayerLifecycleHandler : IGameHandler
 
     private HookResult OnPlayerConnect(EventPlayerConnect @event, GameEventInfo info)
     {
+        // Early connect - SteamID might not be fully ready yet in some environments
         var player = @event.GetPlayerOrDefault("userid");
         if (player != null && !player.IsBot && player.SteamID != 0)
         {
+            _playerSessions.EnsurePlayer(player.SteamID, player.PlayerName);
+        }
+        return HookResult.Continue;
+    }
+
+    private HookResult OnPlayerConnectFull(EventPlayerConnectFull @event, GameEventInfo info)
+    {
+        // Full connect - SteamID is guaranteed to be valid now
+        var player = @event.GetPlayerOrDefault("userid");
+        if (player != null && !player.IsBot && player.SteamID != 0)
+        {
+            _logger.LogInformation("Player {Name} fully connected. SteamID: {SteamID}", player.PlayerName, player.SteamID);
             _playerSessions.EnsurePlayer(player.SteamID, player.PlayerName);
         }
         return HookResult.Continue;
@@ -53,15 +70,15 @@ public sealed class PlayerLifecycleHandler : IGameHandler
         if (player != null && !player.IsBot)
         {
             _scrimManager.HandleDisconnect(player.SteamID);
-            _ = SavePlayerStatsOnDisconnectAsync(player);
+            _taskTracker.Track("SaveStatsOnDisconnect", SavePlayerStatsOnDisconnectAsync(player));
         }
         return HookResult.Continue;
     }
 
     private async Task SavePlayerStatsOnDisconnectAsync(CCSPlayerController player)
     {
-        var matchId = _matchTracker.CurrentMatch?.MatchId;
-        if (_playerSessions.TryGetSnapshot(player.SteamID, out var snapshot, matchId))
+        var match = _matchTracker.CurrentMatch;
+        if (_playerSessions.TryGetSnapshot(player.SteamID, out var snapshot, match?.MatchId, match?.MatchUuid))
         {
             await _statsRepository.UpsertPlayerAsync(snapshot, default);
             _playerSessions.TryRemovePlayer(player.SteamID, out _);

@@ -23,6 +23,7 @@ public sealed class MatchFlowHandler : IGameHandler
     private readonly IRoundBackupService _roundBackup;
     private readonly IOptionsMonitor<PluginConfig> _configMonitor;
     private readonly IDamageReportService _damageReport;
+    private readonly ITaskTracker _taskTracker;
     
     private PluginConfig _config => _configMonitor.CurrentValue;
     private int _currentRoundNumber = 0;
@@ -38,7 +39,8 @@ public sealed class MatchFlowHandler : IGameHandler
         IPauseService pauseService,
         IRoundBackupService roundBackup,
         IOptionsMonitor<PluginConfig> configMonitor,
-        IDamageReportService damageReport)
+        IDamageReportService damageReport,
+        ITaskTracker taskTracker)
     {
         _logger = logger;
         _processors = processors;
@@ -51,11 +53,13 @@ public sealed class MatchFlowHandler : IGameHandler
         _roundBackup = roundBackup;
         _configMonitor = configMonitor;
         _damageReport = damageReport;
+        _taskTracker = taskTracker;
     }
 
     public void Register(BasePlugin plugin)
     {
         plugin.RegisterEventHandler<EventRoundStart>(OnRoundStart);
+        plugin.RegisterEventHandler<EventRoundFreezeEnd>(OnRoundFreezeEnd);
         plugin.RegisterEventHandler<EventRoundEnd>(OnRoundEnd);
         plugin.RegisterEventHandler<EventRoundAnnounceMatchStart>(OnRoundAnnounceMatchStart);
     }
@@ -64,7 +68,7 @@ public sealed class MatchFlowHandler : IGameHandler
     {
         _logger.LogInformation("Match start announced. Live tracking enabled.");
         _currentRoundNumber = 1;
-        _matchTracker.StartMatchAsync(Server.MapName).ConfigureAwait(false);
+        _taskTracker.Track("StartMatch", _matchTracker.StartMatchAsync(Server.MapName));
         return HookResult.Continue;
     }
 
@@ -74,10 +78,31 @@ public sealed class MatchFlowHandler : IGameHandler
         
         _damageReport.ResetRound();
         _currentRoundNumber = @event.GetIntValue("round_number", 0);
-        var roundStartUtc = DateTime.UtcNow;
+        
+        // We use RoundFreezeEnd for actual start timing, but reset stats here
+        _playerSessions.ForEachPlayer(stats =>
+        {
+            stats.ResetRoundStats();
+        });
 
+        _roundBackup.CreateSnapshot(_currentRoundNumber);
+
+        if (_matchTracker.CurrentMatch != null)
+        {
+            _taskTracker.Track("EnqueueStartRound", _matchLifecyclePersistence.EnqueueStartRoundAsync(_matchTracker.CurrentMatch.MatchId, _currentRoundNumber));
+        }
+
+        return HookResult.Continue;
+    }
+
+    private HookResult OnRoundFreezeEnd(EventRoundFreezeEnd @event, GameEventInfo info)
+    {
+        if (_config.DeathmatchMode) return HookResult.Continue;
+
+        var roundStartUtc = DateTime.UtcNow;
         var ctAlive = 0;
         var tAlive = 0;
+        
         _playerSessions.ForEachPlayer(stats =>
         {
             if (stats.CurrentTeam == PlayerTeam.CounterTerrorist) ctAlive++;
@@ -88,13 +113,6 @@ public sealed class MatchFlowHandler : IGameHandler
         foreach (var processor in _processors)
         {
             processor.OnRoundStart(context);
-        }
-
-        _roundBackup.CreateSnapshot(_currentRoundNumber);
-
-        if (_matchTracker.CurrentMatch != null)
-        {
-            _ = _matchLifecyclePersistence.EnqueueStartRoundAsync(_matchTracker.CurrentMatch.MatchId, _currentRoundNumber);
         }
 
         _playerSessions.ForEachPlayer(stats =>
@@ -108,10 +126,9 @@ public sealed class MatchFlowHandler : IGameHandler
                 stats.Economy.RoundStartMoney = player.InGameMoneyServices.Account;
                 stats.Economy.EquipmentValueStart = stats.Economy.EquipmentValue;
             }
-            
-            stats.ResetRoundStats();
         });
 
+        _logger.LogInformation("Round {Round} Freeze End. Timing started.", _currentRoundNumber);
         return HookResult.Continue;
     }
 
@@ -155,17 +172,17 @@ public sealed class MatchFlowHandler : IGameHandler
         
         if (_matchTracker.CurrentRoundId != null)
         {
-            _ = _matchLifecyclePersistence.EnqueueEndRoundAsync(_matchTracker.CurrentRoundId.Value, winningTeamInt, winReason);
+            _taskTracker.Track("EnqueueEndRound", _matchLifecyclePersistence.EnqueueEndRoundAsync(_matchTracker.CurrentRoundId.Value, winningTeamInt, winReason));
         }
 
-        _ = SaveStatsAtRoundEndAsync();
+        _taskTracker.Track("SaveStatsAtRoundEnd", SaveStatsAtRoundEndAsync());
         return HookResult.Continue;
     }
 
     private async Task SaveStatsAtRoundEndAsync()
     {
-        var matchId = _matchTracker.CurrentMatch?.MatchId;
-        var snapshots = _playerSessions.CaptureSnapshots(true, matchId);
+        var match = _matchTracker.CurrentMatch;
+        var snapshots = _playerSessions.CaptureSnapshots(true, match?.MatchId, match?.MatchUuid);
         if (snapshots.Length > 0) await _statsPersistence.EnqueueAsync(snapshots, default);
     }
 }

@@ -20,6 +20,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     private readonly IPlayerSessionService _playerSessions;
     private readonly IPositionTrackingService _positionTracking;
     private readonly IGameEventHandlerService _eventHandler;
+    private readonly ITaskTracker _taskTracker;
     
     private CounterStrikeSharp.API.Modules.Timers.Timer? _autoSaveTimer;
     private BasePlugin? _plugin;
@@ -33,7 +34,8 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         IPositionPersistenceService positionPersistence,
         IPlayerSessionService playerSessions,
         IPositionTrackingService positionTracking,
-        IGameEventHandlerService eventHandler)
+        IGameEventHandlerService eventHandler,
+        ITaskTracker taskTracker)
     {
         _logger = logger;
         _config = config;
@@ -44,6 +46,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         _playerSessions = playerSessions;
         _positionTracking = positionTracking;
         _eventHandler = eventHandler;
+        _taskTracker = taskTracker;
     }
 
     public void Initialize(BasePlugin plugin)
@@ -55,7 +58,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         var autoSaveInterval = Math.Max(30, _config.CurrentValue.AutoSaveSeconds);
         _autoSaveTimer = plugin.AddTimer(autoSaveInterval, () => 
         {
-            _ = SaveAllStatsAsync();
+            _taskTracker.Track("AutoSave", SaveAllStatsAsync());
         }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.REPEAT);
 
         _logger.LogInformation("Plugin lifecycle initialized.");
@@ -95,8 +98,8 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
 
     private async Task SaveAllStatsAsync()
     {
-        var matchId = _matchTracker.CurrentMatch?.MatchId;
-        var snapshots = _playerSessions.CaptureSnapshots(true, matchId);
+        var match = _matchTracker.CurrentMatch;
+        var snapshots = _playerSessions.CaptureSnapshots(true, match?.MatchId, match?.MatchUuid);
         if (snapshots.Length > 0)
         {
             await _statsPersistence.EnqueueAsync(snapshots, CancellationToken.None);

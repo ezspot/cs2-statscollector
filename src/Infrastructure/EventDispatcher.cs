@@ -1,6 +1,4 @@
-using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Threading.Tasks;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
@@ -16,7 +14,7 @@ public interface IEventDispatcher
 
 public sealed class EventDispatcher : IEventDispatcher
 {
-    private readonly ConcurrentDictionary<Type, List<Delegate>> _handlers = new();
+    private readonly ConcurrentDictionary<Type, ImmutableArray<Delegate>> _handlers = new();
     private readonly ILogger<EventDispatcher> _logger;
 
     public EventDispatcher(ILogger<EventDispatcher> logger)
@@ -26,11 +24,10 @@ public sealed class EventDispatcher : IEventDispatcher
 
     public void Subscribe<T>(Func<T, GameEventInfo, HookResult> handler) where T : GameEvent
     {
-        var handlers = _handlers.GetOrAdd(typeof(T), _ => new List<Delegate>());
-        lock (handlers)
-        {
-            handlers.Add(handler);
-        }
+        _handlers.AddOrUpdate(typeof(T), 
+            _ => ImmutableArray.Create<Delegate>(handler),
+            (_, existing) => existing.Add(handler));
+        _logger.LogTrace("Subscribed to event {EventType}", typeof(T).Name);
     }
 
     public HookResult Dispatch<T>(T @event, GameEventInfo info) where T : GameEvent
@@ -41,22 +38,20 @@ public sealed class EventDispatcher : IEventDispatcher
         }
 
         var result = HookResult.Continue;
-        lock (handlers)
+        // handlers is an ImmutableArray, so iteration is thread-safe without locks
+        foreach (var handler in handlers)
         {
-            foreach (var handler in handlers)
+            try
             {
-                try
+                var handlerResult = ((Func<T, GameEventInfo, HookResult>)handler)(@event, info);
+                if (handlerResult == HookResult.Stop || handlerResult == HookResult.Handled)
                 {
-                    var handlerResult = ((Func<T, GameEventInfo, HookResult>)handler)(@event, info);
-                    if (handlerResult == HookResult.Stop || handlerResult == HookResult.Handled)
-                    {
-                        result = handlerResult;
-                    }
+                    result = handlerResult;
                 }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error dispatching event {EventType}", typeof(T).Name);
-                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error dispatching event {EventType}", typeof(T).Name);
             }
         }
         return result;

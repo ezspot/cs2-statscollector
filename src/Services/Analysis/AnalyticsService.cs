@@ -17,7 +17,7 @@ public interface IAnalyticsService
     decimal CalculateUtilityScore(PlayerStats stats);
     decimal CalculatePerformanceScore(PlayerStats stats);
     string GetPlayerRank(decimal performanceScore);
-    PlayerSnapshot CreateSnapshot(PlayerStats stats, int? matchId = null);
+    PlayerSnapshot CreateSnapshot(PlayerStats stats, int? matchId = null, string? matchUuid = null);
 }
 
 public sealed class AnalyticsService : IAnalyticsService
@@ -111,7 +111,7 @@ public sealed class AnalyticsService : IAnalyticsService
         };
     }
 
-    public PlayerSnapshot CreateSnapshot(PlayerStats stats, int? matchId = null)
+    public PlayerSnapshot CreateSnapshot(PlayerStats stats, int? matchId = null, string? matchUuid = null)
     {
         var perfScore = CalculatePerformanceScore(stats);
         var hltvRating = CalculateHLTVRating(stats);
@@ -150,6 +150,7 @@ public sealed class AnalyticsService : IAnalyticsService
 
         return new PlayerSnapshot(
             matchId,
+            matchUuid,
             stats.Round.RoundNumber,
             stats.Round.RoundStartUtc,
             stats.Round.AliveOnTeamAtRoundStart,

@@ -65,7 +65,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         TimeProvider timeProvider,
         IPositionPersistenceService positionPersistence,
         IMatchTrackingService matchTracker,
-        IDamageReportService damageReport)
+        IDamageReportService damageReport,
+        ITaskTracker taskTracker)
     {
         _playerSessions = playerSessions;
         _config = config;
@@ -74,6 +75,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         _positionPersistence = positionPersistence;
         _matchTracker = matchTracker;
         _damageReport = damageReport;
+        _taskTracker = taskTracker;
     }
 
     public void OnRoundStart(RoundContext context)
@@ -151,7 +153,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 if (victim.PlayerPawn.Value != null)
                 {
                     var matchId = _matchTracker?.CurrentMatch?.MatchId;
-                    _ = _positionPersistence.EnqueueAsync(new DeathPositionEvent(
+                    _taskTracker.Track("DeathPositionEnqueue", _positionPersistence.EnqueueAsync(new DeathPositionEvent(
                         matchId,
                         victim.SteamID,
                         victim.PlayerPawn.Value.AbsOrigin?.X ?? 0,
@@ -163,7 +165,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                         Server.MapName,
                         _currentRoundNumber,
                         (int)(now - _currentRoundStartUtc).TotalSeconds
-                    ), CancellationToken.None);
+                    ), CancellationToken.None));
                 }
 
                 _playerSessions.MutatePlayer(victim.SteamID, stats =>
@@ -245,7 +247,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     var killDistance = CalculateDistance(attackerPos, victimPosKill);
                     var matchId = _matchTracker?.CurrentMatch?.MatchId;
 
-                    _ = _positionPersistence.EnqueueAsync(new KillPositionEvent(
+                    _taskTracker.Track("KillPositionEnqueue", _positionPersistence.EnqueueAsync(new KillPositionEvent(
                         matchId,
                         attacker.SteamID,
                         victim.SteamID,
@@ -264,7 +266,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                         Server.MapName,
                         _currentRoundNumber,
                         (int)(now - _currentRoundStartUtc).TotalSeconds
-                    ), CancellationToken.None);
+                    ), CancellationToken.None));
                 }
 
                 _playerSessions.MutatePlayer(attacker.SteamID, stats =>

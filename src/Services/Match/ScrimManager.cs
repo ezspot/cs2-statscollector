@@ -19,7 +19,8 @@ public class ScrimManager : IScrimManager
     private readonly IOptionsMonitor<PluginConfig> _configMonitor;
     private readonly IConfigLoaderService _configLoader;
     private readonly IMatchTrackingService _matchTracker;
-    private readonly IScrimPersistenceService _persistence;
+    private readonly IJsonRecoveryService _recovery;
+    private readonly ITaskTracker _taskTracker;
     private readonly StateMachine<ScrimState, ScrimTrigger> _machine;
 
     private PluginConfig _config => _configMonitor.CurrentValue;
@@ -66,13 +67,15 @@ public class ScrimManager : IScrimManager
         IOptionsMonitor<PluginConfig> configMonitor,
         IConfigLoaderService configLoader,
         IMatchTrackingService matchTracker,
-        IScrimPersistenceService persistence)
+        IJsonRecoveryService recovery,
+        ITaskTracker taskTracker)
     {
         _logger = logger;
         _configMonitor = configMonitor;
         _configLoader = configLoader;
         _matchTracker = matchTracker;
-        _persistence = persistence;
+        _recovery = recovery;
+        _taskTracker = taskTracker;
 
         _playersPerTeam = _config.Scrim.PlayersPerTeam;
         _minReadyPlayers = _config.Scrim.MinReadyPlayers;
@@ -87,7 +90,7 @@ public class ScrimManager : IScrimManager
         {
             _logger.LogInformation("Scrim State Transition: {From} -> {To} via {Trigger}", 
                 transition.Source, transition.Destination, transition.Trigger);
-            _ = SaveCurrentStateAsync();
+            _taskTracker.Track("ScrimStateSave", SaveCurrentStateAsync());
         });
 
         _machine.Configure(ScrimState.Idle)
@@ -152,12 +155,12 @@ public class ScrimManager : IScrimManager
             _selectedMap,
             DateTime.UtcNow
         );
-        await _persistence.SaveStateAsync(data);
+        await _recovery.SaveScrimStateAsync(data);
     }
 
     public async Task RecoverAsync()
     {
-        var data = await _persistence.LoadStateAsync();
+        var data = await _recovery.LoadScrimStateAsync();
         if (data == null)
         {
             _logger.LogWarning("No scrim recovery data found.");
@@ -278,7 +281,7 @@ public class ScrimManager : IScrimManager
     public async Task StopScrimAsync()
     {
         await _machine.FireAsync(ScrimTrigger.StopScrim);
-        await _persistence.ClearStateAsync();
+        await _recovery.ClearScrimStateAsync();
         Server.PrintToChatAll(" [Scrim] Scrim stopped by admin.");
     }
 

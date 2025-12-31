@@ -31,6 +31,7 @@ public interface IGameEventHandlerService
         private readonly IAnalyticsService _analytics;
         private readonly IMatchReadyService _matchReady;
         private readonly IEnumerable<IGameHandler> _handlers;
+        private readonly ITaskTracker _taskTracker;
 
         private PluginConfig _config => _configMonitor.CurrentValue;
 
@@ -43,7 +44,8 @@ public interface IGameEventHandlerService
             IOptionsMonitor<PluginConfig> configMonitor,
             IAnalyticsService analytics,
             IMatchReadyService matchReady,
-            IEnumerable<IGameHandler> handlers)
+            IEnumerable<IGameHandler> handlers,
+            ITaskTracker taskTracker)
         {
             _logger = logger;
             _playerSessions = playerSessions;
@@ -54,6 +56,7 @@ public interface IGameEventHandlerService
             _analytics = analytics;
             _matchReady = matchReady;
             _handlers = handlers;
+            _taskTracker = taskTracker;
         }
 
         public void RegisterEvents(BasePlugin plugin)
@@ -122,22 +125,22 @@ public interface IGameEventHandlerService
 
             switch (subCommand)
             {
-                case "start": _ = _scrimManager.StartScrimAsync(); break;
-                case "stop": _ = _scrimManager.StopScrimAsync(); break;
-                case "recover": _ = _scrimManager.RecoverAsync(); break;
+                case "start": _taskTracker.Track("ScrimStart", _scrimManager.StartScrimAsync()); break;
+                case "stop": _taskTracker.Track("ScrimStop", _scrimManager.StopScrimAsync()); break;
+                case "recover": _taskTracker.Track("ScrimRecover", _scrimManager.RecoverAsync()); break;
                 case "practice":
                     if (command.ArgCount < 3) return;
                     var enable = command.GetArg(2).ToLower() == "on";
-                    _ = _scrimManager.SetPracticeModeAsync(enable);
+                    _taskTracker.Track("ScrimPractice", _scrimManager.SetPracticeModeAsync(enable));
                     break;
                 case "veto":
-                    _ = _scrimManager.StartVetoAsync();
+                    _taskTracker.Track("ScrimVeto", _scrimManager.StartVetoAsync());
                     break;
                 case "setcaptain":
                     if (command.ArgCount < 4) return;
                     var team = int.Parse(command.GetArg(2));
                     var target = Utilities.GetPlayerFromSteamId(ulong.Parse(command.GetArg(3)));
-                    if (target != null) _ = _scrimManager.SetCaptainAsync(team, target.SteamID);
+                    if (target != null) _taskTracker.Track("ScrimSetCaptain", _scrimManager.SetCaptainAsync(team, target.SteamID));
                     break;
                 case "set":
                     if (command.ArgCount < 4) return;
@@ -151,19 +154,19 @@ public interface IGameEventHandlerService
 
         switch (subCommand)
         {
-            case "ready": _ = _scrimManager.SetReadyAsync(player.SteamID, true); break;
-            case "unready": _ = _scrimManager.SetReadyAsync(player.SteamID, false); break;
+            case "ready": _taskTracker.Track("ScrimReady", _scrimManager.SetReadyAsync(player.SteamID, true)); break;
+            case "unready": _taskTracker.Track("ScrimUnready", _scrimManager.SetReadyAsync(player.SteamID, false)); break;
             case "vote":
                 if (command.ArgCount < 3) return;
-                _ = _scrimManager.VoteMapAsync(player.SteamID, command.GetArg(2));
+                _taskTracker.Track("ScrimVote", _scrimManager.VoteMapAsync(player.SteamID, command.GetArg(2)));
                 break;
             case "pick":
                 if (command.ArgCount < 3) return;
                 var pickTarget = Utilities.GetPlayerFromSteamId(ulong.Parse(command.GetArg(2)));
-                if (pickTarget != null) _ = _scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID);
+                if (pickTarget != null) _taskTracker.Track("ScrimPick", _scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID));
                 break;
-            case "ct": _ = _scrimManager.SelectSideAsync(player.SteamID, "ct"); break;
-            case "t": _ = _scrimManager.SelectSideAsync(player.SteamID, "t"); break;
+            case "ct": _taskTracker.Track("ScrimSelectSideCT", _scrimManager.SelectSideAsync(player.SteamID, "ct")); break;
+            case "t": _taskTracker.Track("ScrimSelectSideT", _scrimManager.SelectSideAsync(player.SteamID, "t")); break;
         }
     }
 
@@ -174,7 +177,7 @@ public interface IGameEventHandlerService
         if (_matchReady.AreAllReady())
         {
             Server.PrintToChatAll($" {ChatColors.Green}[Ready]{ChatColors.Default} All players are ready! Match starting...");
-            _ = _scrimManager.StartScrimAsync();
+            _taskTracker.Track("ScrimStart", _scrimManager.StartScrimAsync());
         }
     }
 
@@ -187,26 +190,26 @@ public interface IGameEventHandlerService
     private void OnVoteCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null || command.ArgCount < 2) return;
-        _ = _scrimManager.VoteMapAsync(player.SteamID, command.GetArg(1));
+        _taskTracker.Track("ScrimVote", _scrimManager.VoteMapAsync(player.SteamID, command.GetArg(1)));
     }
 
     private void OnPickCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null || command.ArgCount < 2) return;
         var pickTarget = Utilities.GetPlayerFromSteamId(ulong.Parse(command.GetArg(1)));
-        if (pickTarget != null) _ = _scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID);
+        if (pickTarget != null) _taskTracker.Track("ScrimPick", _scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID));
     }
 
     private void OnCtCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null) return;
-        _ = _scrimManager.SelectSideAsync(player.SteamID, "ct");
+        _taskTracker.Track("ScrimSelectSideCT", _scrimManager.SelectSideAsync(player.SteamID, "ct"));
     }
 
     private void OnTCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null) return;
-        _ = _scrimManager.SelectSideAsync(player.SteamID, "t");
+        _taskTracker.Track("ScrimSelectSideT", _scrimManager.SelectSideAsync(player.SteamID, "t"));
     }
 
     private void OnPauseCommand(CCSPlayerController? player, CommandInfo command)
@@ -229,12 +232,12 @@ public interface IGameEventHandlerService
             return;
         }
 
-        _ = _pauseService.RequestPauseAsync(player, type);
+        _taskTracker.Track("PauseRequest", _pauseService.RequestPauseAsync(player, type));
     }
 
     private void OnUnpauseCommand(CCSPlayerController? player, CommandInfo command)
     {
-        _ = _pauseService.RequestUnpauseAsync(player);
+        _taskTracker.Track("UnpauseRequest", _pauseService.RequestUnpauseAsync(player));
     }
 
     private void OnRestoreCommand(CCSPlayerController player, CommandInfo command)

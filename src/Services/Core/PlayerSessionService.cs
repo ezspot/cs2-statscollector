@@ -17,9 +17,9 @@ public interface IPlayerSessionService
     void MutatePlayer(ulong steamId, Action<PlayerStats> mutation);
     T WithPlayer<T>(ulong steamId, Func<PlayerStats, T> accessor, T defaultValue = default!);
     void ForEachPlayer(Action<PlayerStats> action);
-    PlayerSnapshot[] CaptureSnapshots(bool onlyDirty = false, int? matchId = null);
+    PlayerSnapshot[] CaptureSnapshots(bool onlyDirty = false, int? matchId = null, string? matchUuid = null);
     IReadOnlyCollection<ulong> GetActiveSteamIds();
-    bool TryGetSnapshot(ulong steamId, out PlayerSnapshot snapshot, int? matchId = null);
+    bool TryGetSnapshot(ulong steamId, out PlayerSnapshot snapshot, int? matchId = null, string? matchUuid = null);
 }
 
 public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
@@ -129,7 +129,7 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
         }
     }
 
-    public PlayerSnapshot[] CaptureSnapshots(bool onlyDirty = false, int? matchId = null)
+    public PlayerSnapshot[] CaptureSnapshots(bool onlyDirty = false, int? matchId = null, string? matchUuid = null)
     {
         var snapshots = new List<PlayerSnapshot>();
         foreach (var wrapper in _playerStats.Values)
@@ -139,7 +139,7 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
             {
                 if (!onlyDirty || wrapper.Stats.IsDirty)
                 {
-                    snapshots.Add(_analytics.CreateSnapshot(wrapper.Stats, matchId));
+                    snapshots.Add(_analytics.CreateSnapshot(wrapper.Stats, matchId, matchUuid));
                     if (onlyDirty)
                     {
                         wrapper.Lock.EnterWriteLock();
@@ -164,14 +164,14 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
 
     public IReadOnlyCollection<ulong> GetActiveSteamIds() => _playerStats.Keys.ToArray();
 
-    public bool TryGetSnapshot(ulong steamId, out PlayerSnapshot snapshot, int? matchId = null)
+    public bool TryGetSnapshot(ulong steamId, out PlayerSnapshot snapshot, int? matchId = null, string? matchUuid = null)
     {
         if (_playerStats.TryGetValue(steamId, out var wrapper))
         {
             wrapper.Lock.EnterReadLock();
             try
             {
-                snapshot = _analytics.CreateSnapshot(wrapper.Stats, matchId);
+                snapshot = _analytics.CreateSnapshot(wrapper.Stats, matchId, matchUuid);
                 return true;
             }
             finally

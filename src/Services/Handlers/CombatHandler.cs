@@ -15,6 +15,10 @@ public sealed class CombatHandler : IGameHandler
 
     public void Register(BasePlugin plugin)
     {
+        // Lifecycle and Flow
+        plugin.RegisterEventHandler<EventRoundFreezeEnd>((e, i) => _dispatcher.Dispatch(e, i));
+        plugin.RegisterEventHandler<EventPlayerConnectFull>((e, i) => _dispatcher.Dispatch(e, i));
+
         // Combat Events
         plugin.RegisterEventHandler<EventPlayerDeath>((e, i) => _dispatcher.Dispatch(e, i));
         plugin.RegisterEventHandler<EventPlayerHurt>((e, i) => _dispatcher.Dispatch(e, i));

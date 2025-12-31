@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS match_player_stats (
     kast DECIMAL(5,2) DEFAULT 0,
     FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
     FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
-    INDEX idx_match_player (match_id, steam_id)
+    UNIQUE KEY uq_match_player (match_id, steam_id)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS match_weapon_stats (
@@ -191,7 +191,7 @@ CREATE TABLE IF NOT EXISTS match_weapon_stats (
     hits INT DEFAULT 0,
     FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
     FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
-    INDEX idx_match_weapon (match_id, steam_id, weapon_name)
+    UNIQUE KEY uq_match_weapon (match_id, steam_id, weapon_name)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS weapon_stats (
@@ -240,9 +240,11 @@ CREATE TABLE IF NOT EXISTS player_advanced_analytics (
     clutch_points DECIMAL(5,3) NOT NULL,
     flash_assisted_kills INT DEFAULT 0,
     wallbang_kills INT DEFAULT 0,
+    idempotency_key VARCHAR(100) UNIQUE NULL,
     FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
     UNIQUE KEY uq_player_analytics_steam_calculated (steam_id, calculated_at),
-    INDEX idx_player_advanced_analytics_calculated_at (calculated_at)
+    INDEX idx_player_advanced_analytics_calculated_at (calculated_at),
+    INDEX idx_player_advanced_analytics_idempotency (idempotency_key)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS kill_positions (
