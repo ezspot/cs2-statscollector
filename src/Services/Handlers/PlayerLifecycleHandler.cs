@@ -1,8 +1,9 @@
-using System.Threading.Tasks;
+using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
 using Microsoft.Extensions.Logging;
 using statsCollector.Domain;
+using statsCollector.Infrastructure;
 using statsCollector.Services;
 
 namespace statsCollector.Services.Handlers;
@@ -50,7 +51,7 @@ public sealed class PlayerLifecycleHandler : IGameHandler
             _playerSessions.EnsurePlayer(state);
 
             // If a match is in progress, ensure they are initialized for the current round
-            if (_scrimManager.CurrentState is ScrimState.InProgress or ScrimState.Live)
+            if (_scrimManager.CurrentState is ScrimState.Live)
             {
                 _logger.LogInformation("Late-joiner detected: {Name}. Initializing for active match.", player.PlayerName);
                 _playerSessions.MutatePlayer(player.SteamID, stats => 

@@ -51,19 +51,19 @@ public static class ResiliencePolicies
                         "🔴 DATABASE CIRCUIT BREAKER OPENED - Stats persistence disabled for {Duration}s. " +
                         "Server will continue operating but stats will be lost until circuit recovers.", 
                         args.BreakDuration.TotalSeconds);
-                    Instrumentation.CircuitBreakerStateCounter.Add(1, new("state", "open"));
+                    Instrumentation.CircuitBreakerStateCounter.Add(1, [new KeyValuePair<string, object?>("state", "open")]);
                     return default;
                 },
                 OnClosed = _ =>
                 {
                     logger.LogInformation("🟢 DATABASE CIRCUIT BREAKER CLOSED - Stats persistence restored");
-                    Instrumentation.CircuitBreakerStateCounter.Add(1, new("state", "closed"));
+                    Instrumentation.CircuitBreakerStateCounter.Add(1, [new KeyValuePair<string, object?>("state", "closed")]);
                     return default;
                 },
                 OnHalfOpened = _ =>
                 {
                     logger.LogInformation("🟡 DATABASE CIRCUIT BREAKER HALF-OPEN - Testing connection recovery");
-                    Instrumentation.CircuitBreakerStateCounter.Add(1, new("state", "half_open"));
+                    Instrumentation.CircuitBreakerStateCounter.Add(1, [new KeyValuePair<string, object?>("state", "half_open")]);
                     return default;
                 }
             })

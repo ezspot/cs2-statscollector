@@ -18,11 +18,12 @@ public sealed class UtilityStats
     private int _flashAssists;
     private int _smokeAssists;
     private int _utilitySuccessCount;
+    private int _multiKillNades;
+    private int _nadeKills;
     private int _utilityWasteCount;
-
     private int _timesBlinded;
-    private int _totalBlindTime;
-    private int _totalBlindTimeInflicted;
+    private float _totalBlindTime;
+    private float _totalBlindTimeInflicted;
     private int _utilityDamageTaken;
     private int _effectiveFlashes;
     private int _effectiveSmokes;
@@ -58,8 +59,10 @@ public sealed class UtilityStats
     public int UtilityWasteCount { get => _utilityWasteCount; set { _utilityWasteCount = value; _markDirty(); } }
     public int TimesBlinded { get => _timesBlinded; set { _timesBlinded = value; _markDirty(); } }
     public int TacticalGrenadesThrown { get => _tacticalGrenadesThrown; set { _tacticalGrenadesThrown = value; _markDirty(); } }
-    public int TotalBlindTime { get => _totalBlindTime; set { _totalBlindTime = value; _markDirty(); } }
-    public int TotalBlindTimeInflicted { get => _totalBlindTimeInflicted; set { _totalBlindTimeInflicted = value; _markDirty(); } }
+    public float TotalBlindTime { get => _totalBlindTime; set { _totalBlindTime = value; _markDirty(); } }
+    public float TotalBlindTimeInflicted { get => _totalBlindTimeInflicted; set { _totalBlindTimeInflicted = value; _markDirty(); } }
+    public int MultiKillNades { get => _multiKillNades; set { _multiKillNades = value; _markDirty(); } }
+    public int NadeKills { get => _nadeKills; set { _nadeKills = value; _markDirty(); } }
     public int UtilityDamageTaken { get => _utilityDamageTaken; set { _utilityDamageTaken = value; _markDirty(); } }
     public int EffectiveFlashes { get => _effectiveFlashes; set { _effectiveFlashes = value; _markDirty(); } }
     public int EffectiveSmokes { get => _effectiveSmokes; set { _effectiveSmokes = value; _markDirty(); } }
@@ -71,7 +74,10 @@ public sealed class UtilityStats
         _flashbangsThrown = _smokesThrown = _heGrenadesThrown = _molotovsThrown = _decoysThrown = 0;
         _utilityDamage = _enemiesBlinded = _teammatesBlinded = _blindDuration = 0;
         _flashAssists = _smokeAssists = _utilitySuccessCount = _utilityWasteCount = 0;
-        _timesBlinded = _totalBlindTime = _totalBlindTimeInflicted = _utilityDamageTaken = 0;
+        _timesBlinded = 0;
+        _totalBlindTime = 0f;
+        _totalBlindTimeInflicted = 0f;
+        _utilityDamageTaken = 0;
         _effectiveFlashes = _effectiveSmokes = _effectiveHeGrenades = _effectiveMolotovs = 0;
         _tacticalGrenadesThrown = 0;
         _flashAssistDuration = 0;

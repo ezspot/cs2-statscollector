@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
@@ -7,44 +8,141 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.ObjectPool;
 using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public record PositionEvent(string? MatchUuid = null);
+public abstract class PositionEvent
+{
+    public string? MatchUuid { get; set; }
+    public abstract void Reset();
+}
 
-public record KillPositionEvent(
-    string? MatchUuid,
-    ulong KillerSteamId, 
-    ulong VictimSteamId, 
-    float KillerX, float KillerY, float KillerZ,
-    float VictimX, float VictimY, float VictimZ,
-    string Weapon, bool IsHeadshot, bool IsWallbang,
-    float Distance, int KillerTeam, int VictimTeam,
-    string MapName, int RoundNumber, int RoundTime) : PositionEvent(MatchUuid);
+public sealed class KillPositionEvent : PositionEvent
+{
+    public ulong KillerSteamId { get; set; }
+    public ulong VictimSteamId { get; set; }
+    public float KillerX { get; set; }
+    public float KillerY { get; set; }
+    public float KillerZ { get; set; }
+    public float VictimX { get; set; }
+    public float VictimY { get; set; }
+    public float VictimZ { get; set; }
+    public string Weapon { get; set; } = string.Empty;
+    public bool IsHeadshot { get; set; }
+    public bool IsWallbang { get; set; }
+    public float Distance { get; set; }
+    public int KillerTeam { get; set; }
+    public int VictimTeam { get; set; }
+    public string MapName { get; set; } = string.Empty;
+    public int RoundNumber { get; set; }
+    public int RoundTime { get; set; }
 
-public record DeathPositionEvent(
-    string? MatchUuid,
-    ulong SteamId, float X, float Y, float Z,
-    string CauseOfDeath, bool IsHeadshot, int Team,
-    string MapName, int RoundNumber, int RoundTime) : PositionEvent(MatchUuid);
+    public override void Reset()
+    {
+        MatchUuid = null;
+        KillerSteamId = 0;
+        VictimSteamId = 0;
+        KillerX = KillerY = KillerZ = 0;
+        VictimX = VictimY = VictimZ = 0;
+        Weapon = string.Empty;
+        IsHeadshot = false;
+        IsWallbang = false;
+        Distance = 0;
+        KillerTeam = VictimTeam = 0;
+        MapName = string.Empty;
+        RoundNumber = 0;
+        RoundTime = 0;
+    }
+}
 
-public record UtilityPositionEvent(
-    string? MatchUuid,
-    ulong SteamId, float ThrowX, float ThrowY, float ThrowZ,
-    float LandX, float LandY, float LandZ,
-    int UtilityType, int OpponentsAffected, int TeammatesAffected,
-    int Damage, string MapName, int RoundNumber, int RoundTime) : PositionEvent(MatchUuid);
+public sealed class DeathPositionEvent : PositionEvent
+{
+    public ulong SteamId { get; set; }
+    public float X { get; set; }
+    public float Y { get; set; }
+    public float Z { get; set; }
+    public string CauseOfDeath { get; set; } = string.Empty;
+    public bool IsHeadshot { get; set; }
+    public int Team { get; set; }
+    public string MapName { get; set; } = string.Empty;
+    public int RoundNumber { get; set; }
+    public int RoundTime { get; set; }
 
-public record PositionTickEvent(string MapName, string? MatchUuid, PlayerPositionSnapshot[] Positions) : PositionEvent(MatchUuid);
+    public override void Reset()
+    {
+        MatchUuid = null;
+        SteamId = 0;
+        X = Y = Z = 0;
+        CauseOfDeath = string.Empty;
+        IsHeadshot = false;
+        Team = 0;
+        MapName = string.Empty;
+        RoundNumber = 0;
+        RoundTime = 0;
+    }
+}
+
+public sealed class UtilityPositionEvent : PositionEvent
+{
+    public ulong SteamId { get; set; }
+    public float ThrowX { get; set; }
+    public float ThrowY { get; set; }
+    public float ThrowZ { get; set; }
+    public float LandX { get; set; }
+    public float LandY { get; set; }
+    public float LandZ { get; set; }
+    public int UtilityType { get; set; }
+    public int OpponentsAffected { get; set; }
+    public int TeammatesAffected { get; set; }
+    public int Damage { get; set; }
+    public string MapName { get; set; } = string.Empty;
+    public int RoundNumber { get; set; }
+    public int RoundTime { get; set; }
+
+    public override void Reset()
+    {
+        MatchUuid = null;
+        SteamId = 0;
+        ThrowX = ThrowY = ThrowZ = 0;
+        LandX = LandY = LandZ = 0;
+        UtilityType = 0;
+        OpponentsAffected = 0;
+        TeammatesAffected = 0;
+        Damage = 0;
+        MapName = string.Empty;
+        RoundNumber = 0;
+        RoundTime = 0;
+    }
+}
+
+public sealed class PositionTickEvent : PositionEvent
+{
+    public string MapName { get; set; } = string.Empty;
+    public List<PlayerPositionSnapshot> Positions { get; } = new(64);
+
+    public override void Reset()
+    {
+        MatchUuid = null;
+        MapName = string.Empty;
+        Positions.Clear();
+    }
+}
 
 public interface IPositionPersistenceService : IAsyncDisposable
 {
     Task StartAsync(CancellationToken cancellationToken);
     Task EnqueueAsync(PositionEvent @event, CancellationToken cancellationToken);
     Task StopAsync(TimeSpan timeout, CancellationToken cancellationToken);
+    
+    // Pooling methods
+    KillPositionEvent GetKillEvent();
+    DeathPositionEvent GetDeathEvent();
+    UtilityPositionEvent GetUtilityEvent();
+    PositionTickEvent GetTickEvent();
 }
 
 public sealed class PositionPersistenceService : IPositionPersistenceService
@@ -60,6 +158,11 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
     private CancellationTokenSource? _linkedCts;
     private volatile bool _started;
 
+    private readonly ObjectPool<KillPositionEvent> _killPool;
+    private readonly ObjectPool<DeathPositionEvent> _deathPool;
+    private readonly ObjectPool<UtilityPositionEvent> _utilityPool;
+    private readonly ObjectPool<PositionTickEvent> _tickPool;
+
     public PositionPersistenceService(
         IPositionTrackingService repository,
         ILogger<PositionPersistenceService> logger,
@@ -68,6 +171,12 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         _repository = repository;
         _logger = logger;
         
+        var policy = new DefaultObjectPoolProvider();
+        _killPool = policy.Create(new PositionEventPooledObjectPolicy<KillPositionEvent>());
+        _deathPool = policy.Create(new PositionEventPooledObjectPolicy<DeathPositionEvent>());
+        _utilityPool = policy.Create(new PositionEventPooledObjectPolicy<UtilityPositionEvent>());
+        _tickPool = policy.Create(new PositionEventPooledObjectPolicy<PositionTickEvent>());
+
         var capacity = Math.Max(100, config.CurrentValue.PersistenceChannelCapacity);
         _channel = Channel.CreateBounded<PositionEvent>(new BoundedChannelOptions(capacity)
         {
@@ -78,6 +187,16 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         });
     }
 
+    public KillPositionEvent GetKillEvent() => _killPool.Get();
+    public DeathPositionEvent GetDeathEvent() => _deathPool.Get();
+    public UtilityPositionEvent GetUtilityEvent() => _utilityPool.Get();
+    public PositionTickEvent GetTickEvent() => _tickPool.Get();
+
+    private class PositionEventPooledObjectPolicy<T> : IPooledObjectPolicy<T> where T : PositionEvent, new()
+    {
+        public T Create() => new();
+        public bool Return(T obj) { obj.Reset(); return true; }
+    }
     public Task StartAsync(CancellationToken cancellationToken)
     {
         if (_started) return Task.CompletedTask;
@@ -110,6 +229,7 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
             Instrumentation.PositionEventsDroppedCounter.Add(1);
             _logger.LogWarning("Position event dropped: channel full. Type: {Type}", @event.GetType().Name);
             activity?.SetStatus(ActivityStatusCode.Error, "Channel full");
+            ReturnToPool(@event);
         }
         return Task.CompletedTask;
     }
@@ -173,6 +293,12 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
                 {
                     await ProcessBatchInternalAsync(batch, cancellationToken).ConfigureAwait(false);
                     
+                    // Return events to pool after successful processing
+                    foreach (var @event in batch)
+                    {
+                        ReturnToPool(@event);
+                    }
+
                     // Reset delay on success
                     retryDelay = TimeSpan.FromSeconds(5);
                     _logger.LogDebug("Successfully persisted position batch of {Count} items", batch.Count);
@@ -201,6 +327,17 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         catch (Exception ex)
         {
             _logger.LogCritical(ex, "Fatal error in position persistence loop");
+        }
+    }
+
+    private void ReturnToPool(PositionEvent @event)
+    {
+        switch (@event)
+        {
+            case KillPositionEvent k: _killPool.Return(k); break;
+            case DeathPositionEvent d: _deathPool.Return(d); break;
+            case UtilityPositionEvent u: _utilityPool.Return(u); break;
+            case PositionTickEvent t: _tickPool.Return(t); break;
         }
     }
 

@@ -99,6 +99,10 @@ public sealed class StatsRepository : IStatsRepository
             dataTable.Columns.Add("rating2", typeof(decimal));
             dataTable.Columns.Add("adr", typeof(decimal));
             dataTable.Columns.Add("kast", typeof(decimal));
+            dataTable.Columns.Add("entry_kills", typeof(int));
+            dataTable.Columns.Add("entry_deaths", typeof(int));
+            dataTable.Columns.Add("entry_kill_attempts", typeof(int));
+            dataTable.Columns.Add("entry_kill_attempt_wins", typeof(int));
             dataTable.Columns.Add("idempotency_key", typeof(string));
             dataTable.Columns.Add("created_at", typeof(DateTime));
             dataTable.Columns.Add("retry_count", typeof(int));
@@ -109,13 +113,14 @@ public sealed class StatsRepository : IStatsRepository
                 dataTable.Rows.Add(
                     s.MatchUuid, s.SteamId, s.Kills, s.Deaths, s.Assists, s.Headshots, 
                     s.DamageDealt, s.Mvps, s.Score, s.HLTVRating, 
-                    s.AverageDamagePerRound, s.KASTPercentage, 
+                    s.AverageDamagePerRound, s.KASTPercentage,
+                    s.EntryKills, s.EntryDeaths, s.EntryKillAttempts, s.EntryKillAttemptWins,
                     $"{s.MatchUuid}_{s.RoundNumber}_{s.SteamId}_Summary",
                     now, 0
                 );
             }
 
-            await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_match_player_stats_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, kills INT, deaths INT, assists INT, headshots INT, damage_dealt INT, mvps INT, score INT, rating2 DECIMAL(5,2), adr DECIMAL(10,2), kast DECIMAL(5,2), idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);").ConfigureAwait(false);
+            await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_match_player_stats_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, kills INT, deaths INT, assists INT, headshots INT, damage_dealt INT, mvps INT, score INT, rating2 DECIMAL(5,3), adr DECIMAL(10,2), kast DECIMAL(5,2), entry_kills INT, entry_deaths INT, entry_kill_attempts INT, entry_kill_attempt_wins INT, idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);").ConfigureAwait(false);
             
             var bulkCopy = new MySqlBulkCopy(connection)
             {
@@ -126,8 +131,8 @@ public sealed class StatsRepository : IStatsRepository
 
             const string mergeSql = """
                 INSERT INTO match_player_stats 
-                (match_id, steam_id, kills, deaths, assists, headshots, damage_dealt, mvps, score, rating2, adr, kast, idempotency_key, created_at, retry_count)
-                SELECT m.id, t.steam_id, t.kills, t.deaths, t.assists, t.headshots, t.damage_dealt, t.mvps, t.score, t.rating2, t.adr, t.kast, t.idempotency_key, t.created_at, t.retry_count
+                (match_id, steam_id, kills, deaths, assists, headshots, damage_dealt, mvps, score, rating2, adr, kast, entry_kills, entry_deaths, entry_kill_attempts, entry_kill_attempt_wins, idempotency_key, created_at, retry_count)
+                SELECT m.id, t.steam_id, t.kills, t.deaths, t.assists, t.headshots, t.damage_dealt, t.mvps, t.score, t.rating2, t.adr, t.kast, t.entry_kills, t.entry_deaths, t.entry_kill_attempts, t.entry_kill_attempt_wins, t.idempotency_key, t.created_at, t.retry_count
                 FROM temp_match_player_stats_uuid t
                 JOIN matches m ON t.match_uuid = m.match_uuid
                 ON DUPLICATE KEY UPDATE
@@ -135,6 +140,8 @@ public sealed class StatsRepository : IStatsRepository
                     headshots = VALUES(headshots), damage_dealt = VALUES(damage_dealt),
                     mvps = VALUES(mvps), score = VALUES(score), rating2 = VALUES(rating2),
                     adr = VALUES(adr), kast = VALUES(kast),
+                    entry_kills = VALUES(entry_kills), entry_deaths = VALUES(entry_deaths),
+                    entry_kill_attempts = VALUES(entry_kill_attempts), entry_kill_attempt_wins = VALUES(entry_kill_attempt_wins),
                     retry_count = match_player_stats.retry_count + 1;
                 """;
 
@@ -342,6 +349,9 @@ public sealed class StatsRepository : IStatsRepository
         dataTable.Columns.Add("multi_kill_nades", typeof(int));
         dataTable.Columns.Add("nade_kills", typeof(int));
         dataTable.Columns.Add("entry_kills", typeof(int));
+        dataTable.Columns.Add("entry_deaths", typeof(int));
+        dataTable.Columns.Add("entry_kill_attempts", typeof(int));
+        dataTable.Columns.Add("entry_kill_attempt_wins", typeof(int));
         dataTable.Columns.Add("trade_kills", typeof(int));
         dataTable.Columns.Add("traded_deaths", typeof(int));
         dataTable.Columns.Add("high_impact_kills", typeof(int));
@@ -399,7 +409,8 @@ public sealed class StatsRepository : IStatsRepository
                 s.LossBonus, s.RoundStartMoney, s.RoundEndMoney, s.EquipmentValueStart, s.EquipmentValueEnd,
                 s.EnemiesFlashed, s.TeammatesFlashed, s.EffectiveFlashes, s.EffectiveSmokes, s.EffectiveHEGrenades,
                 s.EffectiveMolotovs, s.FlashWaste, s.MultiKillNades, s.NadeKills,
-                s.EntryKills, s.TradeKills, s.TradedDeaths, s.HighImpactKills, s.LowImpactKills, s.TradeOpportunities, s.TradeWindowsMissed, s.MultiKills, s.OpeningDuelsWon, s.OpeningDuelsLost,
+                s.EntryKills, s.EntryDeaths, s.EntryKillAttempts, s.EntryKillAttemptWins,
+                s.TradeKills, s.TradedDeaths, s.HighImpactKills, s.LowImpactKills, s.TradeOpportunities, s.TradeWindowsMissed, s.MultiKills, s.OpeningDuelsWon, s.OpeningDuelsLost,
                 s.Revenges, s.ClutchesWon, s.ClutchesLost, s.ClutchPoints, s.MvpsEliminations, s.MvpsBomb, s.MvpsHostage,
                 s.HeadshotsHit, s.ChestHits, s.StomachHits, s.ArmHits, s.LegHits,
                 s.KDRatio, s.HeadshotPercentage, s.AccuracyPercentage, s.KASTPercentage,
@@ -454,7 +465,9 @@ public sealed class StatsRepository : IStatsRepository
                 effective_flashes = VALUES(effective_flashes), effective_smokes = VALUES(effective_smokes),
                 effective_he_grenades = VALUES(effective_he_grenades), effective_molotovs = VALUES(effective_molotovs),
                 flash_waste = VALUES(flash_waste), multi_kill_nades = VALUES(multi_kill_nades), nade_kills = VALUES(nade_kills),
-                entry_kills = VALUES(entry_kills), trade_kills = VALUES(trade_kills), traded_deaths = VALUES(traded_deaths),
+                entry_kills = VALUES(entry_kills), entry_deaths = VALUES(entry_deaths),
+                entry_kill_attempts = VALUES(entry_kill_attempts), entry_kill_attempt_wins = VALUES(entry_kill_attempt_wins),
+                trade_kills = VALUES(trade_kills), traded_deaths = VALUES(traded_deaths),
                 high_impact_kills = VALUES(high_impact_kills), low_impact_kills = VALUES(low_impact_kills), trade_opportunities = VALUES(trade_opportunities),
                 trade_windows_missed = VALUES(trade_windows_missed), multi_kills = VALUES(multi_kills), opening_duels_won = VALUES(opening_duels_won),
                 opening_duels_lost = VALUES(opening_duels_lost), revenges = VALUES(revenges),

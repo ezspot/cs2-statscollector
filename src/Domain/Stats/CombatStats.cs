@@ -51,6 +51,8 @@ public sealed class CombatStats
     private int _multiKill5;
     private int _entryKills;
     private int _entryDeaths;
+    private int _entryKillAttempts;
+    private int _entryKillAttemptWins;
 
     private int _damageArmor;
     private int _score;
@@ -138,8 +140,11 @@ public sealed class CombatStats
     public int MultiKill3 { get => _multiKill3; set { _multiKill3 = value; _markDirty(); } }
     public int MultiKill4 { get => _multiKill4; set { _multiKill4 = value; _markDirty(); } }
     public int MultiKill5 { get => _multiKill5; set { _multiKill5 = value; _markDirty(); } }
+    public int MultiKills { get => _multiKill2 + _multiKill3 + _multiKill4 + _multiKill5; }
     public int EntryKills { get => _entryKills; set { _entryKills = value; _markDirty(); } }
     public int EntryDeaths { get => _entryDeaths; set { _entryDeaths = value; _markDirty(); } }
+    public int EntryKillAttempts { get => _entryKillAttempts; set { _entryKillAttempts = value; _markDirty(); } }
+    public int EntryKillAttemptWins { get => _entryKillAttemptWins; set { _entryKillAttemptWins = value; _markDirty(); } }
     public int HeadshotsHit { get => _headshotsHit; set { _headshotsHit = value; _markDirty(); } }
     public int ChestHits { get => _chestHits; set { _chestHits = value; _markDirty(); } }
     public int StomachHits { get => _stomachHits; set { _stomachHits = value; _markDirty(); } }
@@ -177,7 +182,7 @@ public sealed class CombatStats
         _revengeKills = _revenges = _dominationKills = _rampageKills = 0;
         _killStreak = _deathStreak = _maxKillStreak = _maxDeathStreak = 0;
         _multiKill2 = _multiKill3 = _multiKill4 = _multiKill5 = 0;
-        _entryKills = _entryDeaths = 0;
+        _entryKills = _entryDeaths = _entryKillAttempts = _entryKillAttemptWins = 0;
         _mvpsEliminations = _mvpsBomb = _mvpsHostage = 0;
         _clutchPoints = 0;
         _headshotsHit = _chestHits = _stomachHits = _armHits = _legHits = 0;

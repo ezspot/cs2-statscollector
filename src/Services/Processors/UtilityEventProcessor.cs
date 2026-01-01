@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Diagnostics;
@@ -198,21 +199,25 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
                 if (playerState.PawnHandle != 0)
                 {
                     var matchUuid = _matchTracker?.CurrentMatch?.MatchUuid;
-                    _ = _positionPersistence.EnqueueAsync(new UtilityPositionEvent(
-                        matchUuid,
-                        playerState.SteamId,
-                        playerState.Position.X,
-                        playerState.Position.Y,
-                        playerState.Position.Z,
-                        @event.GetFloatValue("x", 0),
-                        @event.GetFloatValue("y", 0),
-                        @event.GetFloatValue("z", 0),
-                        (int)type,
-                        0, 0, 0,
-                        CounterStrikeSharp.API.Server.MapName,
-                        _currentRoundNumber,
-                        (int)(DateTime.UtcNow - _roundStartUtc).TotalSeconds
-                    ), CancellationToken.None);
+                    var posEvent = _positionPersistence.GetUtilityEvent();
+                    
+                    posEvent.MatchUuid = matchUuid;
+                    posEvent.SteamId = playerState.SteamId;
+                    posEvent.ThrowX = playerState.Position.X;
+                    posEvent.ThrowY = playerState.Position.Y;
+                    posEvent.ThrowZ = playerState.Position.Z;
+                    posEvent.LandX = @event.GetFloatValue("x", 0);
+                    posEvent.LandY = @event.GetFloatValue("y", 0);
+                    posEvent.LandZ = @event.GetFloatValue("z", 0);
+                    posEvent.UtilityType = (int)type;
+                    posEvent.OpponentsAffected = 0;
+                    posEvent.TeammatesAffected = 0;
+                    posEvent.Damage = 0;
+                    posEvent.MapName = CounterStrikeSharp.API.Server.MapName;
+                    posEvent.RoundNumber = _currentRoundNumber;
+                    posEvent.RoundTime = (int)(DateTime.UtcNow - _roundStartUtc).TotalSeconds;
+
+                    _ = _positionPersistence.EnqueueAsync(posEvent, CancellationToken.None);
                 }
 
                 _playerSessions.MutatePlayer(playerState.SteamId, stats =>

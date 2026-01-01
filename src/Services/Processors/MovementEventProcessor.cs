@@ -62,10 +62,9 @@ public sealed class MovementEventProcessor : IMovementEventProcessor
     private void HandlePlayerFootstep(EventPlayerFootstep @event)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        var playerState = PlayerControllerState.From(player);
-        if (!playerState.IsValid || playerState.IsBot) return;
+        if (player == null || !player.IsValid || player.SteamID == 0 || player.IsBot) return;
 
-        _playerSessions.MutatePlayer(playerState.SteamId, stats =>
+        _playerSessions.MutatePlayer(player.SteamID, stats =>
         {
             stats.Round.Footsteps++;
         });
@@ -74,10 +73,9 @@ public sealed class MovementEventProcessor : IMovementEventProcessor
     private void HandlePlayerJump(EventPlayerJump @event)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        var playerState = PlayerControllerState.From(player);
-        if (!playerState.IsValid || playerState.IsBot) return;
+        if (player == null || !player.IsValid || player.SteamID == 0 || player.IsBot) return;
 
-        _playerSessions.MutatePlayer(playerState.SteamId, stats =>
+        _playerSessions.MutatePlayer(player.SteamID, stats =>
         {
             stats.Round.Jumps++;
         });

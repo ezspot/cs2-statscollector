@@ -3,11 +3,13 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Threading.Channels;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Domain;
+using statsCollector.Infrastructure;
 using System.Text.Json;
 using System.IO;
 
@@ -113,14 +115,14 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
     {
         _logger.LogInformation("Persistence background worker started.");
 
-        var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
         var recoveryTimer = new PeriodicTimer(TimeSpan.FromSeconds(60));
+        var currentBatch = new List<StatsUpdate>(100);
 
         _ = Task.Run(async () =>
         {
             while (await recoveryTimer.WaitForNextTickAsync(stoppingToken))
             {
-                await SaveRecoveryStateAsync();
+                await SaveRecoveryStateAsync(currentBatch);
             }
         }, stoppingToken);
 
@@ -133,11 +135,11 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
 
                 try
                 {
-                    while (_batch.Count < 100 && await _channel.Reader.WaitToReadAsync(cts.Token))
+                    while (currentBatch.Count < 100 && await _channel.Reader.WaitToReadAsync(cts.Token))
                     {
                         if (_channel.Reader.TryRead(out var update))
                         {
-                            _batch.Add(update);
+                            currentBatch.Add(update);
                         }
                     }
                 }
@@ -146,10 +148,10 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                     // Timer hit, proceed to flush batch
                 }
 
-                if (_batch.Count > 0)
+                if (currentBatch.Count > 0)
                 {
-                    await ProcessBatchAsync(_batch, stoppingToken);
-                    _batch.Clear();
+                    await ProcessBatchAsync(currentBatch, stoppingToken);
+                    currentBatch.Clear();
                 }
             }
         }
@@ -163,7 +165,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
         }
     }
 
-    private async Task ProcessBatchAsync(List<StatsUpdate> batch, CancellationToken ct)
+    private async Task ProcessBatchAsync(IReadOnlyList<StatsUpdate> batch, CancellationToken ct)
     {
         using var activity = Instrumentation.ActivitySource.StartActivity("PersistenceChannel.ProcessBatch");
         activity?.SetTag("batch.size", batch.Count);
@@ -197,16 +199,19 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                             if (update.Data is PlayerSnapshot ws) weaponStats.Add(ws);
                             break;
                         case UpdateType.RoundStart:
-                            if (update.Data is (string mUuid, int rNum)) 
-                                await repository.StartRoundAsync(mUuid, rNum, ct);
+                            if (update.Data is (string mUuidRs, int rNumRs)) 
+                                await repository.StartRoundAsync(mUuidRs, rNumRs, ct);
                             break;
                         case UpdateType.RoundEnd:
-                            if (update.Data is (string mUuid, int rNum, int wTeam, int reason))
-                                await repository.EndRoundAsync(mUuid, rNum, wTeam, reason, ct);
+                            if (update.Data is (string mUuidRe, int rNumRe, int wTeam, int reason))
+                                await repository.EndRoundAsync(mUuidRe, rNumRe, wTeam, reason, ct);
                             break;
                         case UpdateType.MatchStart:
-                            if (update.Data is (string map, string uuid, string? sUuid))
-                                await repository.StartMatchAsync(map, uuid, sUuid, ct);
+                            if (update.Data is ValueTuple<string, string, string?> matchData)
+                            {
+                                var (mapStart, uuidStart, sUuidStart) = matchData;
+                                await repository.StartMatchAsync(mapStart, uuidStart, sUuidStart, ct);
+                            }
                             break;
                         case UpdateType.MatchEnd:
                             if (update.Data is string matchUuid)
@@ -239,7 +244,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to process persistence batch after max retries. Buffering in-memory.");
-                BufferFailedBatch(batch);
+                BufferFailedBatch([.. batch]);
                 return; // Buffer and continue
             }
         }
@@ -288,18 +293,13 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
         }
     }
 
-    private async Task SaveRecoveryStateAsync()
+    private async Task SaveRecoveryStateAsync(List<StatsUpdate> currentBatch)
     {
         try
         {
-            var items = new List<StatsUpdate>();
-            // Note: This is a bit tricky with Channel. We can't peek easily without reading.
-            // For production, we'd maintain a side-list or use a different structure if recovery is critical.
-            // Since we're refactoring for production, let's implement a simple recovery buffer.
-            
-            if (_batch.Count == 0) return;
+            if (currentBatch.Count == 0) return;
 
-            var json = JsonSerializer.Serialize(_batch, new JsonSerializerOptions { WriteIndented = true });
+            var json = JsonSerializer.Serialize(currentBatch, new JsonSerializerOptions { WriteIndented = true });
             await File.WriteAllTextAsync(_recoveryPath + ".tmp", json);
             if (File.Exists(_recoveryPath)) File.Delete(_recoveryPath);
             File.Move(_recoveryPath + ".tmp", _recoveryPath);
@@ -315,20 +315,21 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
     public async Task FlushAsync(CancellationToken ct = default)
     {
         _logger.LogInformation("Manual flush requested for persistence channel.");
+        var flushBatch = new List<StatsUpdate>(100);
         while (_channel.Reader.TryRead(out var update))
         {
-            _batch.Add(update);
-            if (_batch.Count >= 100)
+            flushBatch.Add(update);
+            if (flushBatch.Count >= 100)
             {
-                await ProcessBatchAsync(_batch, ct);
-                _batch.Clear();
+                await ProcessBatchAsync(flushBatch, ct);
+                flushBatch.Clear();
             }
         }
 
-        if (_batch.Count > 0)
+        if (flushBatch.Count > 0)
         {
-            await ProcessBatchAsync(_batch, ct);
-            _batch.Clear();
+            await ProcessBatchAsync(flushBatch, ct);
+            flushBatch.Clear();
         }
     }
 

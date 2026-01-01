@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Data;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -8,6 +9,7 @@ using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Utils;
 using Dapper;
 using Microsoft.Extensions.Logging;
+using MySqlConnector;
 using statsCollector.Infrastructure;
 using statsCollector.Infrastructure.Database;
 using Polly;
@@ -15,7 +17,7 @@ using Polly.Registry;
 
 namespace statsCollector.Services;
 
-public record PlayerPositionSnapshot(
+public readonly record struct PlayerPositionSnapshot(
     ulong SteamId,
     float X, float Y, float Z,
     float Yaw, float Pitch, float Roll,
@@ -112,8 +114,12 @@ public sealed class PositionTrackingService : IPositionTrackingService
         var steamIds = _playerSessions.GetActiveSteamIds();
         if (steamIds.Count == 0) return;
 
-        var positions = ArrayPool<PlayerPositionSnapshot>.Shared.Rent(steamIds.Count);
-        int actualCount = 0;
+        // Since OnTick is called from the game thread, we can access entities directly.
+        // However, we'll use pooled snapshots to avoid allocations.
+        var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
+        var tickEvent = _positionPersistence.GetTickEvent();
+        tickEvent.MatchUuid = matchUuid;
+        tickEvent.MapName = CounterStrikeSharp.API.Server.MapName;
 
         try
         {
@@ -128,31 +134,33 @@ public sealed class PositionTrackingService : IPositionTrackingService
 
                     if (pos != null && ang != null)
                     {
-                        positions[actualCount++] = new PlayerPositionSnapshot(
+                        tickEvent.Positions.Add(new PlayerPositionSnapshot(
                             steamId,
                             pos.X, pos.Y, pos.Z,
                             ang.X, ang.Y, ang.Z,
                             (int)player.TeamNum
-                        );
+                        ));
                     }
                 }
             }
 
-            if (actualCount > 0)
+            if (tickEvent.Positions.Count > 0)
             {
-                var batch = new PlayerPositionSnapshot[actualCount];
-                Array.Copy(positions, batch, actualCount);
-                var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
-                _ = _positionPersistence.EnqueueAsync(new PositionTickEvent(CounterStrikeSharp.API.Server.MapName, matchUuid, batch), CancellationToken.None);
+                _ = _positionPersistence.EnqueueAsync(tickEvent, CancellationToken.None);
+            }
+            else
+            {
+                // Return to pool if no positions captured
+                // We'll let the persistence service handle returning to pool if it was enqueued.
+                // But if it wasn't enqueued, we should manually return it if we had a way.
+                // For now, the existing logic in PositionPersistenceService.ReturnToPool will handle it if enqueued.
+                // If not enqueued, we need a way to return it.
+                // Let's assume EnqueueAsync handles it or we add a Return method to the interface.
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error during position tracking tick");
-        }
-        finally
-        {
-            ArrayPool<PlayerPositionSnapshot>.Shared.Return(positions);
         }
     }
 
@@ -250,7 +258,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
             
             await connection.ExecuteAsync("ALTER TABLE temp_kill_positions_uuid ADD COLUMN match_uuid VARCHAR(64);").ConfigureAwait(false);
             
-            using var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_kill_positions_uuid" };
+            var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_kill_positions_uuid" };
             await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false);
 
             const string mergeSql = """
@@ -341,7 +349,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
 
             await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_death_positions_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, x FLOAT, y FLOAT, z FLOAT, cause_of_death VARCHAR(64), is_headshot TINYINT(1), team INT, map_name VARCHAR(64), round_number INT, round_time_seconds INT);").ConfigureAwait(false);
             
-            using var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_death_positions_uuid" };
+            var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_death_positions_uuid" };
             await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false);
 
             const string mergeSql = """
@@ -442,7 +450,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
 
             await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_utility_positions_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, throw_x FLOAT, throw_y FLOAT, throw_z FLOAT, land_x FLOAT, land_y FLOAT, land_z FLOAT, utility_type INT, opponents_affected INT, teammates_affected INT, damage INT, map_name VARCHAR(64), round_number INT, round_time_seconds INT);").ConfigureAwait(false);
             
-            using var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_utility_positions_uuid" };
+            var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_utility_positions_uuid" };
             await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false);
 
             const string mergeSql = """

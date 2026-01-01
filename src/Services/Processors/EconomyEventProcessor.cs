@@ -4,8 +4,8 @@ using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
-using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
+using statsCollector.Domain;
 using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
@@ -64,8 +64,9 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
         try
         {
             var player = @event.GetPlayerOrDefault("userid");
+            if (player == null) return;
+
             var playerState = PlayerControllerState.From(player);
-            
             if (!playerState.IsValid || playerState.IsBot) return;
 
             var weapon = @event.GetStringValue("weapon", string.Empty) ?? string.Empty;

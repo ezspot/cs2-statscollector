@@ -10,6 +10,7 @@ using Microsoft.Extensions.Options;
 using Stateless;
 using statsCollector.Config;
 using statsCollector.Domain;
+using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
@@ -60,6 +61,8 @@ public class ScrimManager : IScrimManager
         VetoFinished
     }
 
+    private bool _isRecovering;
+
     public ScrimState CurrentState => _machine.State;
 
     public ScrimManager(
@@ -95,8 +98,11 @@ public class ScrimManager : IScrimManager
 
         _machine.Configure(ScrimState.Idle)
             .Permit(ScrimTrigger.StartLobby, ScrimState.Lobby)
-            .Permit(ScrimTrigger.RecoverState, ScrimState.Lobby)
-            .Permit(ScrimTrigger.EnterPractice, ScrimState.Practice);
+            .Permit(ScrimTrigger.EnterPractice, ScrimState.Practice)
+            .PermitDynamic(ScrimTrigger.RecoverState, () => {
+                var data = _recovery.LoadScrimStateAsync<ScrimRecoveryData>().GetAwaiter().GetResult();
+                return data?.State ?? ScrimState.Idle;
+            });
 
         _machine.Configure(ScrimState.Lobby)
             .OnEntryAsync(async () => await OnLobbyEntry())
@@ -105,7 +111,13 @@ public class ScrimManager : IScrimManager
             .Permit(ScrimTrigger.StopScrim, ScrimState.Idle);
 
         _machine.Configure(ScrimState.Veto)
-            .OnEntry(() => _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Map Veto started!")))
+            .OnEntry(() => 
+            {
+                if (!_isRecovering)
+                {
+                    _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Map Veto started!"));
+                }
+            })
             .Permit(ScrimTrigger.VetoFinished, ScrimState.Picking)
             .Permit(ScrimTrigger.StopScrim, ScrimState.Idle);
 
@@ -153,7 +165,14 @@ public class ScrimManager : IScrimManager
             [.. _team2],
             new Dictionary<int, ulong>(_captains),
             _selectedMap,
-            DateTime.UtcNow
+            DateTime.UtcNow,
+            ReadyPlayers: new Dictionary<ulong, bool>(_readyPlayers),
+            MapVotes: new Dictionary<string, int>(_mapVotes),
+            PlayerVotes: new Dictionary<ulong, string>(_playerVotes),
+            PickPool: [.. _pickPool],
+            Team1Picking: _team1Picking,
+            PickTurn: _pickTurn,
+            KnifeWinnerTeam: _knifeWinnerTeam
         );
         await _recovery.SaveScrimStateAsync(data);
     }
@@ -181,44 +200,58 @@ public class ScrimManager : IScrimManager
             }
         }
 
-        // 2. Capture currently connected players
-        var connectedSteamIds = await _scheduler.ExecuteAsync(() => 
-            Utilities.GetPlayers().Where(p => p is { IsValid: true, IsBot: false }).Select(p => p.SteamID).ToHashSet());
+        // 2. Restore state data
+        _readyPlayers.Clear();
+        foreach (var kvp in data.ReadyPlayers ?? []) _readyPlayers[kvp.Key] = kvp.Value;
 
-        // 3. Verify enough players are still connected
-        var recoveredPlayers = data.Team1.Concat(data.Team2).ToHashSet();
-        var stillConnected = recoveredPlayers.Intersect(connectedSteamIds).Count();
-        
-        if (stillConnected < (data.Team1.Count + data.Team2.Count) / 2)
-        {
-            _logger.LogWarning("Recovery aborted: Not enough players connected. Found {Count}, expected near {Total}", stillConnected, data.Team1.Count + data.Team2.Count);
-            _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Recovery aborted: Not enough players from the previous session are connected."));
-            return;
-        }
-
-        _logger.LogInformation("Recovering scrim from state: {State} (MatchID: {MatchId})", data.State, data.MatchId);
-        
-        // Restore rosters and captains
         _captains.Clear();
-        foreach (var kvp in data.Captains) _captains[kvp.Key] = kvp.Value;
-        
-        _team1.Clear(); _team1.AddRange(data.Team1);
-        _team2.Clear(); _team2.AddRange(data.Team2);
+        foreach (var kvp in data.Captains ?? []) _captains[kvp.Key] = kvp.Value;
+
+        _team1.Clear();
+        if (data.Team1 != null) _team1.AddRange(data.Team1);
+
+        _team2.Clear();
+        if (data.Team2 != null) _team2.AddRange(data.Team2);
+
+        _mapVotes.Clear();
+        foreach (var kvp in data.MapVotes ?? []) _mapVotes[kvp.Key] = kvp.Value;
+
+        _playerVotes.Clear();
+        foreach (var kvp in data.PlayerVotes ?? []) _playerVotes[kvp.Key] = kvp.Value;
+
+        _pickPool.Clear();
+        if (data.PickPool != null) _pickPool.AddRange(data.PickPool);
+
         _selectedMap = data.SelectedMap;
-        
-        if (data.MatchId.HasValue && _matchTracker.CurrentMatch == null)
+        _team1Picking = data.Team1Picking;
+        _pickTurn = data.PickTurn;
+        _knifeWinnerTeam = data.KnifeWinnerTeam;
+
+        _logger.LogInformation("Recovering scrim to state: {State}", data.State);
+
+        // 3. Use FireAsync with a dedicated recovery trigger
+        _isRecovering = true;
+        try
         {
-            _logger.LogInformation("Restoring match tracking for MatchID: {MatchId}", data.MatchId);
-            // Internal match tracker recovery logic if needed
+            if (_machine.State != ScrimState.Idle)
+            {
+                _machine.Deactivate(); 
+            }
+            
+            await _machine.FireAsync(ScrimTrigger.RecoverState);
+        }
+        finally
+        {
+            _isRecovering = false;
         }
 
-        // Use FireAsync to transition state machine safely
-        await _machine.FireAsync(ScrimTrigger.RecoverState);
         _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] Scrim successfully recovered to state: {data.State}."));
     }
 
     private async Task OnLobbyEntry()
     {
+        if (_isRecovering) return;
+
         _readyPlayers.Clear();
         _captains.Clear();
         _team1.Clear();
@@ -231,6 +264,8 @@ public class ScrimManager : IScrimManager
 
     private Task OnMapVoteEntry()
     {
+        if (_isRecovering) return Task.CompletedTask;
+
         _mapVotes.Clear();
         _playerVotes.Clear();
         _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Map voting started! Type .vote <map>."));
@@ -239,6 +274,8 @@ public class ScrimManager : IScrimManager
 
     private void StartPicking()
     {
+        if (_isRecovering) return;
+
         _pickPool.Clear();
         _pickPool.AddRange(_readyPlayers.Where(p => p.Value && !_captains.ContainsValue(p.Key)).Select(p => p.Key));
         
@@ -271,6 +308,8 @@ public class ScrimManager : IScrimManager
 
     private async Task OnLiveEntry()
     {
+        if (_isRecovering) return;
+
         // Move players to their respective teams
         _scheduler.Schedule(() =>
         {
@@ -290,13 +329,6 @@ public class ScrimManager : IScrimManager
         {
             await _configLoader.LoadAndExecuteConfigAsync(_config.Scrim.KnifeConfigPath);
             _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Knife round started!"));
-        }
-        else
-        {
-            var liveCfg = _playersPerTeam == 2 ? "live_wingman.cfg" : _config.Scrim.LiveConfigPath;
-            await _configLoader.LoadAndExecuteConfigAsync(liveCfg);
-            _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Match is LIVE!"));
-            if (_selectedMap != null) await _matchTracker.StartMatchAsync(_selectedMap);
         }
     }
 

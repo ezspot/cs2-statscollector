@@ -11,7 +11,7 @@
     <PackageProjectUrl>https://github.com/ezspot/cs2-statscollector</PackageProjectUrl>
     <Company>Anders 'spot' Hagen</Company>
     <Description>Comprehensive CS2 stats collection to MySQL</Description>
-    <Version>2.2.2</Version>
+    <Version>3.0.0</Version>
     <SuppressTrimAnalysisWarnings>true</SuppressTrimAnalysisWarnings>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
@@ -22,7 +22,7 @@
     <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Logging.Configuration" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="8.0.0" />
-    <PackageReference Include="Microsoft.Extensions.ObjectPool" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.ObjectPool" Version="8.0.10" />
     <PackageReference Include="Microsoft.Extensions.Resilience" Version="8.10.0" />
     <PackageReference Include="Polly" Version="8.6.5" />
     <PackageReference Include="MySqlConnector" Version="2.3.7" />

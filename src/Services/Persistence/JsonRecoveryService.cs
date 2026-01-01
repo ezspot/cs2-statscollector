@@ -75,7 +75,7 @@ public sealed class JsonRecoveryService(ILogger<JsonRecoveryService> logger) : I
         }
     }
 
-    public async Task ClearScrimStateAsync()
+    public Task ClearScrimStateAsync()
     {
         try
         {
@@ -87,5 +87,6 @@ public sealed class JsonRecoveryService(ILogger<JsonRecoveryService> logger) : I
         {
             _logger.LogError(ex, "Failed to clear scrim recovery state at {Path}", _filePath);
         }
+        return Task.CompletedTask;
     }
 }

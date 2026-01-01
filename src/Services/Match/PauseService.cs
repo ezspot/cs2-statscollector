@@ -126,7 +126,6 @@ public sealed class PauseService(
         {
             _pauseTimer?.Kill();
             _isPaused = false;
-            _currentPauseType = None; // Should be PauseType.None, fixing potential error if 'None' was just a typo in original but usually it's CurrentPauseType = PauseType.None
             _currentPauseType = PauseType.None;
             Server.ExecuteCommand("mp_unpause_match");
             _logger.LogInformation("Match unpaused.");

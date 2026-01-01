@@ -7,6 +7,7 @@ using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
 using statsCollector.Domain;
+using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 

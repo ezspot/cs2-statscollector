@@ -7,6 +7,7 @@ using CounterStrikeSharp.API;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using statsCollector.Config;
+using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 

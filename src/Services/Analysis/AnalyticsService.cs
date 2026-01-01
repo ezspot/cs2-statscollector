@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using statsCollector.Domain;
+using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
@@ -62,7 +63,7 @@ public sealed class AnalyticsService : IAnalyticsService
 
         var multiKillImpact = stats.Combat.MultiKill2 * 0.1m + stats.Combat.MultiKill3 * 0.2m + stats.Combat.MultiKill4 * 0.3m + stats.Combat.MultiKill5 * 0.5m;
         var clutchImpact = (decimal)stats.Combat.ClutchKills * 0.2m;
-        var openingImpact = stats.Combat.FirstKills * 0.15m;
+        var openingImpact = stats.Combat.EntryKills * 0.25m + (stats.Combat.EntryKillAttemptWins * 0.1m); // Enhanced entry impact
         var mvpImpact = stats.Combat.MVPs * 0.05m;
 
         return Math.Min(2.0m, multiKillImpact + clutchImpact + openingImpact + mvpImpact);
@@ -224,8 +225,8 @@ public sealed class AnalyticsService : IAnalyticsService
             stats.Utility.EnemiesBlinded,
             stats.Utility.TimesBlinded,
             stats.Utility.FlashAssists,
-            stats.Utility.TotalBlindTime,
-            stats.Utility.TotalBlindTimeInflicted,
+            (int)stats.Utility.TotalBlindTime,
+            (int)stats.Utility.TotalBlindTimeInflicted,
             stats.Utility.UtilityDamage,
             stats.Utility.UtilityDamageTaken,
             stats.Bomb.BombKills,
@@ -251,17 +252,20 @@ public sealed class AnalyticsService : IAnalyticsService
             stats.Utility.EffectiveSmokes,
             stats.Utility.EffectiveHEGrenades,
             stats.Utility.EffectiveMolotovs,
-            stats.Combat.MultiKillNades,
-            stats.Combat.NadeKills,
+            stats.Utility.MultiKillNades,
+            stats.Utility.NadeKills,
             stats.Round.TradeWindowsMissed,
-            stats.Utility.UtilityWasteCount,
+            stats.Utility.WastedFlashes, // FlashWaste
             stats.Combat.EntryKills,
+            stats.Combat.EntryDeaths,
+            stats.Combat.EntryKillAttempts,
+            stats.Combat.EntryKillAttemptWins,
             stats.Combat.TradeKills,
             stats.Combat.TradedDeaths,
             stats.Combat.HighImpactKills,
             stats.Combat.LowImpactKills,
             stats.Combat.TradeOpportunities,
-            stats.Combat.MultiKill2 + stats.Combat.MultiKill3 + stats.Combat.MultiKill4 + stats.Combat.MultiKill5,
+            stats.Combat.MultiKills,
             stats.Combat.FirstKills, // OpeningDuelsWon
             stats.Combat.FirstDeaths, // OpeningDuelsLost
             stats.Combat.Noscopes,

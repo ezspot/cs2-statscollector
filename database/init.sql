@@ -106,6 +106,9 @@ CREATE TABLE IF NOT EXISTS player_stats (
     multi_kill_nades INT DEFAULT 0,
     nade_kills INT DEFAULT 0,
     entry_kills INT DEFAULT 0,
+    entry_deaths INT DEFAULT 0,
+    entry_kill_attempts INT DEFAULT 0,
+    entry_kill_attempt_wins INT DEFAULT 0,
     trade_kills INT DEFAULT 0,
     traded_deaths INT DEFAULT 0,
     high_impact_kills INT DEFAULT 0,
@@ -176,6 +179,10 @@ CREATE TABLE IF NOT EXISTS match_player_stats (
     rating2 DECIMAL(5,3) DEFAULT 0,
     adr DECIMAL(6,2) DEFAULT 0,
     kast DECIMAL(5,2) DEFAULT 0,
+    entry_kills INT DEFAULT 0,
+    entry_deaths INT DEFAULT 0,
+    entry_kill_attempts INT DEFAULT 0,
+    entry_kill_attempt_wins INT DEFAULT 0,
     FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
     FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
     UNIQUE KEY uq_match_player (match_id, steam_id)
@@ -223,6 +230,10 @@ CREATE TABLE IF NOT EXISTS player_advanced_analytics (
     trade_success_rate DECIMAL(5,2) NOT NULL,
     trade_windows_missed INT DEFAULT 0,
     flash_waste INT DEFAULT 0,
+    entry_kills INT DEFAULT 0,
+    entry_deaths INT DEFAULT 0,
+    entry_kill_attempts INT DEFAULT 0,
+    entry_kill_attempt_wins INT DEFAULT 0,
     entry_success_rate DECIMAL(5,2) NOT NULL,
     rounds_played INT NOT NULL,
     kd_ratio DECIMAL(5,3) NOT NULL,
@@ -371,11 +382,13 @@ CREATE OR REPLACE VIEW view_entry_efficiency AS
 SELECT 
     steam_id,
     name,
-    opening_duels_won,
-    opening_duels_lost,
-    ROUND((opening_duels_won / GREATEST(opening_duels_won + opening_duels_lost, 1)) * 100, 2) as entry_success_rate
+    entry_kills,
+    entry_deaths,
+    entry_kill_attempts,
+    entry_kill_attempt_wins,
+    ROUND((entry_kill_attempt_wins / GREATEST(entry_kill_attempts, 1)) * 100, 2) as entry_win_rate
 FROM player_stats
-WHERE (opening_duels_won + opening_duels_lost) > 0;
+WHERE entry_kill_attempts > 0;
 
 CREATE OR REPLACE VIEW view_global_leaderboard AS
 SELECT 

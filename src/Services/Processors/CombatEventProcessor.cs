@@ -13,8 +13,6 @@ using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
 
-using Microsoft.Extensions.ObjectPool;
-
 namespace statsCollector.Services;
 
 public interface ICombatEventProcessor : IEventProcessor
@@ -36,6 +34,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         "weapon_frag_grenade"
     ];
 
+    private static readonly int MaxPlayers = 65; // CS2 max players + 1 for safety
+
     private readonly IPlayerSessionService _playerSessions;
     private readonly IOptionsMonitor<PluginConfig> _config;
     private readonly ILogger<CombatEventProcessor> _logger;
@@ -46,28 +46,34 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     private readonly IPersistenceChannel _persistenceChannel;
     private readonly IGameScheduler _scheduler;
 
-    private readonly ObjectPool<HashSet<ulong>> _hashSetPool;
-    private readonly ObjectPool<Dictionary<ulong, DateTime>> _dateTimeDictPool;
-    private readonly ObjectPool<Dictionary<ulong, int>> _intDictPool;
-    private readonly ObjectPool<Dictionary<ulong, (ulong KillerId, DateTime Time)>> _killerDictPool;
-    private readonly ObjectPool<Dictionary<ulong, List<(ulong TeammateId, DateTime Expiry)>>> _tradeDictPool;
-
     private int _currentRoundNumber;
     private DateTime _currentRoundStartUtc;
     private int _ctAliveAtStart;
     private int _tAliveAtStart;
 
-    private HashSet<ulong> _playersAliveThisRound;
+    // EntityIndex-based state arrays for performance
+    private readonly bool[] _isPlayerAlive = new bool[MaxPlayers];
+    private readonly ulong[] _playerSteamIds = new ulong[MaxPlayers];
+    private readonly int[] _playerRoundKills = new int[MaxPlayers];
+    private readonly DateTime[] _playerLastDeathTime = new DateTime[MaxPlayers];
+    private readonly DateTime[] _playerFirstKillTime = new DateTime[MaxPlayers];
+    private readonly (ulong KillerId, DateTime Time)[] _playerLastKiller = new (ulong, DateTime)[MaxPlayers];
+
+    // Entry Kill Attempt tracking
+    private bool _firstEngagementHappened;
+    private int _firstEngagementAttackerIndex = -1;
+    private int _firstEngagementVictimIndex = -1;
+
     private readonly Dictionary<PlayerTeam, DateTime> _lastTeamDeathTime = new()
     {
         [PlayerTeam.Terrorist] = DateTime.MinValue,
         [PlayerTeam.CounterTerrorist] = DateTime.MinValue
     };
-    private Dictionary<ulong, DateTime> _lastDeathByPlayer;
-    private Dictionary<ulong, DateTime> _firstKillTimes;
-    private Dictionary<ulong, int> _roundKills;
-    private Dictionary<ulong, (ulong KillerId, DateTime Time)> _lastKillerOfPlayer;
-    private Dictionary<ulong, List<(ulong TeammateId, DateTime Expiry)>> _pendingTradeOpportunities;
+
+    private readonly Dictionary<ulong, List<(ulong TeammateId, DateTime Expiry)>> _pendingTradeOpportunities = [];
+
+    private int _ctAliveCount;
+    private int _tAliveCount;
 
     public CombatEventProcessor(
         IPlayerSessionService playerSessions,
@@ -89,32 +95,20 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         _damageReport = damageReport;
         _persistenceChannel = persistenceChannel;
         _scheduler = scheduler;
-
-        var policy = new DefaultObjectPoolProvider();
-        _hashSetPool = policy.Create(new HashSetPooledObjectPolicy<ulong>());
-        _dateTimeDictPool = policy.Create(new DictionaryPooledObjectPolicy<ulong, DateTime>());
-        _intDictPool = policy.Create(new DictionaryPooledObjectPolicy<ulong, int>());
-        _killerDictPool = policy.Create(new DictionaryPooledObjectPolicy<ulong, (ulong KillerId, DateTime Time)>());
-        _tradeDictPool = policy.Create(new DictionaryPooledObjectPolicy<ulong, List<(ulong TeammateId, DateTime Expiry)>>());
-
-        _playersAliveThisRound = _hashSetPool.Get();
-        _lastDeathByPlayer = _dateTimeDictPool.Get();
-        _firstKillTimes = _dateTimeDictPool.Get();
-        _roundKills = _intDictPool.Get();
-        _lastKillerOfPlayer = _killerDictPool.Get();
-        _pendingTradeOpportunities = _tradeDictPool.Get();
     }
 
-    private class HashSetPooledObjectPolicy<T> : IPooledObjectPolicy<HashSet<T>>
-    {
-        public HashSet<T> Create() => new();
-        public bool Return(HashSet<T> obj) { obj.Clear(); return true; }
-    }
+    public (int CtAlive, int TAlive) GetAliveCounts() => (_ctAliveCount, _tAliveCount);
 
-    private class DictionaryPooledObjectPolicy<TKey, TValue> : IPooledObjectPolicy<Dictionary<TKey, TValue>> where TKey : notnull
+        public void RegisterEvents(IEventDispatcher dispatcher)
     {
-        public Dictionary<TKey, TValue> Create() => new();
-        public bool Return(Dictionary<TKey, TValue> obj) { obj.Clear(); return true; }
+        dispatcher.Subscribe<EventPlayerDeath>((e, i) => { HandlePlayerDeath(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventPlayerHurt>((e, i) => { HandlePlayerHurt(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventWeaponFire>((e, i) => { HandleWeaponFire(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventBulletImpact>((e, i) => { HandleBulletImpact(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventRoundMvp>((e, i) => { HandleRoundMvp(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventPlayerAvengedTeammate>((e, i) => { HandlePlayerAvengedTeammate(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventPlayerSpawned>((e, i) => { HandlePlayerSpawned(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventPlayerDisconnect>((e, i) => { HandlePlayerDisconnected(e); return HookResult.Continue; });
     }
 
     public void OnRoundStart(RoundContext context)
@@ -126,27 +120,30 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         ResetRoundStats();
     }
 
-    public void OnRoundEnd(int winnerTeam, int winReason)
+    private void ResetRoundStats()
     {
-        var winningTeam = winnerTeam switch { 2 => PlayerTeam.Terrorist, 3 => PlayerTeam.CounterTerrorist, _ => PlayerTeam.Spectator };
-        UpdateClutchStats(winningTeam);
-    }
+        Array.Clear(_isPlayerAlive);
+        Array.Clear(_playerRoundKills);
+        Array.Clear(_playerFirstKillTime);
+        Array.Clear(_playerLastDeathTime);
+        Array.Clear(_playerLastKiller);
+        
+        _ctAliveCount = 0;
+        _tAliveCount = 0;
 
-    private PlayerTeam GetTeam(CCSPlayerController? player)
-    {
-        if (player is not { IsValid: true }) return PlayerTeam.Spectator;
-        return player.TeamNum switch { 2 => PlayerTeam.Terrorist, 3 => PlayerTeam.CounterTerrorist, _ => PlayerTeam.Spectator };
-    }
+        _firstEngagementHappened = false;
+        _firstEngagementAttackerIndex = -1;
+        _firstEngagementVictimIndex = -1;
 
-    public void RegisterEvents(IEventDispatcher dispatcher)
-    {
-        dispatcher.Subscribe<EventPlayerDeath>((e, i) => { HandlePlayerDeath(e); return HookResult.Continue; });
-        dispatcher.Subscribe<EventPlayerHurt>((e, i) => { HandlePlayerHurt(e); return HookResult.Continue; });
-        dispatcher.Subscribe<EventWeaponFire>((e, i) => { HandleWeaponFire(e); return HookResult.Continue; });
-        dispatcher.Subscribe<EventBulletImpact>((e, i) => { HandleBulletImpact(e); return HookResult.Continue; });
-        dispatcher.Subscribe<EventRoundMvp>((e, i) => { HandleRoundMvp(e); return HookResult.Continue; });
-        dispatcher.Subscribe<EventPlayerAvengedTeammate>((e, i) => { HandlePlayerAvengedTeammate(e); return HookResult.Continue; });
-        dispatcher.Subscribe<EventPlayerSpawned>((e, i) => { HandlePlayerSpawned(e); return HookResult.Continue; });
+        _lastTeamDeathTime[PlayerTeam.Terrorist] = DateTime.MinValue;
+        _lastTeamDeathTime[PlayerTeam.CounterTerrorist] = DateTime.MinValue;
+        
+        // Clean up trade opportunities expired from previous rounds
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        foreach (var kvp in _pendingTradeOpportunities)
+        {
+            kvp.Value.RemoveAll(o => o.Expiry <= now);
+        }
     }
 
     private void HandlePlayerDeath(EventPlayerDeath @event)
@@ -158,10 +155,22 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             var attacker = @event.GetPlayerOrDefault("attacker");
             var assister = @event.GetPlayerOrDefault("assister");
 
-            // Snapshot state on game thread before background tasks
+            if (victim == null) return;
+            var victimIndex = (int)victim.Index;
+
+            // Snapshot state on game thread
             var victimState = PlayerControllerState.From(victim);
             var attackerState = PlayerControllerState.From(attacker);
             var assisterState = PlayerControllerState.From(assister);
+
+            // Handle Entry Kill tracking for insta-kills (no player_hurt event preceded this)
+            if (!_firstEngagementHappened && attackerState.IsValid && victimState.IsValid && attackerState.Team != victimState.Team && !attackerState.IsBot && !victimState.IsBot)
+            {
+                _firstEngagementHappened = true;
+                _firstEngagementAttackerIndex = (int)attacker!.Index;
+                _firstEngagementVictimIndex = victimIndex;
+                _playerSessions.MutatePlayer(attackerState.SteamId, stats => stats.Combat.EntryKillAttempts++);
+            }
             
             var weaponName = @event.GetStringValue("weapon", "unknown") ?? "unknown";
             var isHeadshot = @event.GetBoolValue("headshot", false);
@@ -194,20 +203,21 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 if (victimState.PawnHandle != 0)
                 {
                     var matchUuid = _matchTracker?.CurrentMatch?.MatchUuid;
+                    var posEvent = _positionPersistence.GetDeathEvent();
+
+                    posEvent.MatchUuid = matchUuid;
+                    posEvent.SteamId = victimState.SteamId;
+                    posEvent.X = victimState.Position.X;
+                    posEvent.Y = victimState.Position.Y;
+                    posEvent.Z = victimState.Position.Z;
+                    posEvent.CauseOfDeath = weaponName;
+                    posEvent.IsHeadshot = isHeadshot;
+                    posEvent.Team = (int)victimTeam;
+                    posEvent.MapName = Server.MapName;
+                    posEvent.RoundNumber = _currentRoundNumber;
+                    posEvent.RoundTime = (int)(now - _currentRoundStartUtc).TotalSeconds;
                     
-                    _ = _positionPersistence.EnqueueAsync(new DeathPositionEvent(
-                        matchUuid,
-                        victimState.SteamId,
-                        victimState.Position.X,
-                        victimState.Position.Y,
-                        victimState.Position.Z,
-                        weaponName,
-                        isHeadshot,
-                        (int)victimTeam,
-                        Server.MapName,
-                        _currentRoundNumber,
-                        (int)(now - _currentRoundStartUtc).TotalSeconds
-                    ), CancellationToken.None);
+                    _ = _positionPersistence.EnqueueAsync(posEvent, CancellationToken.None);
                 }
 
                 _playerSessions.MutatePlayer(victimState.SteamId, stats =>
@@ -216,54 +226,51 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     stats.Combat.Deaths++;
                     stats.Combat.CurrentRoundDeaths++;
                     stats.CurrentTeam = victimTeam;
+
+                    // Entry Death tracking
+                    if (_firstEngagementVictimIndex == victimIndex)
+                    {
+                        stats.Combat.EntryDeaths++;
+                    }
                 });
 
-                foreach (var teammateId in _playerSessions.GetActiveSteamIds())
-                {
-                    if (teammateId == victimState.SteamId) continue;
-                    
-                    _playerSessions.WithPlayer(teammateId, stats => 
-                    {
-                        if (stats.CurrentTeam == victimTeam && _playersAliveThisRound.Contains(teammateId))
-                        {
-                            // We need teammate position, but WithPlayer only gives stats.
-                            // For trade distance, we'd ideally need a teammate state snapshot too.
-                            // For production, we should have captured ALL active player states if we wanted true thread safety for this loop.
-                            // However, we can use the cached positions if available or skip distance check if not critical.
-                        }
-                        return 0;
-                    });
-                }
+                _isPlayerAlive[victimIndex] = false;
+                if (victimTeam == PlayerTeam.CounterTerrorist) _ctAliveCount--;
+                else if (victimTeam == PlayerTeam.Terrorist) _tAliveCount--;
 
-                _playersAliveThisRound.Remove(victimState.SteamId);
                 _lastTeamDeathTime[victimTeam] = now;
-                _lastDeathByPlayer[victimState.SteamId] = now;
+                _playerLastDeathTime[victimIndex] = now;
 
                 if (attackerState.IsValid && !attackerState.IsBot)
                 {
-                    _lastKillerOfPlayer[victimState.SteamId] = (attackerState.SteamId, now);
+                    _playerLastKiller[victimIndex] = (attackerState.SteamId, now);
                 }
             }
 
             if (attackerState.IsValid && !attackerState.IsBot && attackerState.SteamId != victimState.SteamId)
             {
+                var attackerIndex = (int)attacker!.Index;
                 var attackerTeam = attackerState.Team;
                 var (ctAlive, tAlive) = GetAliveCounts();
                 var enemyAlive = attackerTeam == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
                 var teammatesAlive = attackerTeam == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
 
-                // HLTV Rating 3.0: Eco-Adjusted Kills
                 decimal killWeight = Math.Clamp((decimal)victimState.EquipmentValue / 5000m, 0.2m, 1.0m);
 
-                // Round Swing Impact: bonus for kills that change round outcome
-                // Simplified: Entry frags, clutch kills
-                if (_firstKillTimes.Count == 0) killWeight += 0.15m; // Entry kill bonus
-                if (teammatesAlive == 1 && enemyAlive >= 1) killWeight += 0.1m; // Clutch kill bonus
+                bool isFirstKillOfRound = false;
+                if (_playerFirstKillTime.All(t => t == DateTime.MinValue))
+                {
+                    isFirstKillOfRound = true;
+                    killWeight += 0.15m;
+                }
+
+                if (teammatesAlive == 1 && enemyAlive >= 1) killWeight += 0.1m; 
+                
                 bool isRevengeKill = false;
-                if (victimState.IsValid && _lastKillerOfPlayer.TryGetValue(attackerState.SteamId, out var lastKiller) && lastKiller.KillerId == victimState.SteamId)
+                if (victimState.IsValid && _playerLastKiller[attackerIndex].KillerId == victimState.SteamId)
                 {
                     isRevengeKill = true;
-                    _lastKillerOfPlayer.Remove(attackerState.SteamId);
+                    _playerLastKiller[attackerIndex] = default;
                 }
 
                 Instrumentation.KillsCounter.Add(1, 
@@ -280,27 +287,28 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 {
                     var killDistance = CalculateDistance(attackerState.Position, victimState.Position);
                     var matchUuid = _matchTracker?.CurrentMatch?.MatchUuid;
+                    var posEvent = _positionPersistence.GetKillEvent();
 
-                    _ = _positionPersistence.EnqueueAsync(new KillPositionEvent(
-                        matchUuid,
-                        attackerState.SteamId,
-                        victimState.SteamId,
-                        attackerState.Position.X,
-                        attackerState.Position.Y,
-                        attackerState.Position.Z,
-                        victimState.Position.X,
-                        victimState.Position.Y,
-                        victimState.Position.Z,
-                        weaponName,
-                        isHeadshot,
-                        penetrated,
-                        killDistance,
-                        (int)attackerTeam,
-                        (int)victimTeam,
-                        Server.MapName,
-                        _currentRoundNumber,
-                        (int)(now - _currentRoundStartUtc).TotalSeconds
-                    ), CancellationToken.None);
+                    posEvent.MatchUuid = matchUuid;
+                    posEvent.KillerSteamId = attackerState.SteamId;
+                    posEvent.VictimSteamId = victimState.SteamId;
+                    posEvent.KillerX = attackerState.Position.X;
+                    posEvent.KillerY = attackerState.Position.Y;
+                    posEvent.KillerZ = attackerState.Position.Z;
+                    posEvent.VictimX = victimState.Position.X;
+                    posEvent.VictimY = victimState.Position.Y;
+                    posEvent.VictimZ = victimState.Position.Z;
+                    posEvent.Weapon = weaponName;
+                    posEvent.IsHeadshot = isHeadshot;
+                    posEvent.IsWallbang = penetrated;
+                    posEvent.Distance = killDistance;
+                    posEvent.KillerTeam = (int)attackerTeam;
+                    posEvent.VictimTeam = (int)victimTeam;
+                    posEvent.MapName = Server.MapName;
+                    posEvent.RoundNumber = _currentRoundNumber;
+                    posEvent.RoundTime = (int)(now - _currentRoundStartUtc).TotalSeconds;
+
+                    _ = _positionPersistence.EnqueueAsync(posEvent, CancellationToken.None);
                 }
 
                 _playerSessions.MutatePlayer(attackerState.SteamId, stats =>
@@ -314,14 +322,21 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
                     if (isRevengeKill) stats.Combat.RevengeKills++;
 
-                    if (!_firstKillTimes.ContainsKey(attackerState.SteamId)) 
+                    if (_playerFirstKillTime[attackerIndex] == DateTime.MinValue) 
                     { 
-                        _firstKillTimes[attackerState.SteamId] = now; 
+                        _playerFirstKillTime[attackerIndex] = now; 
                         stats.Combat.FirstKills++; 
                     }
+
+                    // Entry Kill tracking
+                    if (_firstEngagementAttackerIndex == attackerIndex)
+                    {
+                        stats.Combat.EntryKills++;
+                        stats.Combat.EntryKillAttemptWins++;
+                    }
                     
-                    _roundKills[attackerState.SteamId] = _roundKills.GetValueOrDefault(attackerState.SteamId, 0) + 1;
-                    var killsThisRound = _roundKills[attackerState.SteamId];
+                    _playerRoundKills[attackerIndex]++;
+                    var killsThisRound = _playerRoundKills[attackerIndex];
                     stats.Combat.CurrentRoundKills = killsThisRound;
                     
                     switch(killsThisRound)
@@ -339,10 +354,11 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     {
                         stats.Utility.FlashAssists++;
                         // Capture victim's blind duration at time of death for Flash Assist Duration
-                        if (victim != null && victim.PlayerPawn.Value != null)
+                        // Use IGameScheduler to safely read from the entity if needed, 
+                        // but since we are on the game thread in HandlePlayerDeath, we can access it.
+                        if (victim.PlayerPawn.Value != null)
                         {
-                            var blindRemaining = victim.PlayerPawn.Value.FlashDuration;
-                            stats.Utility.FlashAssistDuration += (int)(blindRemaining * 1000);
+                            stats.Utility.FlashAssistDuration += (int)(victim.PlayerPawn.Value.FlashDuration * 1000);
                         }
                     }
                     if (penetrated) stats.Combat.WallbangKills++;
@@ -350,11 +366,10 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     if (isGrenadeKill)
                     {
                         stats.Combat.NadeKills++;
-                        var nadeKillsThisRound = _roundKills[attackerState.SteamId];
-                        if (nadeKillsThisRound >= 2) stats.Combat.MultiKillNades++;
+                        if (killsThisRound >= 2) stats.Combat.MultiKillNades++;
                     }
 
-                    bool highImpact = killsThisRound >= 3 || (teammatesAlive == 1 && enemyAlive >= 1) || (_firstKillTimes.Count == 1 && _firstKillTimes.ContainsKey(attackerState.SteamId));
+                    bool highImpact = killsThisRound >= 3 || (teammatesAlive == 1 && enemyAlive >= 1) || isFirstKillOfRound;
                     if (highImpact) stats.Combat.HighImpactKills++;
                     else if (teammatesAlive >= enemyAlive + 3) stats.Combat.LowImpactKills++;
                 });
@@ -395,12 +410,26 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             var victim = @event.GetPlayerOrDefault("userid");
             var attacker = @event.GetPlayerOrDefault("attacker");
             
+            if (victim == null) return;
+            var victimIndex = (int)victim.Index;
+
             var victimState = PlayerControllerState.From(victim);
             var attackerState = PlayerControllerState.From(attacker);
             
             var weapon = @event.GetStringValue("weapon", "unknown") ?? "unknown";
             var damage = @event.GetIntValue("dmg_health", 0);
             var hitgroup = @event.GetIntValue("hitgroup", 0);
+
+            // Entry Kill Attempt Tracking
+            if (!_firstEngagementHappened && attackerState.IsValid && victimState.IsValid && attackerState.Team != victimState.Team && !attackerState.IsBot && !victimState.IsBot)
+            {
+                _firstEngagementHappened = true;
+                _firstEngagementAttackerIndex = (int)attacker!.Index;
+                _firstEngagementVictimIndex = victimIndex;
+
+                _playerSessions.MutatePlayer(attackerState.SteamId, stats => stats.Combat.EntryKillAttempts++);
+                _logger.LogInformation("First engagement of round {Round}: {Attacker} vs {Victim}", _currentRoundNumber, attackerState.PlayerName, victimState.PlayerName);
+            }
 
             if (victimState.IsValid && !victimState.IsBot)
             {
@@ -439,8 +468,10 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         try
         {
             var player = @event.GetPlayerOrDefault("userid");
+            if (player == null) return;
+            var playerIndex = (int)player.Index;
+
             var playerState = PlayerControllerState.From(player);
-            
             if (!playerState.IsValid || playerState.IsBot) return;
             
             var weapon = @event.GetStringValue("weapon", "unknown") ?? "unknown";
@@ -479,6 +510,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         try
         {
             var player = @event.GetPlayerOrDefault("userid");
+            if (player == null) return;
+            
             var playerState = PlayerControllerState.From(player);
             if (!playerState.IsValid || playerState.IsBot) return;
 
@@ -514,85 +547,90 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         try
         {
             var player = @event.GetPlayerOrDefault("userid");
+            if (player == null) return;
+            var playerIndex = (int)player.Index;
+
             var playerState = PlayerControllerState.From(player);
             if (playerState.IsValid && !playerState.IsBot)
             {
-                _playersAliveThisRound.Add(playerState.SteamId);
+                if (!_isPlayerAlive[playerIndex])
+                {
+                    if (playerState.Team == PlayerTeam.CounterTerrorist) _ctAliveCount++;
+                    else if (playerState.Team == PlayerTeam.Terrorist) _tAliveCount++;
+                }
+
+                _isPlayerAlive[playerIndex] = true;
+                _playerSteamIds[playerIndex] = playerState.SteamId;
                 _playerSessions.MutatePlayer(playerState.SteamId, stats => { stats.Round.SurvivedThisRound = true; stats.CurrentTeam = playerState.Team; });
             }
         }
         catch (Exception ex) { _logger.LogError(ex, "Error handling player spawned event"); }
     }
 
-    public void ResetRoundStats()
+        private void HandlePlayerDisconnected(EventPlayerDisconnect @event)
     {
         try
         {
-            var now = _timeProvider.GetUtcNow().UtcDateTime;
-            foreach (var kvp in _pendingTradeOpportunities)
+            var player = @event.Userid;
+            if (player == null) return;
+            var playerIndex = (int)player.Index;
+            if (playerIndex >= 0 && playerIndex < MaxPlayers)
             {
-                var missedCount = kvp.Value.Count(o => o.Expiry <= now);
-                if (missedCount > 0) _playerSessions.MutatePlayer(kvp.Key, stats => stats.Round.TradeWindowsMissed += missedCount);
+                if (_isPlayerAlive[playerIndex])
+                {
+                    var steamId = _playerSteamIds[playerIndex];
+                    var team = _playerSessions.WithPlayer(steamId, ps => ps.CurrentTeam, PlayerTeam.Spectator);
+                    if (team == PlayerTeam.CounterTerrorist) _ctAliveCount--;
+                    else if (team == PlayerTeam.Terrorist) _tAliveCount--;
+                }
+
+                _isPlayerAlive[playerIndex] = false;
+                _playerSteamIds[playerIndex] = 0;
+                _playerRoundKills[playerIndex] = 0;
             }
-            
-            // Return current objects to pool and get fresh ones
-            _hashSetPool.Return(_playersAliveThisRound);
-            _dateTimeDictPool.Return(_lastDeathByPlayer);
-            _dateTimeDictPool.Return(_firstKillTimes);
-            _intDictPool.Return(_roundKills);
-            _killerDictPool.Return(_lastKillerOfPlayer);
-            _tradeDictPool.Return(_pendingTradeOpportunities);
-
-            _playersAliveThisRound = _hashSetPool.Get();
-            _lastDeathByPlayer = _dateTimeDictPool.Get();
-            _firstKillTimes = _dateTimeDictPool.Get();
-            _roundKills = _intDictPool.Get();
-            _lastKillerOfPlayer = _killerDictPool.Get();
-            _pendingTradeOpportunities = _tradeDictPool.Get();
-
-            _lastTeamDeathTime[PlayerTeam.Terrorist] = DateTime.MinValue; 
-            _lastTeamDeathTime[PlayerTeam.CounterTerrorist] = DateTime.MinValue;
         }
-        catch (Exception ex) { _logger.LogError(ex, "Error resetting round statistics"); }
+        catch (Exception ex) { _logger.LogError(ex, "Error handling player disconnected event"); }
     }
 
-    public void UpdateClutchStats(PlayerTeam winningTeam)
+    public void OnRoundEnd(int winnerTeam, int winReason)
+    {
+        var winningTeam = winnerTeam switch { 2 => PlayerTeam.Terrorist, 3 => PlayerTeam.CounterTerrorist, _ => PlayerTeam.Spectator };
+        UpdateClutchStats(winningTeam);
+    }
+
+    private void UpdateClutchStats(PlayerTeam winningTeam)
     {
         try
         {
             var (ctAlive, tAlive) = GetAliveCounts();
-            foreach (var playerId in _playersAliveThisRound)
+            for (int i = 0; i < MaxPlayers; i++)
             {
-                _playerSessions.MutatePlayer(playerId, stats =>
+                if (_isPlayerAlive[i])
                 {
-                    var team = stats.CurrentTeam;
-                    var teamAlive = team == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
-                    var enemyAlive = team == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
-                    if (teamAlive == 1 && enemyAlive >= 1)
+                    var steamId = _playerSteamIds[i];
+                    if (steamId == 0) continue;
+
+                    _playerSessions.MutatePlayer(steamId, stats =>
                     {
-                        if (team == winningTeam)
+                        var team = stats.CurrentTeam;
+                        var teamAlive = team == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
+                        var enemyAlive = team == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
+                        if (teamAlive == 1 && enemyAlive >= 1)
                         {
-                            var settings = _config.CurrentValue.ClutchSettings;
-                            var clutchImpact = settings.BaseMultiplier + (enemyAlive * settings.DifficultyWeight);
-                            stats.ClutchesWon++; stats.ClutchPoints += clutchImpact;
+                            if (team == winningTeam)
+                            {
+                                var settings = _config.CurrentValue.ClutchSettings;
+                                var clutchImpact = settings.BaseMultiplier + (enemyAlive * settings.DifficultyWeight);
+                                stats.Combat.ClutchesWon++; 
+                                stats.Combat.ClutchPoints += clutchImpact;
+                            }
+                            else stats.Combat.ClutchesLost++;
                         }
-                        else stats.ClutchesLost++;
-                    }
-                });
+                    });
+                }
             }
         }
         catch (Exception ex) { _logger.LogError(ex, "Error updating clutch statistics"); }
-    }
-
-    public (int CtAlive, int TAlive) GetAliveCounts()
-    {
-        var ctAlive = 0; var tAlive = 0;
-        foreach (var playerId in _playersAliveThisRound)
-        {
-            var team = _playerSessions.WithPlayer(playerId, ps => ps.CurrentTeam, PlayerTeam.Spectator);
-            if (team == PlayerTeam.CounterTerrorist) ctAlive++; else if (team == PlayerTeam.Terrorist) tAlive++;
-        }
-        return (ctAlive, tAlive);
     }
 
     private static float CalculateDistance(Vector pos1, Vector pos2)

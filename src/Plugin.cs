@@ -28,6 +28,8 @@ using statsCollector.Infrastructure.Database;
 using statsCollector.Services;
 using statsCollector.Services.Handlers;
 
+using statsCollector.Infrastructure.Observability;
+
 namespace statsCollector;
 
 public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<PluginConfig>
@@ -57,15 +59,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             config.Validate();
             _config = config;
 
-            Log.Logger = new LoggerConfiguration()
-                .MinimumLevel.Is(GetSerilogLevel(config.LogLevel))
-                .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
-                .MinimumLevel.Override("System.Net.Http", LogEventLevel.Warning)
-                .Enrich.FromLogContext()
-                .Enrich.WithProperty("Version", Instrumentation.ServiceVersion)
-                .WriteTo.Console()
-                .WriteTo.File("logs/statscollector-.log", rollingInterval: RollingInterval.Day)
-                .CreateLogger();
+            Bootstrapper.InitializeSerilog(config);
 
             _logger.LogInformation("Configuration validated and Serilog initialized. DB Host: {Host}, DB Port: {Port}", config.DatabaseHost, config.DatabasePort);
         }
@@ -75,17 +69,6 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             throw;
         }
     }
-
-    private static LogEventLevel GetSerilogLevel(LogLevel level) => level switch
-    {
-        LogLevel.Trace => LogEventLevel.Verbose,
-        LogLevel.Debug => LogEventLevel.Debug,
-        LogLevel.Information => LogEventLevel.Information,
-        LogLevel.Warning => LogEventLevel.Warning,
-        LogLevel.Error => LogEventLevel.Error,
-        LogLevel.Critical => LogEventLevel.Fatal,
-        _ => LogEventLevel.Information
-    };
 
     public override void Load(bool hotReload)
     {
@@ -108,25 +91,11 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
 
     private async Task InitializePluginAsync(bool hotReload, CancellationToken ct)
     {
+        var (tracer, meter) = Bootstrapper.InitializeOpenTelemetry();
+        _tracerProvider = tracer;
+        _meterProvider = meter;
+
         var services = new ServiceCollection();
-
-        // OTEL Setup
-        var resourceBuilder = ResourceBuilder.CreateDefault()
-            .AddService(Instrumentation.ServiceName, serviceVersion: Instrumentation.ServiceVersion);
-        
-        _tracerProvider = Sdk.CreateTracerProviderBuilder()
-            .SetResourceBuilder(resourceBuilder)
-            .AddSource(Instrumentation.ServiceName)
-            .AddSource("MySqlConnector")
-            .AddOtlpExporter()
-            .Build();
-
-        _meterProvider = Sdk.CreateMeterProviderBuilder()
-            .SetResourceBuilder(resourceBuilder)
-            .AddMeter(Instrumentation.ServiceName)
-            .AddRuntimeInstrumentation()
-            .AddOtlpExporter()
-            .Build();
 
         // DI Registration
         services.AddSingleton(Options.Create(_config));
@@ -169,7 +138,6 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddSingleton<IJsonRecoveryService, JsonRecoveryService>();
         services.AddSingleton<IMapDataService, MapDataService>();
         services.AddSingleton<IConfigLoaderService, ConfigLoaderService>();
-        services.Configure<MapDataConfig>(config => _config.Bind(config)); 
         services.AddSingleton<IFlashEfficiencyService, FlashEfficiencyService>();
         services.AddSingleton<IRoundBackupService, RoundBackupService>();
         services.AddSingleton<IScrimManager, ScrimManager>();

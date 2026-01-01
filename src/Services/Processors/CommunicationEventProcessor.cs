@@ -3,6 +3,7 @@ using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
 using Microsoft.Extensions.Logging;
 using statsCollector.Domain;
+using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
@@ -47,14 +48,13 @@ public sealed class CommunicationEventProcessor : ICommunicationEventProcessor
     private void HandlePlayerPing(EventPlayerPing @event)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        var playerState = PlayerControllerState.From(player);
-        if (!playerState.IsValid || playerState.IsBot) return;
+        if (player == null || !player.IsValid || player.SteamID == 0 || player.IsBot) return;
 
-        _playerSessions.MutatePlayer(playerState.SteamId, stats =>
+        _playerSessions.MutatePlayer(player.SteamID, stats =>
         {
             stats.Round.Pings++;
         });
 
-        _logger.LogTrace("Player {SteamId} pinged at ({X}, {Y}, {Z})", playerState.SteamId, @event.X, @event.Y, @event.Z);
+        _logger.LogTrace("Player {SteamId} pinged at ({X}, {Y}, {Z})", player.SteamID, @event.X, @event.Y, @event.Z);
     }
 }

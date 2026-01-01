@@ -6,6 +6,7 @@ using CounterStrikeSharp.API.Core;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using statsCollector.Config;
+using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
@@ -75,7 +76,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
 
         if (_matchTracker.CurrentMatch != null)
         {
-            _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.MatchEnd, _matchTracker.CurrentMatch.MatchId));
+            _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.MatchEnd, _matchTracker.CurrentMatch.MatchId ?? 0));
         }
 
         await _persistenceChannel.FlushAsync(CancellationToken.None);
@@ -89,7 +90,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         _positionTracking.OnTick();
     }
 
-    private async Task SaveAllStatsAsync()
+    private Task SaveAllStatsAsync()
     {
         var match = _matchTracker.CurrentMatch;
         var snapshots = _playerSessions.CaptureSnapshots(true, match?.MatchId, match?.MatchUuid);
@@ -103,5 +104,6 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
                 snapshot.RoundNumber, 
                 snapshot.SteamId));
         }
+        return Task.CompletedTask;
     }
 }

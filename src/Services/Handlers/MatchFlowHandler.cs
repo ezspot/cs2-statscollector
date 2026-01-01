@@ -91,7 +91,7 @@ public sealed class MatchFlowHandler : IGameHandler
     private HookResult OnRoundFreezeEnd(EventRoundFreezeEnd @event, GameEventInfo info)
     {
         if (_config.DeathmatchMode) return HookResult.Continue;
-        if (_scrimManager.CurrentState is not (ScrimState.InProgress or ScrimState.Live))
+        if (_scrimManager.CurrentState is not (ScrimState.Live))
         {
             _logger.LogDebug("Skipping RoundFreezeEnd logic: Scrim is not InProgress or Live.");
             return HookResult.Continue;

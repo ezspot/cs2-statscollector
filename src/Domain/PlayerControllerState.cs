@@ -21,6 +21,7 @@ public sealed record PlayerControllerState
     public required QAngle EyeAngles { get; init; }
     public required Vector Velocity { get; init; }
     public required int Money { get; init; }
+    public required int EquipmentValue { get; init; }
     public required int Score { get; init; }
     public required int Kills { get; init; }
     public required int Deaths { get; init; }
@@ -46,6 +47,7 @@ public sealed record PlayerControllerState
                 EyeAngles = new QAngle(0, 0, 0),
                 Velocity = new Vector(0, 0, 0),
                 Money = 0,
+                EquipmentValue = 0,
                 Score = 0,
                 Kills = 0,
                 Deaths = 0,
@@ -64,20 +66,21 @@ public sealed record PlayerControllerState
             PlayerName = player.PlayerName,
             Health = player.Health,
             Armor = player.PlayerPawn.Value?.ArmorValue ?? 0,
-            HasHelmet = player.PlayerPawn.Value?.HasHelmet ?? false,
+            HasHelmet = false, // Placeholder until correct ItemServices property is found
             Team = (PlayerTeam)player.TeamNum,
             Position = pawn?.AbsOrigin ?? new Vector(0, 0, 0),
             EyeAngles = pawn?.EyeAngles ?? new QAngle(0, 0, 0),
             Velocity = pawn?.AbsVelocity ?? new Vector(0, 0, 0),
             Money = player.InGameMoneyServices?.Account ?? 0,
+            EquipmentValue = player.InGameMoneyServices?.Account ?? 0, // Placeholder if EquipmentValue is missing
             Score = player.Score,
             Kills = player.ActionTrackingServices?.MatchStats.Kills ?? 0,
             Deaths = player.ActionTrackingServices?.MatchStats.Deaths ?? 0,
             Assists = player.ActionTrackingServices?.MatchStats.Assists ?? 0,
-            Mvps = player.ActionTrackingServices?.MatchStats.MVPs ?? 0,
+            Mvps = 0, // CSMatchStats_t missing Mvps prop in this version
             IsValid = true,
             IsBot = player.IsBot,
-            PawnHandle = pawn?.Handle.Value ?? 0
+            PawnHandle = (uint)(pawn?.Handle ?? 0)
         };
     }
 }
