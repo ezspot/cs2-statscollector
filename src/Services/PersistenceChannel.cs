@@ -20,6 +20,7 @@ public enum UpdateType
     PlayerStats,
     MatchSummary,
     WeaponStats,
+    Analytics,
     RoundStart,
     RoundEnd,
     MatchStart,
@@ -41,7 +42,6 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
     private readonly IServiceProvider _serviceProvider;
     private readonly IOptionsMonitor<PluginConfig> _config;
     private readonly string _recoveryPath = "pending_stats.json";
-    private readonly List<StatsUpdate> _batch = new(100);
 
     private readonly Queue<List<StatsUpdate>> _failedBatches = new();
     private readonly long _maxBufferSize = 50 * 1024 * 1024; // 50MB
@@ -58,7 +58,9 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
 
         var options = new BoundedChannelOptions(config.CurrentValue.PersistenceChannelCapacity)
         {
-            FullMode = BoundedChannelFullMode.DropOldest,
+            // DropWrite (not DropOldest) so a full channel surfaces via TryWrite returning false and we
+            // can log/account for the drop, rather than silently discarding earlier-round data.
+            FullMode = BoundedChannelFullMode.DropWrite,
             SingleReader = true,
             SingleWriter = false
         };
@@ -102,12 +104,10 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
 
         if (_channel.Writer.TryWrite(update))
         {
-            Instrumentation.StatsEnqueuedCounter.Add(1, new KeyValuePair<string, object?>("type", update.Type.ToString()));
             return true;
         }
 
         _logger.LogWarning("Persistence channel full! Dropped update for {SteamId} in {Match}", update.SteamId, update.MatchUuid);
-        Instrumentation.StatsDroppedCounter.Add(1, new KeyValuePair<string, object?>("reason", "channel_full"));
         return false;
     }
 
@@ -165,7 +165,28 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
         }
     }
 
+    // Safe wrapper: transient DB faults are already retried by the repository's Polly pipeline
+    // (timeout + retry + circuit breaker). If the batch still fails, buffer it in memory instead of
+    // adding a second, compounding retry loop here.
     private async Task ProcessBatchAsync(IReadOnlyList<StatsUpdate> batch, CancellationToken ct)
+    {
+        try
+        {
+            await ProcessBatchCoreAsync(batch, ct);
+
+            if (_failedBatches.Count > 0)
+            {
+                _ = Task.Run(async () => await ProcessRetryQueueAsync(ct), ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to process persistence batch after resilience pipeline. Buffering in-memory.");
+            BufferFailedBatch([.. batch]);
+        }
+    }
+
+    private async Task ProcessBatchCoreAsync(IReadOnlyList<StatsUpdate> batch, CancellationToken ct)
     {
         using var activity = Instrumentation.ActivitySource.StartActivity("PersistenceChannel.ProcessBatch");
         activity?.SetTag("batch.size", batch.Count);
@@ -173,81 +194,56 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
         using var scope = _serviceProvider.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<IStatsRepository>();
 
-        var retryCount = 0;
-        var delay = TimeSpan.FromSeconds(1);
+        // Group by type for efficiency
+        var playerUpdates = new List<PlayerSnapshot>();
+        var matchSummaries = new List<PlayerSnapshot>();
+        var weaponStats = new List<PlayerSnapshot>();
+        var analytics = new List<PlayerAnalyticsSnapshot>();
 
-        while (true)
+        foreach (var update in batch)
         {
-            try
+            switch (update.Type)
             {
-                // Group by type for efficiency
-                var playerUpdates = new List<PlayerSnapshot>();
-                var matchSummaries = new List<PlayerSnapshot>();
-                var weaponStats = new List<PlayerSnapshot>();
-
-                foreach (var update in batch)
-                {
-                    switch (update.Type)
+                case UpdateType.PlayerStats:
+                    if (update.Data is PlayerSnapshot ps) playerUpdates.Add(ps);
+                    break;
+                case UpdateType.MatchSummary:
+                    if (update.Data is PlayerSnapshot ms) matchSummaries.Add(ms);
+                    break;
+                case UpdateType.WeaponStats:
+                    if (update.Data is PlayerSnapshot ws) weaponStats.Add(ws);
+                    break;
+                case UpdateType.Analytics:
+                    if (update.Data is PlayerAnalyticsSnapshot pa) analytics.Add(pa);
+                    break;
+                case UpdateType.RoundStart:
+                    if (update.Data is (string mUuidRs, int rNumRs))
+                        await repository.StartRoundAsync(mUuidRs, rNumRs, ct);
+                    break;
+                case UpdateType.RoundEnd:
+                    if (update.Data is (string mUuidRe, int rNumRe, int wTeam, int reason))
+                        await repository.EndRoundAsync(mUuidRe, rNumRe, wTeam, reason, ct);
+                    break;
+                case UpdateType.MatchStart:
+                    if (update.Data is ValueTuple<string, string, string?> matchData)
                     {
-                        case UpdateType.PlayerStats:
-                            if (update.Data is PlayerSnapshot ps) playerUpdates.Add(ps);
-                            break;
-                        case UpdateType.MatchSummary:
-                            if (update.Data is PlayerSnapshot ms) matchSummaries.Add(ms);
-                            break;
-                        case UpdateType.WeaponStats:
-                            if (update.Data is PlayerSnapshot ws) weaponStats.Add(ws);
-                            break;
-                        case UpdateType.RoundStart:
-                            if (update.Data is (string mUuidRs, int rNumRs)) 
-                                await repository.StartRoundAsync(mUuidRs, rNumRs, ct);
-                            break;
-                        case UpdateType.RoundEnd:
-                            if (update.Data is (string mUuidRe, int rNumRe, int wTeam, int reason))
-                                await repository.EndRoundAsync(mUuidRe, rNumRe, wTeam, reason, ct);
-                            break;
-                        case UpdateType.MatchStart:
-                            if (update.Data is ValueTuple<string, string, string?> matchData)
-                            {
-                                var (mapStart, uuidStart, sUuidStart) = matchData;
-                                await repository.StartMatchAsync(mapStart, uuidStart, sUuidStart, ct);
-                            }
-                            break;
-                        case UpdateType.MatchEnd:
-                            if (update.Data is string matchUuid)
-                                await repository.EndMatchAsync(matchUuid, ct);
-                            break;
+                        var (mapStart, uuidStart, sUuidStart) = matchData;
+                        await repository.StartMatchAsync(mapStart, uuidStart, sUuidStart, ct);
                     }
-                }
-
-                if (playerUpdates.Count > 0) await repository.UpsertPlayersAsync(playerUpdates, ct);
-                if (matchSummaries.Count > 0) await repository.UpsertMatchSummariesAsync(matchSummaries, ct);
-                if (weaponStats.Count > 0) await repository.UpsertMatchWeaponStatsAsync(weaponStats, ct);
-                
-                _logger.LogDebug("Processed persistence batch of {Count} items", batch.Count);
-                
-                // If we have failed batches, try to process one now
-                if (_failedBatches.Count > 0)
-                {
-                    _ = Task.Run(async () => await ProcessRetryQueueAsync(ct), ct);
-                }
-                
-                return; // Success
-            }
-            catch (Exception ex) when (retryCount < 5)
-            {
-                retryCount++;
-                _logger.LogWarning(ex, "Failed to process persistence batch. Retry {Count}/5 after {Delay}ms", retryCount, delay.TotalMilliseconds);
-                await Task.Delay(delay, ct);
-                delay = TimeSpan.FromTicks(delay.Ticks * 2); // Exponential backoff
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to process persistence batch after max retries. Buffering in-memory.");
-                BufferFailedBatch([.. batch]);
-                return; // Buffer and continue
+                    break;
+                case UpdateType.MatchEnd:
+                    if (update.Data is string matchUuid)
+                        await repository.EndMatchAsync(matchUuid, ct);
+                    break;
             }
         }
+
+        if (playerUpdates.Count > 0) await repository.UpsertPlayersAsync(playerUpdates, ct);
+        if (matchSummaries.Count > 0) await repository.UpsertMatchSummariesAsync(matchSummaries, ct);
+        if (weaponStats.Count > 0) await repository.UpsertMatchWeaponStatsAsync(weaponStats, ct);
+        if (analytics.Count > 0) await repository.UpsertPlayerAnalyticsAsync(analytics, ct);
+
+        _logger.LogDebug("Processed persistence batch of {Count} items", batch.Count);
     }
 
     private void BufferFailedBatch(List<StatsUpdate> batch)
@@ -265,7 +261,6 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
 
         _failedBatches.Enqueue(batch);
         _currentBufferSize += estimatedSize;
-        Instrumentation.StatsDroppedCounter.Add(batch.Count, new KeyValuePair<string, object?>("reason", "db_error_buffered"));
     }
 
     private async Task ProcessRetryQueueAsync(CancellationToken ct)
@@ -281,7 +276,8 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
             
             try
             {
-                await ProcessBatchAsync(batch, ct);
+                // Use the throwing core so a still-down DB re-enqueues rather than silently re-buffering.
+                await ProcessBatchCoreAsync(batch, ct);
                 _currentBufferSize -= batch.Count * 1024;
             }
             catch

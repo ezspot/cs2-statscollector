@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.Extensions.Logging;
@@ -61,6 +62,7 @@ public sealed class MatchStatsService(
 
         var baselineById = baseline.ToDictionary(b => b.SteamId);
         var current = _playerSessions.CaptureSnapshots(onlyDirty: false, match.MatchId, match.MatchUuid);
+        var calculatedAt = DateTime.UtcNow;
 
         var written = 0;
         foreach (var cur in current)
@@ -73,6 +75,11 @@ public sealed class MatchStatsService(
 
             _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.MatchSummary, delta, match.MatchUuid, delta.RoundNumber, delta.SteamId));
             _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.WeaponStats, delta, match.MatchUuid, delta.RoundNumber, delta.SteamId));
+
+            // Temporal analytics snapshot: the player's current (lifetime) computed analytics, stamped
+            // with this match. One row per match builds the performance timeline.
+            var pa = BuildAnalyticsSnapshot(cur, match.MatchUuid, calculatedAt);
+            _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.Analytics, pa, match.MatchUuid, cur.RoundNumber, cur.SteamId));
             written++;
         }
 
@@ -112,6 +119,53 @@ public sealed class MatchStatsService(
             WeaponShots = DeltaDictionary(cur.WeaponShots, b?.WeaponShots),
             WeaponHits = DeltaDictionary(cur.WeaponHits, b?.WeaponHits)
         };
+    }
+
+    private PlayerAnalyticsSnapshot BuildAnalyticsSnapshot(PlayerSnapshot cur, string matchUuid, DateTime calculatedAt)
+    {
+        // rating2 is HLTV 2.0 computed from the player's lifetime totals at this point in time.
+        var rating2 = _analytics.CalculateHltv2Rating(cur.Kills, cur.Assists, cur.Deaths, cur.RoundsPlayed, cur.KASTPercentage, cur.AverageDamagePerRound);
+        var entrySuccessRate = cur.EntryKillAttempts > 0
+            ? (decimal)cur.EntryKillAttemptWins / cur.EntryKillAttempts * 100m
+            : 0m;
+
+        return new PlayerAnalyticsSnapshot(
+            MatchUuid: matchUuid,
+            SteamId: cur.SteamId,
+            CalculatedAt: calculatedAt,
+            Name: cur.Name,
+            Rating2: rating2,
+            KillsPerRound: cur.AverageKillsPerRound,
+            DeathsPerRound: cur.AverageDeathsPerRound,
+            ImpactScore: cur.ImpactRating,
+            KastPercentage: cur.KASTPercentage,
+            AverageDamagePerRound: cur.AverageDamagePerRound,
+            UtilityImpactScore: cur.UtilityImpactScore,
+            ClutchSuccessRate: cur.ClutchSuccessRate,
+            TradeSuccessRate: cur.TradeKillRatio * 100m,
+            FlashWaste: cur.FlashWaste,
+            EntryKills: cur.EntryKills,
+            EntryDeaths: cur.EntryDeaths,
+            EntryKillAttempts: cur.EntryKillAttempts,
+            EntryKillAttemptWins: cur.EntryKillAttemptWins,
+            EntrySuccessRate: entrySuccessRate,
+            RoundsPlayed: cur.RoundsPlayed,
+            KdRatio: cur.KDRatio,
+            HeadshotPercentage: cur.HeadshotPercentage,
+            OpeningKillRatio: cur.OpeningKillRatio,
+            TradeKillRatio: cur.TradeKillRatio,
+            GrenadeEffectivenessRate: cur.GrenadeEffectivenessRate,
+            FlashEffectivenessRate: cur.FlashEffectivenessRate,
+            UtilityUsagePerRound: cur.UtilityUsagePerRound,
+            AverageMoneySpentPerRound: cur.AverageMoneySpentPerRound,
+            PerformanceScore: cur.PerformanceScore,
+            TopWeaponByKills: cur.TopWeaponByKills,
+            SurvivalRating: cur.SurvivalRating,
+            UtilityScore: cur.UtilityScore,
+            ClutchPoints: cur.ClutchPoints,
+            FlashAssistedKills: cur.FlashAssistedKills,
+            WallbangKills: cur.WallbangKills,
+            IdempotencyKey: $"{matchUuid}_{cur.SteamId}_Analytics");
     }
 
     private static Dictionary<string, int> DeltaDictionary(IReadOnlyDictionary<string, int> current, IReadOnlyDictionary<string, int>? baseline)

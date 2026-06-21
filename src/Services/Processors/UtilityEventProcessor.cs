@@ -63,16 +63,19 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
         foreach (var kvp in _pendingGrenades)
         {
             var p = kvp.Value;
-            if (p.HasEffect) continue;
+            if (p.HasEffect)
+            {
+                // A flash that blinded at least one enemy counts as an effective flash.
+                if (p.Type == UtilityType.Flash)
+                    _playerSessions.MutatePlayer(p.OwnerSteamId, stats => stats.Utility.EffectiveFlashes++);
+                continue;
+            }
 
             _playerSessions.MutatePlayer(p.OwnerSteamId, stats =>
             {
                 stats.Utility.UtilityWasteCount++;
                 if (p.Type == UtilityType.Flash) stats.Utility.WastedFlashes++;
             });
-            Instrumentation.FlashWasteCounter.Add(1,
-                new KeyValuePair<string, object?>("player", p.OwnerSteamId),
-                new KeyValuePair<string, object?>("type", p.Type.ToString()));
         }
         _pendingGrenades.Clear();
     }
@@ -138,15 +141,12 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
                 _playerSessions.MutatePlayer(victimState.SteamId, stats =>
                 {
                     stats.Utility.TotalBlindTime += blindDuration;
+                    stats.Utility.TimesBlinded++;
                 });
             }
 
             if (attackerState.IsValid && !attackerState.IsBot && attackerState.SteamId != victimState.SteamId)
             {
-                Instrumentation.BlindDurationCounter.Add(blindDurationMs, 
-                    new KeyValuePair<string, object?>("attacker", attackerState.SteamId),
-                    new KeyValuePair<string, object?>("map", CounterStrikeSharp.API.Server.MapName));
-                
                 _playerSessions.MutatePlayer(attackerState.SteamId, stats =>
                 {
                     if (victimState.IsValid)
@@ -191,10 +191,6 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
                 var now = DateTime.UtcNow;
                 var pendingKey = $"{typeName}_{playerState.SteamId}";
                 _pendingGrenades[pendingKey] = new PendingGrenade(playerState.SteamId, type, now);
-
-                Instrumentation.GrenadesDetonatedCounter.Add(1,
-                    new KeyValuePair<string, object?>("type", typeName),
-                    new KeyValuePair<string, object?>("map", CounterStrikeSharp.API.Server.MapName));
 
                 if (playerState.PawnHandle != 0 && _config.CurrentValue.EnablePositionTracking)
                 {

@@ -58,11 +58,11 @@ Any option can be overridden by an environment variable prefixed with `STATSCOLL
   most database rows and the most batched inserts, so on busy or resource-constrained servers it is
   the first thing to disable if you don't need heatmaps. Disabling it has no effect on combat,
   economy, or match statistics.
-- `EnableMovementTracking` (default `true`) — counts footsteps, jumps, and pings per player.
+- `EnableMovementTracking` (default `false`) — counts footsteps, jumps, and pings per player.
   **Performance:** `player_footstep` fires very frequently (multiple times per second for every moving
   player), and each one takes a per-player lock to increment a counter on the game thread. The
-  analytical value is low, so disabling it removes a constant source of game-thread work on a busy
-  server. When off, these handlers aren't even subscribed (zero per-event cost).
+  analytical value is low, so it is off by default. When off, these handlers aren't even subscribed
+  (zero per-event cost); enable it only if you specifically want movement counters.
 - `EnableScrim` (default `true`) — scrim/match-management commands. When `false`, stat tracking runs on
   every round without needing a scrim to be started (plain stats server).
 
@@ -103,7 +103,9 @@ Flow: CS2 event → event processor → `PlayerSessionService` (per-player locke
 
 - Database access goes through `IConnectionFactory` + Dapper, wrapped in a Polly resilience pipeline.
 - Logging is via Serilog (console + daily rolling file under `logs/`).
-- Lightweight `System.Diagnostics` `ActivitySource`/`Meter` instrumentation is present but has no exporter wired by default (no external collector required).
+- Observability is structured logging (Serilog). A lightweight `System.Diagnostics.ActivitySource` is
+  present for optional tracing (a no-op with no listener attached); no metrics `Meter`/exporter is wired
+  since the plugin runs in-process with no scrape endpoint.
 
 ## Development
 - Build: `dotnet build -c Release`

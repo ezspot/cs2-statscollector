@@ -205,11 +205,10 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
 
         if (_channel.Writer.TryWrite(@event))
         {
-            Instrumentation.PositionEventsEnqueuedCounter.Add(1);
+            return Task.CompletedTask;
         }
         else
         {
-            Instrumentation.PositionEventsDroppedCounter.Add(1);
             _logger.LogWarning("Position event dropped: channel full. Type: {Type}", @event.GetType().Name);
             activity?.SetStatus(ActivityStatusCode.Error, "Channel full");
             ReturnToPool(@event);

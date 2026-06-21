@@ -19,13 +19,10 @@ public sealed class RoundStats
     private int _jumps;
     private int _totalSpawns;
     private int _playtimeSeconds;
-    private int _itemsDropped;
-    private int _cashEarned;
     private int _roundNumber;
     private DateTime _roundStartUtc;
     private int _ctRounds;
     private int _tRounds;
-    private int _tradeWindowsMissed;
     private bool _wasTradedThisRound;
     private bool _wasFlashedForKill;
     private int _pings;
@@ -48,13 +45,10 @@ public sealed class RoundStats
     public int Jumps { get => _jumps; set { _jumps = value; _markDirty(); } }
     public int TotalSpawns { get => _totalSpawns; set { _totalSpawns = value; _markDirty(); } }
     public int PlaytimeSeconds { get => _playtimeSeconds; set { _playtimeSeconds = value; _markDirty(); } }
-    public int ItemsDropped { get => _itemsDropped; set { _itemsDropped = value; _markDirty(); } }
-    public int CashEarned { get => _cashEarned; set { _cashEarned = value; _markDirty(); } }
     public int RoundNumber { get => _roundNumber; set { _roundNumber = value; _markDirty(); } }
     public DateTime RoundStartUtc { get => _roundStartUtc; set { _roundStartUtc = value; _markDirty(); } }
     public int CtRounds { get => _ctRounds; set { _ctRounds = value; _markDirty(); } }
     public int TRounds { get => _tRounds; set { _tRounds = value; _markDirty(); } }
-    public int TradeWindowsMissed { get => _tradeWindowsMissed; set { _tradeWindowsMissed = value; _markDirty(); } }
     public bool WasTradedThisRound { get => _wasTradedThisRound; set { _wasTradedThisRound = value; _markDirty(); } }
     public bool WasFlashedForKill { get => _wasFlashedForKill; set { _wasFlashedForKill = value; _markDirty(); } }
     public int Pings { get => _pings; set { _pings = value; _markDirty(); } }
@@ -78,8 +72,7 @@ public sealed class RoundStats
         _roundsPlayed = _roundsWon = _kastRounds = 0;
         _aliveOnTeamAtRoundStart = _aliveEnemyAtRoundStart = 0;
         _jumps = _totalSpawns = _playtimeSeconds = 0;
-        _itemsDropped = _cashEarned = 0;
-        _roundNumber = _ctRounds = _tRounds = _tradeWindowsMissed = 0;
+        _roundNumber = _ctRounds = _tRounds = 0;
         ResetRoundFlags();
     }
 }

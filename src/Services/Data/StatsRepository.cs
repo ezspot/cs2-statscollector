@@ -23,6 +23,7 @@ public interface IStatsRepository
     Task UpsertPlayerAsync(PlayerSnapshot snapshot, CancellationToken cancellationToken);
     Task UpsertMatchSummariesAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken);
     Task UpsertMatchWeaponStatsAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken);
+    Task UpsertPlayerAnalyticsAsync(IEnumerable<PlayerAnalyticsSnapshot> snapshots, CancellationToken cancellationToken);
     
     // Match Lifecycle
     Task StartMatchAsync(string mapName, string? matchUuid, string? seriesUuid, CancellationToken ct);
@@ -55,8 +56,7 @@ public sealed class StatsRepository : IStatsRepository
         await _resiliencePipeline.ExecuteAsync(async ct => 
         {
             using var activity = Instrumentation.ActivitySource.StartActivity("UpsertPlayersAsync");
-            Instrumentation.DbOperationsCounter.Add(1, new KeyValuePair<string, object?>("operation", "upsert_players"));
-            
+
             _logger.LogDebug("Starting bulk upsert for {Count} players", snapshotList.Count);
             try
             {
@@ -82,7 +82,6 @@ public sealed class StatsRepository : IStatsRepository
         await _resiliencePipeline.ExecuteAsync(async ct => 
         {
             using var activity = Instrumentation.ActivitySource.StartActivity("UpsertMatchSummariesAsync");
-            Instrumentation.DbOperationsCounter.Add(1, new KeyValuePair<string, object?>("operation", "upsert_match_summaries"));
 
             await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
             
@@ -177,7 +176,6 @@ public sealed class StatsRepository : IStatsRepository
         await _resiliencePipeline.ExecuteAsync(async ct => 
         {
             using var activity = Instrumentation.ActivitySource.StartActivity("UpsertMatchWeaponStatsAsync");
-            Instrumentation.DbOperationsCounter.Add(1, new KeyValuePair<string, object?>("operation", "upsert_match_weapons"));
 
             await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
             
@@ -226,6 +224,48 @@ public sealed class StatsRepository : IStatsRepository
             await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_match_weapon_stats_uuid;").ConfigureAwait(false);
             
             _logger.LogInformation("Bulk upserted {Count} weapon records using MatchUuid resolution", weaponData.Count);
+        }, cancellationToken);
+    }
+
+    public async Task UpsertPlayerAnalyticsAsync(IEnumerable<PlayerAnalyticsSnapshot> snapshots, CancellationToken cancellationToken)
+    {
+        var list = snapshots.Where(s => !string.IsNullOrEmpty(s.MatchUuid)).ToList();
+        if (list.Count == 0) return;
+
+        await _resiliencePipeline.ExecuteAsync(async ct =>
+        {
+            using var activity = Instrumentation.ActivitySource.StartActivity("UpsertPlayerAnalyticsAsync");
+
+            await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+
+            // Ensure parent rows exist for the steam_id FK before inserting analytics.
+            await connection.ExecuteAsync(new CommandDefinition(
+                "INSERT IGNORE INTO players (steam_id, name) VALUES (@SteamId, @Name);",
+                list, cancellationToken: ct)).ConfigureAwait(false);
+
+            // INSERT IGNORE keeps this idempotent if the channel re-processes a buffered batch
+            // (idempotency_key is UNIQUE). match_id is resolved from the match UUID.
+            const string sql = """
+                INSERT IGNORE INTO player_advanced_analytics
+                    (match_id, steam_id, calculated_at, name, rating2, kills_per_round, deaths_per_round, impact_score,
+                     kast_percentage, average_damage_per_round, utility_impact_score, clutch_success_rate, trade_success_rate,
+                     flash_waste, entry_kills, entry_deaths, entry_kill_attempts, entry_kill_attempt_wins, entry_success_rate,
+                     rounds_played, kd_ratio, headshot_percentage, opening_kill_ratio, trade_kill_ratio,
+                     grenade_effectiveness_rate, flash_effectiveness_rate, utility_usage_per_round, average_money_spent_per_round,
+                     performance_score, top_weapon_by_kills, survival_rating, utility_score, clutch_points,
+                     flash_assisted_kills, wallbang_kills, idempotency_key)
+                SELECT m.id, @SteamId, @CalculatedAt, @Name, @Rating2, @KillsPerRound, @DeathsPerRound, @ImpactScore,
+                     @KastPercentage, @AverageDamagePerRound, @UtilityImpactScore, @ClutchSuccessRate, @TradeSuccessRate,
+                     @FlashWaste, @EntryKills, @EntryDeaths, @EntryKillAttempts, @EntryKillAttemptWins, @EntrySuccessRate,
+                     @RoundsPlayed, @KdRatio, @HeadshotPercentage, @OpeningKillRatio, @TradeKillRatio,
+                     @GrenadeEffectivenessRate, @FlashEffectivenessRate, @UtilityUsagePerRound, @AverageMoneySpentPerRound,
+                     @PerformanceScore, @TopWeaponByKills, @SurvivalRating, @UtilityScore, @ClutchPoints,
+                     @FlashAssistedKills, @WallbangKills, @IdempotencyKey
+                FROM matches m WHERE m.match_uuid = @MatchUuid;
+                """;
+
+            var written = await connection.ExecuteAsync(new CommandDefinition(sql, list, cancellationToken: ct)).ConfigureAwait(false);
+            _logger.LogInformation("Persisted {Count} player analytics snapshots", written);
         }, cancellationToken);
     }
 
@@ -319,7 +359,6 @@ public sealed class StatsRepository : IStatsRepository
         dataTable.Columns.Add("molotovs_thrown", typeof(int));
         dataTable.Columns.Add("he_grenades_thrown", typeof(int));
         dataTable.Columns.Add("decoys_thrown", typeof(int));
-        dataTable.Columns.Add("tactical_grenades_thrown", typeof(int));
         dataTable.Columns.Add("players_blinded", typeof(int));
         dataTable.Columns.Add("times_blinded", typeof(int));
         dataTable.Columns.Add("flash_assists", typeof(int));
@@ -344,16 +383,11 @@ public sealed class StatsRepository : IStatsRepository
         dataTable.Columns.Add("total_defuse_time", typeof(int));
         dataTable.Columns.Add("bomb_kills", typeof(int));
         dataTable.Columns.Add("bomb_deaths", typeof(int));
-        dataTable.Columns.Add("hostages_rescued", typeof(int));
         dataTable.Columns.Add("jumps", typeof(int));
         dataTable.Columns.Add("money_spent", typeof(int));
         dataTable.Columns.Add("equipment_value", typeof(int));
         dataTable.Columns.Add("items_purchased", typeof(int));
         dataTable.Columns.Add("items_picked_up", typeof(int));
-        dataTable.Columns.Add("items_dropped", typeof(int));
-        dataTable.Columns.Add("cash_earned", typeof(int));
-        dataTable.Columns.Add("cash_spent", typeof(int));
-        dataTable.Columns.Add("loss_bonus", typeof(int));
         dataTable.Columns.Add("round_start_money", typeof(int));
         dataTable.Columns.Add("round_end_money", typeof(int));
         dataTable.Columns.Add("equipment_value_start", typeof(int));
@@ -375,8 +409,6 @@ public sealed class StatsRepository : IStatsRepository
         dataTable.Columns.Add("traded_deaths", typeof(int));
         dataTable.Columns.Add("high_impact_kills", typeof(int));
         dataTable.Columns.Add("low_impact_kills", typeof(int));
-        dataTable.Columns.Add("trade_opportunities", typeof(int));
-        dataTable.Columns.Add("trade_windows_missed", typeof(int));
         dataTable.Columns.Add("multi_kills", typeof(int));
         dataTable.Columns.Add("opening_duels_won", typeof(int));
         dataTable.Columns.Add("opening_duels_lost", typeof(int));
@@ -416,18 +448,18 @@ public sealed class StatsRepository : IStatsRepository
                 s.SteamId, s.Name, s.Kills, s.Deaths, s.Assists, s.Headshots, s.DamageDealt, s.DamageTaken, s.DamageArmor,
                 s.ShotsFired, s.ShotsHit, s.Mvps, s.Score, s.RoundsPlayed, s.RoundsWon, s.TotalSpawns, s.PlaytimeSeconds,
                 s.CtRounds, s.TRounds, s.GrenadesThrown, s.FlashesThrown, s.SmokesThrown, s.MolotovsThrown,
-                s.HeGrenadesThrown, s.DecoysThrown, s.TacticalGrenadesThrown, s.PlayersBlinded, s.TimesBlinded,
+                s.HeGrenadesThrown, s.DecoysThrown, s.PlayersBlinded, s.TimesBlinded,
                 s.FlashAssists, s.TotalBlindTime, s.TotalBlindTimeInflicted, s.UtilityDamageDealt, s.UtilityDamageTaken,
                 s.BombPlants, s.BombDefuses, s.BombPlantAttempts, s.BombPlantAborts, s.BombDefuseAttempts,
                 s.BombDefuseAborts, s.BombDefuseWithKit, s.BombDefuseWithoutKit, s.BombDrops, s.BombPickups,
                 s.DefuserDrops, s.DefuserPickups, s.ClutchDefuses, s.TotalPlantTime, s.TotalDefuseTime,
-                s.BombKills, s.BombDeaths, s.HostagesRescued, s.Jumps,
-                s.MoneySpent, s.EquipmentValue, s.ItemsPurchased, s.ItemsPickedUp, s.ItemsDropped, s.CashEarned, s.CashSpent,
-                s.LossBonus, s.RoundStartMoney, s.RoundEndMoney, s.EquipmentValueStart, s.EquipmentValueEnd,
+                s.BombKills, s.BombDeaths, s.Jumps,
+                s.MoneySpent, s.EquipmentValue, s.ItemsPurchased, s.ItemsPickedUp,
+                s.RoundStartMoney, s.RoundEndMoney, s.EquipmentValueStart, s.EquipmentValueEnd,
                 s.EnemiesFlashed, s.TeammatesFlashed, s.EffectiveFlashes, s.EffectiveSmokes, s.EffectiveHEGrenades,
                 s.EffectiveMolotovs, s.FlashWaste, s.MultiKillNades, s.NadeKills,
                 s.EntryKills, s.EntryDeaths, s.EntryKillAttempts, s.EntryKillAttemptWins,
-                s.TradeKills, s.TradedDeaths, s.HighImpactKills, s.LowImpactKills, s.TradeOpportunities, s.TradeWindowsMissed, s.MultiKills, s.OpeningDuelsWon, s.OpeningDuelsLost,
+                s.TradeKills, s.TradedDeaths, s.HighImpactKills, s.LowImpactKills, s.MultiKills, s.OpeningDuelsWon, s.OpeningDuelsLost,
                 s.Revenges, s.ClutchesWon, s.ClutchesLost, s.ClutchPoints, s.MvpsEliminations, s.MvpsBomb, s.MvpsHostage,
                 s.HeadshotsHit, s.ChestHits, s.StomachHits, s.ArmHits, s.LegHits,
                 s.KDRatio, s.HeadshotPercentage, s.AccuracyPercentage, s.KASTPercentage,
@@ -466,7 +498,7 @@ public sealed class StatsRepository : IStatsRepository
                 grenades_thrown = src.grenades_thrown,
                 flashes_thrown = src.flashes_thrown, smokes_thrown = src.smokes_thrown, molotovs_thrown = src.molotovs_thrown,
                 he_grenades_thrown = src.he_grenades_thrown, decoys_thrown = src.decoys_thrown,
-                tactical_grenades_thrown = src.tactical_grenades_thrown, players_blinded = src.players_blinded,
+                players_blinded = src.players_blinded,
                 times_blinded = src.times_blinded, flash_assists = src.flash_assists,
                 total_blind_time = src.total_blind_time, total_blind_time_inflicted = src.total_blind_time_inflicted,
                 utility_damage_dealt = src.utility_damage_dealt, utility_damage_taken = src.utility_damage_taken,
@@ -478,11 +510,10 @@ public sealed class StatsRepository : IStatsRepository
                 defuser_drops = src.defuser_drops, defuser_pickups = src.defuser_pickups,
                 clutch_defuses = src.clutch_defuses, total_plant_time = src.total_plant_time,
                 total_defuse_time = src.total_defuse_time, bomb_kills = src.bomb_kills, bomb_deaths = src.bomb_deaths,
-                hostages_rescued = src.hostages_rescued, jumps = src.jumps,
+                jumps = src.jumps,
                 money_spent = src.money_spent, equipment_value = src.equipment_value,
                 items_purchased = src.items_purchased, items_picked_up = src.items_picked_up,
-                items_dropped = src.items_dropped, cash_earned = src.cash_earned, cash_spent = src.cash_spent,
-                loss_bonus = src.loss_bonus, round_start_money = src.round_start_money, round_end_money = src.round_end_money,
+                round_start_money = src.round_start_money, round_end_money = src.round_end_money,
                 equipment_value_start = src.equipment_value_start, equipment_value_end = src.equipment_value_end,
                 enemies_flashed = src.enemies_flashed, teammates_flashed = src.teammates_flashed,
                 effective_flashes = src.effective_flashes, effective_smokes = src.effective_smokes,
@@ -491,8 +522,8 @@ public sealed class StatsRepository : IStatsRepository
                 entry_kills = src.entry_kills, entry_deaths = src.entry_deaths,
                 entry_kill_attempts = src.entry_kill_attempts, entry_kill_attempt_wins = src.entry_kill_attempt_wins,
                 trade_kills = src.trade_kills, traded_deaths = src.traded_deaths,
-                high_impact_kills = src.high_impact_kills, low_impact_kills = src.low_impact_kills, trade_opportunities = src.trade_opportunities,
-                trade_windows_missed = src.trade_windows_missed, multi_kills = src.multi_kills, opening_duels_won = src.opening_duels_won,
+                high_impact_kills = src.high_impact_kills, low_impact_kills = src.low_impact_kills,
+                multi_kills = src.multi_kills, opening_duels_won = src.opening_duels_won,
                 opening_duels_lost = src.opening_duels_lost, revenges = src.revenges,
                 clutches_won = src.clutches_won, clutches_lost = src.clutches_lost, clutch_points = src.clutch_points,
                 mvps_eliminations = src.mvps_eliminations, mvps_bomb = src.mvps_bomb, mvps_hostage = src.mvps_hostage,

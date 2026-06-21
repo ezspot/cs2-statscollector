@@ -70,10 +70,6 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
             activity?.SetTag("weapon", weapon);
             activity?.SetTag("cost", cost);
 
-            Instrumentation.MoneySpentCounter.Add(cost,
-                new KeyValuePair<string, object?>("weapon", weapon),
-                new KeyValuePair<string, object?>("map", CounterStrikeSharp.API.Server.MapName));
-
             _playerSessions.MutatePlayer(playerState.SteamId, stats =>
             {
                 stats.Economy.ItemsPurchased++;

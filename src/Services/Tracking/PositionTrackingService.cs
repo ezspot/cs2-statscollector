@@ -102,8 +102,6 @@ public sealed class PositionTrackingService : IPositionTrackingService
 
             await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);
             await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_kill_positions_uuid;").ConfigureAwait(false);
-
-            Instrumentation.PositionEventsTrackedCounter.Add(eventList.Count, new KeyValuePair<string, object?>("type", "kill"));
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -156,7 +154,6 @@ public sealed class PositionTrackingService : IPositionTrackingService
             await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);
             await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_death_positions_uuid;").ConfigureAwait(false);
 
-            Instrumentation.PositionEventsTrackedCounter.Add(eventList.Count, new KeyValuePair<string, object?>("type", "death"));
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -219,7 +216,6 @@ public sealed class PositionTrackingService : IPositionTrackingService
             await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);
             await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_utility_positions_uuid;").ConfigureAwait(false);
 
-            Instrumentation.PositionEventsTrackedCounter.Add(eventList.Count, new KeyValuePair<string, object?>("type", "utility"));
         }, cancellationToken).ConfigureAwait(false);
     }
 }

@@ -22,7 +22,7 @@ public interface ICombatEventProcessor : IEventProcessor
 
 public sealed class CombatEventProcessor : ICombatEventProcessor
 {
-    private static readonly HashSet<string> GrenadeWeaponNames = 
+    private static readonly HashSet<string> GrenadeWeaponNames =
     [
         "weapon_flashbang",
         "weapon_hegrenade",
@@ -32,6 +32,16 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         "weapon_decoy",
         "weapon_tagrenade",
         "weapon_frag_grenade"
+    ];
+
+    // player_hurt reports these (no "weapon_" prefix) for grenade/fire damage. Used to attribute
+    // utility damage and to keep gun-accuracy (ShotsHit) from being inflated by grenade hits.
+    private static readonly HashSet<string> UtilityDamageWeapons =
+    [
+        "hegrenade",
+        "molotov",
+        "incgrenade",
+        "inferno"
     ];
 
     private static readonly int MaxPlayers = 65; // CS2 max players + 1 for safety
@@ -52,6 +62,9 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     // EntityIndex-based state arrays for performance
     private readonly bool[] _isPlayerAlive = new bool[MaxPlayers];
     private readonly ulong[] _playerSteamIds = new ulong[MaxPlayers];
+    // Last known team per entity index, so alive-count cleanup on disconnect does not depend on the
+    // player session still existing (the lifecycle handler may have already removed it).
+    private readonly PlayerTeam[] _playerTeams = new PlayerTeam[MaxPlayers];
     private readonly int[] _playerRoundKills = new int[MaxPlayers];
     private readonly DateTime[] _playerLastDeathTime = new DateTime[MaxPlayers];
     private readonly DateTime[] _playerFirstKillTime = new DateTime[MaxPlayers];
@@ -117,6 +130,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     private void ResetRoundStats()
     {
         Array.Clear(_isPlayerAlive);
+        Array.Clear(_playerTeams);
         Array.Clear(_playerRoundKills);
         Array.Clear(_playerFirstKillTime);
         Array.Clear(_playerLastDeathTime);
@@ -184,10 +198,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
             if (victimState.IsValid && !victimState.IsBot)
             {
-                Instrumentation.DeathsCounter.Add(1, 
-                    new KeyValuePair<string, object?>("team", victimTeam.ToString()),
-                    new KeyValuePair<string, object?>("map", Server.MapName));
-                
+                _playerTeams[victimIndex] = victimTeam;
+
                 if (victimState.PawnHandle != 0 && _config.CurrentValue.EnablePositionTracking)
                 {
                     var matchUuid = _matchTracker?.CurrentMatch?.MatchUuid;
@@ -239,6 +251,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             {
                 var attackerIndex = (int)attacker!.Index;
                 var attackerTeam = attackerState.Team;
+                _playerTeams[attackerIndex] = attackerTeam;
                 var (ctAlive, tAlive) = GetAliveCounts();
                 var enemyAlive = attackerTeam == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
                 var teammatesAlive = attackerTeam == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
@@ -254,24 +267,15 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     killWeight += 0.15m;
                 }
 
-                if (teammatesAlive == 1 && enemyAlive >= 1) killWeight += 0.1m; 
-                
+                bool isClutchKill = teammatesAlive == 1 && enemyAlive >= 1;
+                if (isClutchKill) killWeight += 0.1m;
+
                 bool isRevengeKill = false;
                 if (victimState.IsValid && _playerLastKiller[attackerIndex].KillerId == victimState.SteamId)
                 {
                     isRevengeKill = true;
                     _playerLastKiller[attackerIndex] = default;
                 }
-
-                Instrumentation.KillsCounter.Add(1, 
-                    new KeyValuePair<string, object?>("team", attackerTeam.ToString()), 
-                    new KeyValuePair<string, object?>("weapon", weaponName),
-                    new KeyValuePair<string, object?>("map", Server.MapName),
-                    new KeyValuePair<string, object?>("is_revenge", isRevengeKill));
-                
-                Instrumentation.DamageCounter.Add(damage, 
-                    new KeyValuePair<string, object?>("team", attackerTeam.ToString()),
-                    new KeyValuePair<string, object?>("map", Server.MapName));
 
                 if (attackerState.PawnHandle != 0 && victimState.PawnHandle != 0 && _config.CurrentValue.EnablePositionTracking)
                 {
@@ -328,8 +332,9 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     stats.CurrentTeam = attackerTeam;
 
                     if (isRevengeKill) stats.Combat.RevengeKills++;
+                    if (isClutchKill) stats.Combat.ClutchKills++;
 
-                    if (_playerFirstKillTime[attackerIndex] == DateTime.MinValue) 
+                    if (_playerFirstKillTime[attackerIndex] == DateTime.MinValue)
                     { 
                         _playerFirstKillTime[attackerIndex] = now; 
                         stats.Combat.FirstKills++; 
@@ -422,9 +427,11 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             var victimState = PlayerControllerState.From(victim);
             var attackerState = PlayerControllerState.From(attacker);
             
-            var weapon = @event.GetStringValue("weapon", "unknown") ?? "unknown";
+            var weapon = (@event.GetStringValue("weapon", "unknown") ?? "unknown").ToLowerInvariant();
             var damage = @event.GetIntValue("dmg_health", 0);
+            var damageArmor = @event.GetIntValue("dmg_armor", 0);
             var hitgroup = @event.GetIntValue("hitgroup", 0);
+            var isUtilityDamage = UtilityDamageWeapons.Contains(weapon);
 
             // Entry Kill Attempt Tracking
             if (!_firstEngagementHappened && attackerState.IsValid && victimState.IsValid && attackerState.Team != victimState.Team && !attackerState.IsBot && !victimState.IsBot)
@@ -442,6 +449,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 _playerSessions.MutatePlayer(victimState.SteamId, stats =>
                 {
                     stats.Combat.DamageTaken += damage;
+                    if (isUtilityDamage) stats.Utility.UtilityDamageTaken += damage;
                 });
             }
 
@@ -451,8 +459,18 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 _playerSessions.MutatePlayer(attackerState.SteamId, stats =>
                 {
                     stats.Combat.DamageDealt += damage;
+                    stats.Combat.DamageArmor += damageArmor;
+
+                    if (isUtilityDamage)
+                    {
+                        // Utility damage is not a gun "hit"; keep it out of accuracy and weapon-hit stats.
+                        stats.Utility.UtilityDamage += damage;
+                        return;
+                    }
+
+                    stats.Combat.ShotsHit++;
                     stats.Weapon.RecordHit(weapon);
-                    
+
                     switch (hitgroup)
                     {
                         case 1: stats.Combat.HeadshotsHit++; break;
@@ -484,13 +502,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             
             _playerSessions.MutatePlayer(playerState.SteamId, stats =>
             {
-                stats.Combat.ShotsFired++;
-                stats.Combat.CurrentRoundShotsFired++;
-                
-                if (playerState.Velocity.Length() < 15.0f) 
-                    stats.Combat.ShotsFiredWhileStationary++;
-
-                stats.Weapon.RecordShot(weapon);
+                // Grenade throws are not gun shots; counting them would inflate accuracy (ShotsFired
+                // is the denominator for hit-rate, and a grenade can never register a ShotsHit).
                 if (GrenadeWeaponNames.Contains(weaponLower))
                 {
                     switch (weaponLower)
@@ -502,7 +515,16 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                         case "weapon_hegrenade": stats.Utility.HeGrenadesThrown++; break;
                         case "weapon_decoy": stats.Utility.DecoysThrown++; break;
                     }
+                    return;
                 }
+
+                stats.Combat.ShotsFired++;
+                stats.Combat.CurrentRoundShotsFired++;
+
+                if (playerState.Velocity.Length() < 15.0f)
+                    stats.Combat.ShotsFiredWhileStationary++;
+
+                stats.Weapon.RecordShot(weapon);
             });
         }
         catch (Exception ex) { _logger.LogError(ex, "Error handling weapon fire event"); }
@@ -564,6 +586,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
                 _isPlayerAlive[playerIndex] = true;
                 _playerSteamIds[playerIndex] = playerState.SteamId;
+                _playerTeams[playerIndex] = playerState.Team;
                 _playerSessions.MutatePlayer(playerState.SteamId, stats => { stats.Round.SurvivedThisRound = true; stats.CurrentTeam = playerState.Team; });
             }
         }
@@ -581,14 +604,14 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             {
                 if (_isPlayerAlive[playerIndex])
                 {
-                    var steamId = _playerSteamIds[playerIndex];
-                    var team = _playerSessions.WithPlayer(steamId, ps => ps.CurrentTeam, PlayerTeam.Spectator);
+                    var team = _playerTeams[playerIndex];
                     if (team == PlayerTeam.CounterTerrorist) _ctAliveCount--;
                     else if (team == PlayerTeam.Terrorist) _tAliveCount--;
                 }
 
                 _isPlayerAlive[playerIndex] = false;
                 _playerSteamIds[playerIndex] = 0;
+                _playerTeams[playerIndex] = PlayerTeam.Spectator;
                 _playerRoundKills[playerIndex] = 0;
             }
         }

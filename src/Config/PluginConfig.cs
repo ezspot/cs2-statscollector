@@ -63,9 +63,10 @@ public sealed class PluginConfig : BasePluginConfig
     [JsonPropertyName("EnablePositionTracking")]
     public bool EnablePositionTracking { get; set; } = true;
 
-    // High-frequency, low-value counters (footsteps, jumps, pings).
+    // High-frequency, low-value counters (footsteps, jumps, pings). Off by default: footstep is one
+    // of the most frequently fired events in CS2 and the data has little analytical value.
     [JsonPropertyName("EnableMovementTracking")]
-    public bool EnableMovementTracking { get; set; } = true;
+    public bool EnableMovementTracking { get; set; } = false;
 
     // Scrim/match-management system (lobby, captains, picking, knife, pauses). When false, stat
     // tracking runs on every round without requiring a scrim to be started.

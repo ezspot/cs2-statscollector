@@ -159,7 +159,6 @@ public sealed class MatchFlowHandler : IGameHandler
     {
         if (_config.DeathmatchMode) return HookResult.Continue;
 
-        Instrumentation.RoundsPlayedCounter.Add(1);
         var winningTeamInt = @event.GetIntValue("winner", 0);
         var winningTeam = winningTeamInt switch { 2 => PlayerTeam.Terrorist, 3 => PlayerTeam.CounterTerrorist, _ => PlayerTeam.Spectator };
 

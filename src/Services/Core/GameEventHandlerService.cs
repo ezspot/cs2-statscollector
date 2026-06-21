@@ -32,6 +32,8 @@ public interface IGameEventHandlerService
         private readonly IAnalyticsService _analytics;
         private readonly IMatchReadyService _matchReady;
         private readonly IEnumerable<IGameHandler> _handlers;
+        private readonly IEnumerable<IEventProcessor> _processors;
+        private readonly IEventDispatcher _dispatcher;
         private readonly IGameScheduler _scheduler;
 
         private PluginConfig _config => _configMonitor.CurrentValue;
@@ -46,6 +48,8 @@ public interface IGameEventHandlerService
             IAnalyticsService analytics,
             IMatchReadyService matchReady,
             IEnumerable<IGameHandler> handlers,
+            IEnumerable<IEventProcessor> processors,
+            IEventDispatcher dispatcher,
             IGameScheduler scheduler)
         {
             _logger = logger;
@@ -57,15 +61,25 @@ public interface IGameEventHandlerService
             _analytics = analytics;
             _matchReady = matchReady;
             _handlers = handlers;
+            _processors = processors;
+            _dispatcher = dispatcher;
             _scheduler = scheduler;
         }
 
         public void RegisterEvents(BasePlugin plugin)
         {
-            // Register all modular handlers
+            // Register all modular handlers (direct game-event hooks for round/match/player lifecycle).
             foreach (var handler in _handlers)
             {
                 handler.Register(plugin);
+            }
+
+            // Wire the event-processor pipeline: each processor subscribes to the dispatcher, which
+            // auto-hooks the underlying game event on first subscription. Runs on the game thread.
+            _dispatcher.Initialize(plugin);
+            foreach (var processor in _processors)
+            {
+                processor.RegisterEvents(_dispatcher);
             }
 
             // Always available.

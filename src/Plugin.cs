@@ -107,19 +107,28 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddSingleton<IPlayerSessionService, PlayerSessionService>();
         services.AddTransient<IStatsRepository, StatsRepository>();
         
-        // Register Event Processors for automated discovery
-        services.AddTransient<IEventProcessor, CombatEventProcessor>();
-        services.AddTransient<IEventProcessor, UtilityEventProcessor>();
-        services.AddTransient<IEventProcessor, BombEventProcessor>();
-        services.AddTransient<IEventProcessor, EconomyEventProcessor>();
-        services.AddTransient<IEventProcessor, MovementEventProcessor>();
-        services.AddTransient<IEventProcessor, CommunicationEventProcessor>();
+        // Event processors hold per-round state (alive counts, bomb timers, pending grenades) and
+        // subscribe to the dispatcher exactly once, so each must be a single shared instance. Register
+        // the concrete type as a singleton, then expose that same instance under every interface it is
+        // consumed through (IEventProcessor for the pipeline, ICombatEventProcessor etc. for cross-refs).
+        services.AddSingleton<CombatEventProcessor>();
+        services.AddSingleton<UtilityEventProcessor>();
+        services.AddSingleton<BombEventProcessor>();
+        services.AddSingleton<EconomyEventProcessor>();
+        services.AddSingleton<MovementEventProcessor>();
+        services.AddSingleton<CommunicationEventProcessor>();
 
-        // Specific interface registrations for direct usage if needed
-        services.AddTransient<ICombatEventProcessor>(sp => (ICombatEventProcessor)sp.GetRequiredService<IEnumerable<IEventProcessor>>().First(p => p is CombatEventProcessor));
-        services.AddTransient<IUtilityEventProcessor>(sp => (IUtilityEventProcessor)sp.GetRequiredService<IEnumerable<IEventProcessor>>().First(p => p is UtilityEventProcessor));
-        services.AddTransient<IBombEventProcessor>(sp => (IBombEventProcessor)sp.GetRequiredService<IEnumerable<IEventProcessor>>().First(p => p is BombEventProcessor));
-        services.AddTransient<IEconomyEventProcessor>(sp => (IEconomyEventProcessor)sp.GetRequiredService<IEnumerable<IEventProcessor>>().First(p => p is EconomyEventProcessor));
+        services.AddSingleton<IEventProcessor>(sp => sp.GetRequiredService<CombatEventProcessor>());
+        services.AddSingleton<IEventProcessor>(sp => sp.GetRequiredService<UtilityEventProcessor>());
+        services.AddSingleton<IEventProcessor>(sp => sp.GetRequiredService<BombEventProcessor>());
+        services.AddSingleton<IEventProcessor>(sp => sp.GetRequiredService<EconomyEventProcessor>());
+        services.AddSingleton<IEventProcessor>(sp => sp.GetRequiredService<MovementEventProcessor>());
+        services.AddSingleton<IEventProcessor>(sp => sp.GetRequiredService<CommunicationEventProcessor>());
+
+        services.AddSingleton<ICombatEventProcessor>(sp => sp.GetRequiredService<CombatEventProcessor>());
+        services.AddSingleton<IUtilityEventProcessor>(sp => sp.GetRequiredService<UtilityEventProcessor>());
+        services.AddSingleton<IBombEventProcessor>(sp => sp.GetRequiredService<BombEventProcessor>());
+        services.AddSingleton<IEconomyEventProcessor>(sp => sp.GetRequiredService<EconomyEventProcessor>());
 
         services.AddSingleton<IPositionTrackingService, PositionTrackingService>();
         services.AddSingleton<IPositionPersistenceService, PositionPersistenceService>();
@@ -137,10 +146,10 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddSingleton<IPluginLifecycleService, PluginLifecycleService>();
         services.AddSingleton<IGameEventHandlerService, GameEventHandlerService>();
 
-        // Game Handlers
+        // Game Handlers (direct game-event hooks; combat/bomb/utility/economy events flow through the
+        // EventDispatcher pipeline instead, wired in GameEventHandlerService).
         services.AddSingleton<IGameHandler, MatchFlowHandler>();
         services.AddSingleton<IGameHandler, PlayerLifecycleHandler>();
-        services.AddSingleton<IGameHandler, CombatHandler>();
 
         _serviceProvider = services.BuildServiceProvider();
 

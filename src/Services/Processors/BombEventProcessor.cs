@@ -105,8 +105,6 @@ public sealed class BombEventProcessor : IBombEventProcessor
                     ? (_timeProvider.GetUtcNow().UtcDateTime - _bombPlantTime.Value).TotalSeconds 
                     : 0;
 
-                Instrumentation.BombPlantsCounter.Add(1, new KeyValuePair<string, object?>("site", @event.GetIntValue("site", 0)));
-                Instrumentation.BombPlantDurationsRecorder.Record(plantDuration, new KeyValuePair<string, object?>("site", @event.GetIntValue("site", 0)));
                 _playerSessions.MutatePlayer(playerState.SteamId, stats =>
                 {
                     stats.Bomb.BombPlants++;
@@ -135,8 +133,6 @@ public sealed class BombEventProcessor : IBombEventProcessor
                 var (ctAlive, tAlive) = _combatProcessor.GetAliveCounts();
                 var isClutchDefuse = ctAlive == 1 && tAlive >= 1;
 
-                Instrumentation.BombDefusesCounter.Add(1);
-                Instrumentation.BombDefuseDurationsRecorder.Record(defuseDuration);
                 _playerSessions.MutatePlayer(playerState.SteamId, stats =>
                 {
                     stats.Bomb.BombDefuses++;
@@ -153,11 +149,6 @@ public sealed class BombEventProcessor : IBombEventProcessor
 
     private void HandleBombExploded(EventBombExploded @event)
     {
-        Instrumentation.BombExplosionsCounter.Add(1);
-        if (_bombPlantTime.HasValue)
-        {
-            Instrumentation.BombExplosionDurationsRecorder.Record((_timeProvider.GetUtcNow().UtcDateTime - _bombPlantTime.Value).TotalSeconds);
-        }
         _logger.LogInformation("Bomb exploded");
         ResetBombState();
     }

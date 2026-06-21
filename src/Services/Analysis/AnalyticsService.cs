@@ -88,10 +88,12 @@ public sealed class AnalyticsService : IAnalyticsService
     {
         using var activity = Instrumentation.ActivitySource.StartActivity("AnalyticsService.CalculateUtilityScore");
         if (stats.Round.RoundsPlayed == 0) return 0m;
-        var damageScore = (stats.Utility.UtilityDamage / (decimal)stats.Round.RoundsPlayed) * 0.4m;
-        var blindScore = (stats.Utility.BlindDuration / 1000m / (decimal)stats.Round.RoundsPlayed) * 0.4m;
-        var smokeScore = (stats.Utility.SmokeAssists / (decimal)stats.Round.RoundsPlayed) * 0.2m;
-        return damageScore + blindScore + smokeScore;
+        var rounds = (decimal)stats.Round.RoundsPlayed;
+        var damageScore = (stats.Utility.UtilityDamage / rounds) * 0.4m;
+        // Enemy blind time (seconds) inflicted per round.
+        var blindScore = ((decimal)stats.Utility.TotalBlindTimeInflicted / rounds) * 0.4m;
+        var flashAssistScore = (stats.Utility.FlashAssists / rounds) * 0.2m;
+        return damageScore + blindScore + flashAssistScore;
     }
 
     public decimal CalculatePerformanceScore(PlayerStats stats)
@@ -218,14 +220,12 @@ public sealed class AnalyticsService : IAnalyticsService
             stats.Bomb.ClutchDefuses,
             stats.Bomb.TotalPlantTime,
             stats.Bomb.TotalDefuseTime,
-            stats.Combat.HostagesRescued,
             totalGrenadesThrown,
             stats.Utility.FlashbangsThrown,
             stats.Utility.SmokesThrown,
             stats.Utility.MolotovsThrown,
             stats.Utility.HeGrenadesThrown,
             stats.Utility.DecoysThrown,
-            stats.Utility.TacticalGrenadesThrown,
             stats.Utility.EnemiesBlinded,
             stats.Utility.TimesBlinded,
             stats.Utility.FlashAssists,
@@ -242,10 +242,6 @@ public sealed class AnalyticsService : IAnalyticsService
             stats.Economy.EquipmentValue,
             stats.Economy.ItemsPurchased,
             stats.Economy.ItemsPickedUp,
-            stats.Round.ItemsDropped,
-            stats.Round.CashEarned,
-            stats.Economy.MoneySpent, // CashSpent
-            stats.Economy.LossBonus,
             stats.Economy.RoundStartMoney,
             stats.Economy.RoundEndMoney,
             stats.Economy.EquipmentValueStart,
@@ -256,9 +252,8 @@ public sealed class AnalyticsService : IAnalyticsService
             stats.Utility.EffectiveSmokes,
             stats.Utility.EffectiveHEGrenades,
             stats.Utility.EffectiveMolotovs,
-            stats.Utility.MultiKillNades,
-            stats.Utility.NadeKills,
-            stats.Round.TradeWindowsMissed,
+            stats.Combat.MultiKillNades,
+            stats.Combat.NadeKills,
             stats.Utility.WastedFlashes, // FlashWaste
             stats.Combat.EntryKills,
             stats.Combat.EntryDeaths,
@@ -268,7 +263,6 @@ public sealed class AnalyticsService : IAnalyticsService
             stats.Combat.TradedDeaths,
             stats.Combat.HighImpactKills,
             stats.Combat.LowImpactKills,
-            stats.Combat.TradeOpportunities,
             stats.Combat.MultiKills,
             stats.Combat.FirstKills, // OpeningDuelsWon
             stats.Combat.FirstDeaths, // OpeningDuelsLost

@@ -22,7 +22,6 @@ public sealed class CombatStats
     private int _friendliesFlashed;
     private int _knifeKills;
     private int _wallbangKills;
-    private int _collateralKills;
     private int _noscopes;
     private int _throughSmokeKills;
     private int _blindKills;
@@ -33,18 +32,9 @@ public sealed class CombatStats
     private int _clutchKills;
     private int _clutchesWon;
     private int _clutchesLost;
-    private int _clutch1v1Won;
-    private int _clutch1v2Won;
-    private int _clutch1v3Won;
-    private int _clutch1v4Won;
-    private int _clutch1v5Won;
     private int _revengeKills;
-    private int _dominationKills;
-    private int _rampageKills;
     private int _killStreak;
-    private int _deathStreak;
     private int _maxKillStreak;
-    private int _maxDeathStreak;
     private int _multiKill2;
     private int _multiKill3;
     private int _multiKill4;
@@ -62,7 +52,6 @@ public sealed class CombatStats
     private int _armHits;
     private int _legHits;
     private int _lowImpactKills;
-    private int _tradeOpportunities;
     private int _mvpsHostage;
     private int _mvpsEliminations;
     private int _mvpsBomb;
@@ -79,7 +68,6 @@ public sealed class CombatStats
     private int _multiKillNades;
     private int _nadeKills;
     private int _highImpactKills;
-    private int _hostagesRescued;
 
     private decimal _weightedKills;
 
@@ -119,7 +107,6 @@ public sealed class CombatStats
     public int FriendliesFlashed { get => _friendliesFlashed; set { _friendliesFlashed = value; _markDirty(); } }
     public int KnifeKills { get => _knifeKills; set { _knifeKills = value; _markDirty(); } }
     public int WallbangKills { get => _wallbangKills; set { _wallbangKills = value; _markDirty(); } }
-    public int CollateralKills { get => _collateralKills; set { _collateralKills = value; _markDirty(); } }
     public int Noscopes { get => _noscopes; set { _noscopes = value; _markDirty(); } }
     public int NoscopeKills { get => _noscopeKills; set { _noscopeKills = value; _markDirty(); } }
     public int ThroughSmokeKills { get => _throughSmokeKills; set { _throughSmokeKills = value; _markDirty(); } }
@@ -134,19 +121,10 @@ public sealed class CombatStats
     public int ClutchKills { get => _clutchKills; set { _clutchKills = value; _markDirty(); } }
     public int ClutchesWon { get => _clutchesWon; set { _clutchesWon = value; _markDirty(); } }
     public int ClutchesLost { get => _clutchesLost; set { _clutchesLost = value; _markDirty(); } }
-    public int Clutch1v1Won { get => _clutch1v1Won; set { _clutch1v1Won = value; _markDirty(); } }
-    public int Clutch1v2Won { get => _clutch1v2Won; set { _clutch1v2Won = value; _markDirty(); } }
-    public int Clutch1v3Won { get => _clutch1v3Won; set { _clutch1v3Won = value; _markDirty(); } }
-    public int Clutch1v4Won { get => _clutch1v4Won; set { _clutch1v4Won = value; _markDirty(); } }
-    public int Clutch1v5Won { get => _clutch1v5Won; set { _clutch1v5Won = value; _markDirty(); } }
     public int RevengeKills { get => _revengeKills; set { _revengeKills = value; _markDirty(); } }
     public int Revenges { get => _revenges; set { _revenges = value; _markDirty(); } }
-    public int DominationKills { get => _dominationKills; set { _dominationKills = value; _markDirty(); } }
-    public int RampageKills { get => _rampageKills; set { _rampageKills = value; _markDirty(); } }
     public int KillStreak { get => _killStreak; set { _killStreak = value; _markDirty(); } }
-    public int DeathStreak { get => _deathStreak; set { _deathStreak = value; _markDirty(); } }
     public int MaxKillStreak { get => _maxKillStreak; set { _maxKillStreak = value; _markDirty(); } }
-    public int MaxDeathStreak { get => _maxDeathStreak; set { _maxDeathStreak = value; _markDirty(); } }
     public int MultiKill2 { get => _multiKill2; set { _multiKill2 = value; _markDirty(); } }
     public int MultiKill3 { get => _multiKill3; set { _multiKill3 = value; _markDirty(); } }
     public int MultiKill4 { get => _multiKill4; set { _multiKill4 = value; _markDirty(); } }
@@ -162,7 +140,6 @@ public sealed class CombatStats
     public int ArmHits { get => _armHits; set { _armHits = value; _markDirty(); } }
     public int LegHits { get => _legHits; set { _legHits = value; _markDirty(); } }
     public int LowImpactKills { get => _lowImpactKills; set { _lowImpactKills = value; _markDirty(); } }
-    public int TradeOpportunities { get => _tradeOpportunities; set { _tradeOpportunities = value; _markDirty(); } }
     public int MvpsHostage { get => _mvpsHostage; set { _mvpsHostage = value; _markDirty(); } }
     public int MvpsEliminations { get => _mvpsEliminations; set { _mvpsEliminations = value; _markDirty(); } }
     public int MvpsBomb { get => _mvpsBomb; set { _mvpsBomb = value; _markDirty(); } }
@@ -175,7 +152,6 @@ public sealed class CombatStats
     public int MultiKillNades { get => _multiKillNades; set { _multiKillNades = value; _markDirty(); } }
     public int NadeKills { get => _nadeKills; set { _nadeKills = value; _markDirty(); } }
     public int HighImpactKills { get => _highImpactKills; set { _highImpactKills = value; _markDirty(); } }
-    public int HostagesRescued { get => _hostagesRescued; set { _hostagesRescued = value; _markDirty(); } }
 
     public void Reset()
     {
@@ -184,22 +160,21 @@ public sealed class CombatStats
         _damageArmor = _score = 0;
         _mvps = _teamKills = _suicides = 0;
         _enemiesFlashed = _friendliesFlashed = 0;
-        _knifeKills = _wallbangKills = _collateralKills = _noscopes = 0;
+        _knifeKills = _wallbangKills = _noscopes = 0;
         _noscopeKills = _throughSmokeKills = _thruSmokeKills = _blindKills = 0;
         _attackerBlindKills = _flashAssistedKills = 0;
         _firstKills = _firstDeaths = _tradeKills = _tradedDeaths = 0;
         _clutchKills = _clutchesWon = _clutchesLost = 0;
-        _clutch1v1Won = _clutch1v2Won = _clutch1v3Won = _clutch1v4Won = _clutch1v5Won = 0;
-        _revengeKills = _revenges = _dominationKills = _rampageKills = 0;
-        _killStreak = _deathStreak = _maxKillStreak = _maxDeathStreak = 0;
+        _revengeKills = _revenges = 0;
+        _killStreak = _maxKillStreak = 0;
         _multiKill2 = _multiKill3 = _multiKill4 = _multiKill5 = 0;
         _entryKills = _entryDeaths = _entryKillAttempts = _entryKillAttemptWins = 0;
         _mvpsEliminations = _mvpsBomb = _mvpsHostage = 0;
         _clutchPoints = 0;
         _headshotsHit = _chestHits = _stomachHits = _armHits = _legHits = 0;
-        _lowImpactKills = _tradeOpportunities = 0;
+        _lowImpactKills = 0;
         _currentRoundKills = _currentRoundDeaths = _currentRoundShotsFired = 0;
-        _multiKillNades = _nadeKills = _highImpactKills = _hostagesRescued = 0;
+        _multiKillNades = _nadeKills = _highImpactKills = 0;
         _weightedKills = 0;
         _roundSwing = _currentRoundSwing = 0;
         _markDirty();
