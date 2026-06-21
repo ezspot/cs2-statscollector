@@ -1,31 +1,10 @@
-using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Threading.Tasks;
 using CounterStrikeSharp.API;
-using CounterStrikeSharp.API.Core;
-using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
-using statsCollector.Domain;
 using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
-
-public record RoundSnapshot(
-    int RoundNumber,
-    int Team1Score,
-    int Team2Score,
-    Dictionary<ulong, PlayerRoundData> PlayerData
-);
-
-public record PlayerRoundData(
-    ulong SteamId,
-    int Money,
-    int Kills,
-    int Deaths,
-    int Assists,
-    CsTeam Team
-);
 
 public interface IRoundBackupService
 {
@@ -34,124 +13,59 @@ public interface IRoundBackupService
     IReadOnlyList<int> GetAvailableRounds();
 }
 
+/// <summary>
+/// Thin wrapper over CS2's native per-round backup system. The engine writes a full
+/// game-state backup file at the start of each round when <c>mp_backup_round_file</c> is set,
+/// and <c>mp_backup_restore_load_file</c> restores it — this is the only mechanism that can
+/// actually roll a match back to a specific round (the old cvar restart could not).
+/// </summary>
 public sealed class RoundBackupService(
     ILogger<RoundBackupService> logger,
-    IPlayerSessionService playerSessions,
     IGameScheduler scheduler) : IRoundBackupService
 {
+    private const string BackupPrefix = "statscollector";
+
     private readonly ILogger<RoundBackupService> _logger = logger;
-    private readonly IPlayerSessionService _playerSessions = playerSessions;
     private readonly IGameScheduler _scheduler = scheduler;
-    private readonly List<RoundSnapshot> _backups = [];
+    private readonly HashSet<int> _rounds = [];
+    private bool _backupsEnabled;
 
     public void CreateSnapshot(int roundNumber)
     {
+        lock (_rounds) _rounds.Add(roundNumber);
+
         _scheduler.Schedule(() =>
         {
-            var playerData = new Dictionary<ulong, PlayerRoundData>();
-            
-            foreach (var steamId in _playerSessions.GetActiveSteamIds())
+            if (!_backupsEnabled)
             {
-                var player = Utilities.GetPlayerFromSteamId(steamId);
-                if (player is not { IsValid: true, IsBot: false }) continue;
-
-                if (_playerSessions.TryGetSnapshot(steamId, out var snapshot))
-                {
-                    playerData[steamId] = new PlayerRoundData(
-                        steamId,
-                        player.InGameMoneyServices?.Account ?? 0,
-                        snapshot.Kills,
-                        snapshot.Deaths,
-                        snapshot.Assists,
-                        player.Team
-                    );
-                }
+                // Ensure the engine writes a backup file for every round.
+                Server.ExecuteCommand($"mp_backup_round_file {BackupPrefix}");
+                Server.ExecuteCommand("mp_backup_round_file_pattern %prefix%_round%round%.txt");
+                _backupsEnabled = true;
             }
-
-            var teamManagers = Utilities.FindAllEntitiesByDesignerName<CCSTeam>("cs_team_manager");
-            int tScore = 0;
-            int ctScore = 0;
-
-            foreach (var team in teamManagers)
-            {
-                if (team.TeamNum == (int)CsTeam.Terrorist) tScore = team.Score;
-                else if (team.TeamNum == (int)CsTeam.CounterTerrorist) ctScore = team.Score;
-            }
-
-            var backup = new RoundSnapshot(roundNumber, tScore, ctScore, playerData);
-            lock (_backups)
-            {
-                _backups.RemoveAll(b => b.RoundNumber == roundNumber);
-                _backups.Add(backup);
-            }
-            
-            _logger.LogInformation("Created backup for round {RoundNumber}. T:{TScore} CT:{CTScore}", roundNumber, tScore, ctScore);
+            _logger.LogDebug("Round {RoundNumber} backup point recorded.", roundNumber);
         });
     }
 
     public bool RestoreRound(int roundNumber)
     {
-        RoundSnapshot? backup;
-        lock (_backups)
-        {
-            backup = _backups.FirstOrDefault(b => b.RoundNumber == roundNumber);
-        }
+        bool known;
+        lock (_rounds) known = _rounds.Contains(roundNumber);
 
-        if (backup == null)
+        if (!known)
         {
-            _logger.LogWarning("Attempted to restore round {RoundNumber} but no backup exists.", roundNumber);
+            _logger.LogWarning("Attempted to restore round {RoundNumber} but no backup is recorded.", roundNumber);
             return false;
         }
 
-        _logger.LogInformation("Restoring round {RoundNumber}...", roundNumber);
-
-        _scheduler.Schedule(() =>
-        {
-            // Restore team scores
-            var teamManagers = Utilities.FindAllEntitiesByDesignerName<CCSTeam>("cs_team_manager");
-            foreach (var team in teamManagers)
-            {
-                if (team.TeamNum == (int)CsTeam.Terrorist) team.Score = backup.Team1Score;
-                else if (team.TeamNum == (int)CsTeam.CounterTerrorist) team.Score = backup.Team2Score;
-                
-                Utilities.SetStateChanged(team, "CCSTeam", "m_iScore");
-            }
-
-            // Restore player stats and money
-            foreach (var kvp in backup.PlayerData)
-            {
-                var steamId = kvp.Key;
-                var data = kvp.Value;
-                var player = Utilities.GetPlayerFromSteamId(steamId);
-
-                if (player is { IsValid: true })
-                {
-                    if (player.InGameMoneyServices != null)
-                    {
-                        player.InGameMoneyServices.Account = data.Money;
-                    }
-
-                    _playerSessions.MutatePlayer(steamId, stats =>
-                    {
-                        stats.Combat.Kills = data.Kills;
-                        stats.Combat.Deaths = data.Deaths;
-                        stats.Combat.Assists = data.Assists;
-                    });
-                }
-            }
-
-            // Use native command to set round
-            Server.ExecuteCommand($"mp_round_restart_delay 0; mp_restartgame 1; mp_round_restart_delay 5");
-        });
-        
+        var fileName = $"{BackupPrefix}_round{roundNumber:D2}.txt";
+        _logger.LogInformation("Restoring round {RoundNumber} from native backup {File}", roundNumber, fileName);
+        _scheduler.Schedule(() => Server.ExecuteCommand($"mp_backup_restore_load_file {fileName}"));
         return true;
     }
 
     public IReadOnlyList<int> GetAvailableRounds()
     {
-        lock (_backups)
-        {
-            return _backups.Select(b => b.RoundNumber).ToList();
-        }
+        lock (_rounds) return _rounds.OrderBy(r => r).ToList();
     }
 }

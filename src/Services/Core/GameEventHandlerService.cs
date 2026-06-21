@@ -68,8 +68,12 @@ public interface IGameEventHandlerService
                 handler.Register(plugin);
             }
 
-            // Commands
+            // Always available.
             plugin.AddCommand("css_stats", "Show current stats", (player, info) => { if (ValidatePlayer(player)) OnStatsCommand(player!, info); });
+
+            // Scrim / match-management commands are only registered when the scrim system is enabled.
+            if (!_config.EnableScrim) return;
+
             plugin.AddCommand("css_scrim", "Scrim system admin command", (player, info) => { if (ValidatePlayer(player)) OnScrimCommand(player!, info); });
             plugin.AddCommand("css_ready", "Player ready command", (player, info) => { if (ValidatePlayer(player)) OnReadyCommand(player!, info); });
             plugin.AddCommand("css_unready", "Player unready command", (player, info) => { if (ValidatePlayer(player)) OnUnreadyCommand(player!, info); });

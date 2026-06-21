@@ -2,6 +2,8 @@ using System;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
 
@@ -15,33 +17,22 @@ public sealed class CommunicationEventProcessor : ICommunicationEventProcessor
 {
     private readonly IPlayerSessionService _playerSessions;
     private readonly ILogger<CommunicationEventProcessor> _logger;
-    private readonly IPersistenceChannel _persistenceChannel;
-    private readonly IGameScheduler _scheduler;
+    private readonly IOptionsMonitor<PluginConfig> _config;
 
     public CommunicationEventProcessor(
         IPlayerSessionService playerSessions,
         ILogger<CommunicationEventProcessor> logger,
-        IPersistenceChannel persistenceChannel,
-        IGameScheduler scheduler)
+        IOptionsMonitor<PluginConfig> config)
     {
         _playerSessions = playerSessions;
         _logger = logger;
-        _persistenceChannel = persistenceChannel;
-        _scheduler = scheduler;
-    }
-
-    public void OnRoundStart(RoundContext context)
-    {
-    }
-
-    public void OnRoundEnd(int winnerTeam, int winReason)
-    {
+        _config = config;
     }
 
     public void RegisterEvents(IEventDispatcher dispatcher)
     {
-        // Using dynamic subscription since EventPlayerPing might not be in all versions of CSS, 
-        // but for late 2025 it should be standard.
+        if (!_config.CurrentValue.EnableMovementTracking) return;
+
         dispatcher.Subscribe<EventPlayerPing>((e, i) => { HandlePlayerPing(e); return HookResult.Continue; });
     }
 

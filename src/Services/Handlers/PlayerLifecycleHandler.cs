@@ -92,7 +92,6 @@ public sealed class PlayerLifecycleHandler : IGameHandler
             _playerSessions.MutatePlayer(state.SteamId, stats =>
             {
                 stats.Round.TotalSpawns++;
-                stats.Round.PlaytimeSeconds = (int)(DateTime.UtcNow - new DateTime(2020, 1, 1)).TotalSeconds;
             });
         }
         return HookResult.Continue;

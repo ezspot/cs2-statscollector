@@ -23,7 +23,6 @@ public sealed class CombatHandler : IGameHandler
         plugin.RegisterEventHandler<EventPlayerDeath>((e, i) => _dispatcher.Dispatch(e, i));
         plugin.RegisterEventHandler<EventPlayerHurt>((e, i) => _dispatcher.Dispatch(e, i));
         plugin.RegisterEventHandler<EventWeaponFire>((e, i) => _dispatcher.Dispatch(e, i));
-        plugin.RegisterEventHandler<EventBulletImpact>((e, i) => _dispatcher.Dispatch(e, i));
         plugin.RegisterEventHandler<EventRoundMvp>((e, i) => _dispatcher.Dispatch(e, i));
         plugin.RegisterEventHandler<EventPlayerAvengedTeammate>((e, i) => _dispatcher.Dispatch(e, i));
         plugin.RegisterEventHandler<EventPlayerSpawned>((e, i) => _dispatcher.Dispatch(e, i));

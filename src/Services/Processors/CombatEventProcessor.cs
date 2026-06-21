@@ -43,8 +43,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     private readonly IPositionPersistenceService _positionPersistence;
     private readonly IMatchTrackingService _matchTracker;
     private readonly IDamageReportService _damageReport;
-    private readonly IPersistenceChannel _persistenceChannel;
-    private readonly IGameScheduler _scheduler;
 
     private int _currentRoundNumber;
     private DateTime _currentRoundStartUtc;
@@ -64,13 +62,14 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     private int _firstEngagementAttackerIndex = -1;
     private int _firstEngagementVictimIndex = -1;
 
+    // Tracks whether the first kill of the round has occurred (O(1) replacement for an array scan).
+    private bool _firstKillHappened;
+
     private readonly Dictionary<PlayerTeam, DateTime> _lastTeamDeathTime = new()
     {
         [PlayerTeam.Terrorist] = DateTime.MinValue,
         [PlayerTeam.CounterTerrorist] = DateTime.MinValue
     };
-
-    private readonly Dictionary<ulong, List<(ulong TeammateId, DateTime Expiry)>> _pendingTradeOpportunities = [];
 
     private int _ctAliveCount;
     private int _tAliveCount;
@@ -82,9 +81,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         TimeProvider timeProvider,
         IPositionPersistenceService positionPersistence,
         IMatchTrackingService matchTracker,
-        IDamageReportService damageReport,
-        IPersistenceChannel persistenceChannel,
-        IGameScheduler scheduler)
+        IDamageReportService damageReport)
     {
         _playerSessions = playerSessions;
         _config = config;
@@ -93,8 +90,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         _positionPersistence = positionPersistence;
         _matchTracker = matchTracker;
         _damageReport = damageReport;
-        _persistenceChannel = persistenceChannel;
-        _scheduler = scheduler;
     }
 
     public (int CtAlive, int TAlive) GetAliveCounts() => (_ctAliveCount, _tAliveCount);
@@ -104,7 +99,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         dispatcher.Subscribe<EventPlayerDeath>((e, i) => { HandlePlayerDeath(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventPlayerHurt>((e, i) => { HandlePlayerHurt(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventWeaponFire>((e, i) => { HandleWeaponFire(e); return HookResult.Continue; });
-        dispatcher.Subscribe<EventBulletImpact>((e, i) => { HandleBulletImpact(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventRoundMvp>((e, i) => { HandleRoundMvp(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventPlayerAvengedTeammate>((e, i) => { HandlePlayerAvengedTeammate(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventPlayerSpawned>((e, i) => { HandlePlayerSpawned(e); return HookResult.Continue; });
@@ -134,16 +128,10 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         _firstEngagementHappened = false;
         _firstEngagementAttackerIndex = -1;
         _firstEngagementVictimIndex = -1;
+        _firstKillHappened = false;
 
         _lastTeamDeathTime[PlayerTeam.Terrorist] = DateTime.MinValue;
         _lastTeamDeathTime[PlayerTeam.CounterTerrorist] = DateTime.MinValue;
-        
-        // Clean up trade opportunities expired from previous rounds
-        var now = _timeProvider.GetUtcNow().UtcDateTime;
-        foreach (var kvp in _pendingTradeOpportunities)
-        {
-            kvp.Value.RemoveAll(o => o.Expiry <= now);
-        }
     }
 
     private void HandlePlayerDeath(EventPlayerDeath @event)
@@ -191,7 +179,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             activity?.SetTag("weapon", weaponName);
             activity?.SetTag("headshot", isHeadshot);
 
-            bool isGrenadeKill = GrenadeWeaponNames.Contains(weaponName.ToLowerInvariant());
+            bool isGrenadeKill = GrenadeWeaponNames.Contains(weaponName);
             bool isFlashAssist = flashAssisted;
 
             if (victimState.IsValid && !victimState.IsBot)
@@ -200,7 +188,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     new KeyValuePair<string, object?>("team", victimTeam.ToString()),
                     new KeyValuePair<string, object?>("map", Server.MapName));
                 
-                if (victimState.PawnHandle != 0)
+                if (victimState.PawnHandle != 0 && _config.CurrentValue.EnablePositionTracking)
                 {
                     var matchUuid = _matchTracker?.CurrentMatch?.MatchUuid;
                     var posEvent = _positionPersistence.GetDeathEvent();
@@ -255,12 +243,14 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 var enemyAlive = attackerTeam == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
                 var teammatesAlive = attackerTeam == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
 
-                decimal killWeight = Math.Clamp((decimal)victimState.EquipmentValue / 5000m, 0.2m, 1.0m);
+                // No reliable per-kill victim equipment value is available, so kills carry an equal base
+                // weight; the bonuses below reward the round's first kill and clutch/low-man situations.
+                decimal killWeight = 1.0m;
 
-                bool isFirstKillOfRound = false;
-                if (_playerFirstKillTime.All(t => t == DateTime.MinValue))
+                bool isFirstKillOfRound = !_firstKillHappened;
+                if (isFirstKillOfRound)
                 {
-                    isFirstKillOfRound = true;
+                    _firstKillHappened = true;
                     killWeight += 0.15m;
                 }
 
@@ -283,7 +273,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     new KeyValuePair<string, object?>("team", attackerTeam.ToString()),
                     new KeyValuePair<string, object?>("map", Server.MapName));
 
-                if (attackerState.PawnHandle != 0 && victimState.PawnHandle != 0)
+                if (attackerState.PawnHandle != 0 && victimState.PawnHandle != 0 && _config.CurrentValue.EnablePositionTracking)
                 {
                     var killDistance = CalculateDistance(attackerState.Position, victimState.Position);
                     var matchUuid = _matchTracker?.CurrentMatch?.MatchUuid;
@@ -377,7 +367,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 if (victimTeam != PlayerTeam.Spectator && _lastTeamDeathTime.TryGetValue(victimTeam, out var lastDeath) && lastDeath > DateTime.MinValue && lastDeath != now && (now - lastDeath).TotalSeconds <= tradeWindowSeconds)
                 {
                     _playerSessions.MutatePlayer(attackerState.SteamId, stats => { stats.Combat.TradeKills++; stats.Round.DidTradeThisRound = true; });
-                    if (_pendingTradeOpportunities.TryGetValue(attackerState.SteamId, out var ops)) ops.RemoveAll(o => o.Expiry > now);
                     if (victimState.IsValid && !victimState.IsBot) _playerSessions.MutatePlayer(victimState.SteamId, stats => { stats.Combat.TradedDeaths++; stats.Round.WasTradedThisRound = true; });
                 }
             }
@@ -469,11 +458,10 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         {
             var player = @event.GetPlayerOrDefault("userid");
             if (player == null) return;
-            var playerIndex = (int)player.Index;
 
             var playerState = PlayerControllerState.From(player);
             if (!playerState.IsValid || playerState.IsBot) return;
-            
+
             var weapon = @event.GetStringValue("weapon", "unknown") ?? "unknown";
             var weaponLower = weapon.ToLowerInvariant();
             
@@ -502,8 +490,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         }
         catch (Exception ex) { _logger.LogError(ex, "Error handling weapon fire event"); }
     }
-
-    private void HandleBulletImpact(EventBulletImpact @event) { }
 
     private void HandleRoundMvp(EventRoundMvp @event)
     {

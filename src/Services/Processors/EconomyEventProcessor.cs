@@ -36,19 +36,13 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
 
     private readonly IPlayerSessionService _playerSessions;
     private readonly ILogger<EconomyEventProcessor> _logger;
-    private readonly IPersistenceChannel _persistenceChannel;
-    private readonly IGameScheduler _scheduler;
 
     public EconomyEventProcessor(
         IPlayerSessionService playerSessions,
-        ILogger<EconomyEventProcessor> logger,
-        IPersistenceChannel persistenceChannel,
-        IGameScheduler scheduler)
+        ILogger<EconomyEventProcessor> logger)
     {
         _playerSessions = playerSessions;
         _logger = logger;
-        _persistenceChannel = persistenceChannel;
-        _scheduler = scheduler;
     }
 
     public void RegisterEvents(IEventDispatcher dispatcher)
@@ -70,13 +64,13 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
             if (!playerState.IsValid || playerState.IsBot) return;
 
             var weapon = @event.GetStringValue("weapon", string.Empty) ?? string.Empty;
-            var cost = GetDynamicWeaponCost(weapon);
+            var cost = GetItemValue(weapon);
 
             activity?.SetTag("player.steamid", playerState.SteamId);
             activity?.SetTag("weapon", weapon);
             activity?.SetTag("cost", cost);
 
-            Instrumentation.MoneySpentCounter.Add(cost, 
+            Instrumentation.MoneySpentCounter.Add(cost,
                 new KeyValuePair<string, object?>("weapon", weapon),
                 new KeyValuePair<string, object?>("map", CounterStrikeSharp.API.Server.MapName));
 
@@ -86,43 +80,9 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
                 stats.Economy.MoneySpent += cost;
             });
 
-            _logger.LogTrace("Player {SteamId} purchased {Weapon} for ${Cost} (Dynamic)", playerState.SteamId, weapon, cost);
+            _logger.LogTrace("Player {SteamId} purchased {Weapon} for ${Cost}", playerState.SteamId, weapon, cost);
         }
         catch (Exception ex) { _logger.LogError(ex, "Error processing item purchase event"); }
-    }
-
-    private int GetDynamicWeaponCost(string item)
-    {
-        try
-        {
-            // Normalize weapon name for VData lookup
-            var weaponName = item.StartsWith("weapon_") ? item : $"weapon_{item}";
-            
-            // Late 2025 CSS API: Fetch VData directly from schema
-            // We search for the weapon definition in the game's schema
-            var vdata = string.Empty;
-            if (item.Contains("vest") || item.Contains("defuser") || item.Contains("taser"))
-            {
-                // Equipment might not be under 'weapons/' prefix in VData
-                if (WeaponCostMap.TryGetValue(item, out var mappedCost)) return mappedCost;
-            }
-
-            // In CSS, we can often access the VData of a weapon if we have a reference to a player's weapon,
-            // but for purchases, we might need to iterate or use a static lookup if the schema isn't easily accessible by name alone.
-            // However, the request specifically asked for CBasePlayerWeapon.GetVData() style logic.
-            // Since we don't have the entity in EventItemPurchase, we'll try to find a player who has it or use the map as a reliable fallback.
-            
-            if (WeaponCostMap.TryGetValue(item, out var cost))
-            {
-                return cost;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Dynamic cost lookup failed for {Item}", item);
-        }
-
-        return 0;
     }
 
     private void HandleItemPickup(EventItemPickup @event)

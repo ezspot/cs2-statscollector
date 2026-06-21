@@ -16,6 +16,9 @@ public sealed class PlayerStats
     public void MarkDirty() => _isDirty = true;
     public void ClearDirty() => _isDirty = false;
 
+    // When this player's session started; used to derive playtime.
+    public DateTime SessionStartUtc { get; } = DateTime.UtcNow;
+
     private ulong _steamId;
     public ulong SteamId 
     { 

@@ -21,28 +21,20 @@ public sealed class BombEventProcessor : IBombEventProcessor
     private readonly ICombatEventProcessor _combatProcessor;
     private readonly ILogger<BombEventProcessor> _logger;
     private readonly TimeProvider _timeProvider;
-    private readonly IPersistenceChannel _persistenceChannel;
-    private readonly IGameScheduler _scheduler;
 
     private DateTime? _bombPlantTime;
-    private ulong? _planterSteamId;
     private DateTime? _bombDefuseStartTime;
-    private ulong? _defuserSteamId;
 
     public BombEventProcessor(
         IPlayerSessionService playerSessions,
         ICombatEventProcessor combatProcessor,
         ILogger<BombEventProcessor> logger,
-        TimeProvider timeProvider,
-        IPersistenceChannel persistenceChannel,
-        IGameScheduler scheduler)
+        TimeProvider timeProvider)
     {
         _playerSessions = playerSessions;
         _combatProcessor = combatProcessor;
         _logger = logger;
         _timeProvider = timeProvider;
-        _persistenceChannel = persistenceChannel;
-        _scheduler = scheduler;
     }
 
     public void RegisterEvents(IEventDispatcher dispatcher)
@@ -71,7 +63,6 @@ public sealed class BombEventProcessor : IBombEventProcessor
             if (playerState.IsValid && !playerState.IsBot)
             {
                 _bombPlantTime = _timeProvider.GetUtcNow().UtcDateTime;
-                _planterSteamId = playerState.SteamId;
                 _playerSessions.MutatePlayer(playerState.SteamId, stats =>
                 {
                     stats.Bomb.BombPlantAttempts++;
@@ -91,7 +82,6 @@ public sealed class BombEventProcessor : IBombEventProcessor
             if (playerState.IsValid && !playerState.IsBot)
             {
                 _bombPlantTime = null;
-                _planterSteamId = null;
                 _playerSessions.MutatePlayer(playerState.SteamId, stats =>
                 {
                     stats.Bomb.BombPlantAborts++;
@@ -218,7 +208,6 @@ public sealed class BombEventProcessor : IBombEventProcessor
             if (playerState.IsValid && !playerState.IsBot)
             {
                 _bombDefuseStartTime = _timeProvider.GetUtcNow().UtcDateTime;
-                _defuserSteamId = playerState.SteamId;
                 var hasKit = @event.GetBoolValue("haskit", false);
                 _playerSessions.MutatePlayer(playerState.SteamId, stats =>
                 {
@@ -241,7 +230,6 @@ public sealed class BombEventProcessor : IBombEventProcessor
             if (playerState.IsValid && !playerState.IsBot)
             {
                 _bombDefuseStartTime = null;
-                _defuserSteamId = null;
                 _playerSessions.MutatePlayer(playerState.SteamId, stats =>
                 {
                     stats.Bomb.BombDefuseAborts++;
@@ -287,8 +275,6 @@ public sealed class BombEventProcessor : IBombEventProcessor
         catch (Exception ex) { _logger.LogError(ex, "Error handling defuser pickup event"); }
     }
 
-    private void HandleBombBeep(EventBombBeep @event) { }
-
     private void HandlePlayerDeath(EventPlayerDeath @event)
     {
         try
@@ -331,5 +317,5 @@ public sealed class BombEventProcessor : IBombEventProcessor
         ResetBombState();
     }
 
-    public void ResetBombState() { _bombPlantTime = null; _planterSteamId = null; _bombDefuseStartTime = null; _defuserSteamId = null; }
+    public void ResetBombState() { _bombPlantTime = null; _bombDefuseStartTime = null; }
 }

@@ -19,14 +19,6 @@ public sealed class ConnectionFactory : IConnectionFactory
         _logger = logger;
     }
 
-    public MySqlConnection CreateConnection(QueryType queryType = QueryType.Write)
-    {
-        var configVal = _config.CurrentValue;
-        var connectionString = configVal.BuildConnectionString();
-        _logger.LogDebug("Creating synchronous connection to {Host}:{Port}", configVal.DatabaseHost, configVal.DatabasePort);
-        return new MySqlConnection(connectionString);
-    }
-
     public async Task<MySqlConnection> CreateConnectionAsync(CancellationToken cancellationToken = default)
     {
         var configVal = _config.CurrentValue;

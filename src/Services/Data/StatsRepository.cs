@@ -126,22 +126,26 @@ public sealed class StatsRepository : IStatsRepository
             {
                 DestinationTableName = "temp_match_player_stats_uuid"
             };
-            
+            AddColumnMappingsByName(bulkCopy, dataTable);
+
             await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false);
 
+            await connection.ExecuteAsync(
+                "INSERT IGNORE INTO players (steam_id) SELECT DISTINCT steam_id FROM temp_match_player_stats_uuid;").ConfigureAwait(false);
+
             const string mergeSql = """
-                INSERT INTO match_player_stats 
+                INSERT INTO match_player_stats
                 (match_id, steam_id, kills, deaths, assists, headshots, damage_dealt, mvps, score, rating2, adr, kast, entry_kills, entry_deaths, entry_kill_attempts, entry_kill_attempt_wins, idempotency_key, created_at, retry_count)
                 SELECT m.id, t.steam_id, t.kills, t.deaths, t.assists, t.headshots, t.damage_dealt, t.mvps, t.score, t.rating2, t.adr, t.kast, t.entry_kills, t.entry_deaths, t.entry_kill_attempts, t.entry_kill_attempt_wins, t.idempotency_key, t.created_at, t.retry_count
                 FROM temp_match_player_stats_uuid t
                 JOIN matches m ON t.match_uuid = m.match_uuid
                 ON DUPLICATE KEY UPDATE
-                    kills = VALUES(kills), deaths = VALUES(deaths), assists = VALUES(assists),
-                    headshots = VALUES(headshots), damage_dealt = VALUES(damage_dealt),
-                    mvps = VALUES(mvps), score = VALUES(score), rating2 = VALUES(rating2),
-                    adr = VALUES(adr), kast = VALUES(kast),
-                    entry_kills = VALUES(entry_kills), entry_deaths = VALUES(entry_deaths),
-                    entry_kill_attempts = VALUES(entry_kill_attempts), entry_kill_attempt_wins = VALUES(entry_kill_attempt_wins),
+                    kills = t.kills, deaths = t.deaths, assists = t.assists,
+                    headshots = t.headshots, damage_dealt = t.damage_dealt,
+                    mvps = t.mvps, score = t.score, rating2 = t.rating2,
+                    adr = t.adr, kast = t.kast,
+                    entry_kills = t.entry_kills, entry_deaths = t.entry_deaths,
+                    entry_kill_attempts = t.entry_kill_attempts, entry_kill_attempt_wins = t.entry_kill_attempt_wins,
                     retry_count = match_player_stats.retry_count + 1;
                 """;
 
@@ -200,17 +204,21 @@ public sealed class StatsRepository : IStatsRepository
             {
                 DestinationTableName = "temp_match_weapon_stats_uuid"
             };
-            
+            AddColumnMappingsByName(bulkCopy, dataTable);
+
             await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false);
 
+            await connection.ExecuteAsync(
+                "INSERT IGNORE INTO players (steam_id) SELECT DISTINCT steam_id FROM temp_match_weapon_stats_uuid;").ConfigureAwait(false);
+
             const string mergeSql = """
-                INSERT INTO match_weapon_stats 
+                INSERT INTO match_weapon_stats
                 (match_id, steam_id, weapon_name, kills, shots, hits, idempotency_key, created_at, retry_count)
                 SELECT m.id, t.steam_id, t.weapon_name, t.kills, t.shots, t.hits, t.idempotency_key, t.created_at, t.retry_count
                 FROM temp_match_weapon_stats_uuid t
                 JOIN matches m ON t.match_uuid = m.match_uuid
                 ON DUPLICATE KEY UPDATE
-                    kills = VALUES(kills), shots = VALUES(shots), hits = VALUES(hits),
+                    kills = t.kills, shots = t.shots, hits = t.hits,
                     retry_count = match_weapon_stats.retry_count + 1;
                 """;
 
@@ -256,6 +264,17 @@ public sealed class StatsRepository : IStatsRepository
             WHERE m.match_uuid = @MatchUuid AND r.round_number = @RoundNumber;
             """;
         await connection.ExecuteAsync(new CommandDefinition(sql, new { MatchUuid = matchUuid, RoundNumber = roundNumber, Winner = winnerTeam, WinType = winReason }, cancellationToken: ct)).ConfigureAwait(false);
+    }
+
+    // MySqlBulkCopy maps DataTable columns to the destination by ordinal unless told otherwise.
+    // Mapping each source column to the destination column of the same name removes any dependency
+    // on the DataTable's column order matching the table definition.
+    private static void AddColumnMappingsByName(MySqlBulkCopy bulkCopy, DataTable dataTable)
+    {
+        for (var i = 0; i < dataTable.Columns.Count; i++)
+        {
+            bulkCopy.ColumnMappings.Add(new MySqlBulkCopyColumnMapping(i, dataTable.Columns[i].ColumnName));
+        }
     }
 
     private async Task UpsertPlayersCoreAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
@@ -389,10 +408,7 @@ public sealed class StatsRepository : IStatsRepository
         dataTable.Columns.Add("wallbang_kills", typeof(int));
         dataTable.Columns.Add("pings", typeof(int));
         dataTable.Columns.Add("footsteps", typeof(int));
-        dataTable.Columns.Add("created_at", typeof(DateTime));
-        dataTable.Columns.Add("retry_count", typeof(int));
 
-        var now = DateTime.UtcNow;
         foreach (var s in snapshotList)
         {
             dataTable.Rows.Add(
@@ -416,74 +432,79 @@ public sealed class StatsRepository : IStatsRepository
                 s.KDRatio, s.HeadshotPercentage, s.AccuracyPercentage, s.KASTPercentage,
                 s.AverageDamagePerRound, s.HLTVRating, s.ImpactRating, s.SurvivalRating, s.UtilityScore,
                 s.NoscopeKills, s.ThruSmokeKills, s.AttackerBlindKills, s.FlashAssistedKills, s.WallbangKills,
-                s.Pings, s.Footsteps,
-                now, 0
+                s.Pings, s.Footsteps
             );
         }
 
         await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_player_stats LIKE player_stats;").ConfigureAwait(false);
-        
+
         var bulkCopy = new MySqlBulkCopy(connection)
         {
             DestinationTableName = "temp_player_stats"
         };
-        
+        // Map by destination column name so DataTable column order can never silently misalign the copy.
+        AddColumnMappingsByName(bulkCopy, dataTable);
+
         await bulkCopy.WriteToServerAsync(dataTable, cancellationToken).ConfigureAwait(false);
 
+        // Parent rows must exist before the FK-constrained merge into player_stats.
+        await connection.ExecuteAsync(
+            "INSERT INTO players (steam_id, name) SELECT steam_id, name FROM temp_player_stats AS src " +
+            "ON DUPLICATE KEY UPDATE name = src.name, last_seen = CURRENT_TIMESTAMP;").ConfigureAwait(false);
+
         const string mergeSql = """
-            INSERT INTO player_stats 
-            SELECT * FROM temp_player_stats
+            INSERT INTO player_stats
+            SELECT * FROM temp_player_stats AS src
             ON DUPLICATE KEY UPDATE
-                name = VALUES(name), kills = VALUES(kills), deaths = VALUES(deaths), assists = VALUES(assists),
-                headshots = VALUES(headshots), damage_dealt = VALUES(damage_dealt), damage_taken = VALUES(damage_taken),
-                damage_armor = VALUES(damage_armor), shots_fired = VALUES(shots_fired), shots_hit = VALUES(shots_hit),
-                mvps = VALUES(mvps), score = VALUES(score), rounds_played = VALUES(rounds_played),
-                rounds_won = VALUES(rounds_won), total_spawns = VALUES(total_spawns), playtime_seconds = VALUES(playtime_seconds),
-                ct_rounds = VALUES(ct_rounds), t_rounds = VALUES(t_rounds), 
-                grenades_thrown = VALUES(grenades_thrown),
-                flashes_thrown = VALUES(flashes_thrown), smokes_thrown = VALUES(smokes_thrown), molotovs_thrown = VALUES(molotovs_thrown),
-                he_grenades_thrown = VALUES(he_grenades_thrown), decoys_thrown = VALUES(decoys_thrown),
-                tactical_grenades_thrown = VALUES(tactical_grenades_thrown), players_blinded = VALUES(players_blinded),
-                times_blinded = VALUES(times_blinded), flash_assists = VALUES(flash_assists),
-                total_blind_time = VALUES(total_blind_time), total_blind_time_inflicted = VALUES(total_blind_time_inflicted),
-                utility_damage_dealt = VALUES(utility_damage_dealt), utility_damage_taken = VALUES(utility_damage_taken),
-                bomb_plants = VALUES(bomb_plants), bomb_defuses = VALUES(bomb_defuses),
-                bomb_plant_attempts = VALUES(bomb_plant_attempts), bomb_plant_aborts = VALUES(bomb_plant_aborts),
-                bomb_defuse_attempts = VALUES(bomb_defuse_attempts), bomb_defuse_aborts = VALUES(bomb_defuse_aborts),
-                bomb_defuse_with_kit = VALUES(bomb_defuse_with_kit), bomb_defuse_without_kit = VALUES(bomb_defuse_without_kit),
-                bomb_drops = VALUES(bomb_drops), bomb_pickups = VALUES(bomb_pickups),
-                defuser_drops = VALUES(defuser_drops), defuser_pickups = VALUES(defuser_pickups),
-                clutch_defuses = VALUES(clutch_defuses), total_plant_time = VALUES(total_plant_time),
-                total_defuse_time = VALUES(total_defuse_time), bomb_kills = VALUES(bomb_kills), bomb_deaths = VALUES(bomb_deaths),
-                hostages_rescued = VALUES(hostages_rescued), jumps = VALUES(jumps),
-                money_spent = VALUES(money_spent), equipment_value = VALUES(equipment_value),
-                items_purchased = VALUES(items_purchased), items_picked_up = VALUES(items_picked_up),
-                items_dropped = VALUES(items_dropped), cash_earned = VALUES(cash_earned), cash_spent = VALUES(cash_spent),
-                loss_bonus = VALUES(loss_bonus), round_start_money = VALUES(round_start_money), round_end_money = VALUES(round_end_money),
-                equipment_value_start = VALUES(equipment_value_start), equipment_value_end = VALUES(equipment_value_end),
-                enemies_flashed = VALUES(enemies_flashed), teammates_flashed = VALUES(teammates_flashed),
-                effective_flashes = VALUES(effective_flashes), effective_smokes = VALUES(effective_smokes),
-                effective_he_grenades = VALUES(effective_he_grenades), effective_molotovs = VALUES(effective_molotovs),
-                flash_waste = VALUES(flash_waste), multi_kill_nades = VALUES(multi_kill_nades), nade_kills = VALUES(nade_kills),
-                entry_kills = VALUES(entry_kills), entry_deaths = VALUES(entry_deaths),
-                entry_kill_attempts = VALUES(entry_kill_attempts), entry_kill_attempt_wins = VALUES(entry_kill_attempt_wins),
-                trade_kills = VALUES(trade_kills), traded_deaths = VALUES(traded_deaths),
-                high_impact_kills = VALUES(high_impact_kills), low_impact_kills = VALUES(low_impact_kills), trade_opportunities = VALUES(trade_opportunities),
-                trade_windows_missed = VALUES(trade_windows_missed), multi_kills = VALUES(multi_kills), opening_duels_won = VALUES(opening_duels_won),
-                opening_duels_lost = VALUES(opening_duels_lost), revenges = VALUES(revenges),
-                clutches_won = VALUES(clutches_won), clutches_lost = VALUES(clutches_lost), clutch_points = VALUES(clutch_points),
-                mvps_eliminations = VALUES(mvps_eliminations), mvps_bomb = VALUES(mvps_bomb), mvps_hostage = VALUES(mvps_hostage),
-                headshots_hit = VALUES(headshots_hit), chest_hits = VALUES(chest_hits), stomach_hits = VALUES(stomach_hits),
-                arm_hits = VALUES(arm_hits), leg_hits = VALUES(leg_hits),
-                kd_ratio = VALUES(kd_ratio), headshot_percentage = VALUES(headshot_percentage),
-                accuracy_percentage = VALUES(accuracy_percentage), kast_percentage = VALUES(kast_percentage),
-                average_damage_per_round = VALUES(average_damage_per_round), hltv_rating = VALUES(hltv_rating),
-                impact_rating = VALUES(impact_rating), survival_rating = VALUES(survival_rating),
-                utility_score = VALUES(utility_score),
-                noscope_kills = VALUES(noscope_kills), thru_smoke_kills = VALUES(thru_smoke_kills),
-                attacker_blind_kills = VALUES(attacker_blind_kills), flash_assisted_kills = VALUES(flash_assisted_kills),
-                wallbang_kills = VALUES(wallbang_kills), pings = VALUES(pings), footsteps = VALUES(footsteps),
-                retry_count = retry_count + 1;
+                name = src.name, kills = src.kills, deaths = src.deaths, assists = src.assists,
+                headshots = src.headshots, damage_dealt = src.damage_dealt, damage_taken = src.damage_taken,
+                damage_armor = src.damage_armor, shots_fired = src.shots_fired, shots_hit = src.shots_hit,
+                mvps = src.mvps, score = src.score, rounds_played = src.rounds_played,
+                rounds_won = src.rounds_won, total_spawns = src.total_spawns, playtime_seconds = src.playtime_seconds,
+                ct_rounds = src.ct_rounds, t_rounds = src.t_rounds, 
+                grenades_thrown = src.grenades_thrown,
+                flashes_thrown = src.flashes_thrown, smokes_thrown = src.smokes_thrown, molotovs_thrown = src.molotovs_thrown,
+                he_grenades_thrown = src.he_grenades_thrown, decoys_thrown = src.decoys_thrown,
+                tactical_grenades_thrown = src.tactical_grenades_thrown, players_blinded = src.players_blinded,
+                times_blinded = src.times_blinded, flash_assists = src.flash_assists,
+                total_blind_time = src.total_blind_time, total_blind_time_inflicted = src.total_blind_time_inflicted,
+                utility_damage_dealt = src.utility_damage_dealt, utility_damage_taken = src.utility_damage_taken,
+                bomb_plants = src.bomb_plants, bomb_defuses = src.bomb_defuses,
+                bomb_plant_attempts = src.bomb_plant_attempts, bomb_plant_aborts = src.bomb_plant_aborts,
+                bomb_defuse_attempts = src.bomb_defuse_attempts, bomb_defuse_aborts = src.bomb_defuse_aborts,
+                bomb_defuse_with_kit = src.bomb_defuse_with_kit, bomb_defuse_without_kit = src.bomb_defuse_without_kit,
+                bomb_drops = src.bomb_drops, bomb_pickups = src.bomb_pickups,
+                defuser_drops = src.defuser_drops, defuser_pickups = src.defuser_pickups,
+                clutch_defuses = src.clutch_defuses, total_plant_time = src.total_plant_time,
+                total_defuse_time = src.total_defuse_time, bomb_kills = src.bomb_kills, bomb_deaths = src.bomb_deaths,
+                hostages_rescued = src.hostages_rescued, jumps = src.jumps,
+                money_spent = src.money_spent, equipment_value = src.equipment_value,
+                items_purchased = src.items_purchased, items_picked_up = src.items_picked_up,
+                items_dropped = src.items_dropped, cash_earned = src.cash_earned, cash_spent = src.cash_spent,
+                loss_bonus = src.loss_bonus, round_start_money = src.round_start_money, round_end_money = src.round_end_money,
+                equipment_value_start = src.equipment_value_start, equipment_value_end = src.equipment_value_end,
+                enemies_flashed = src.enemies_flashed, teammates_flashed = src.teammates_flashed,
+                effective_flashes = src.effective_flashes, effective_smokes = src.effective_smokes,
+                effective_he_grenades = src.effective_he_grenades, effective_molotovs = src.effective_molotovs,
+                flash_waste = src.flash_waste, multi_kill_nades = src.multi_kill_nades, nade_kills = src.nade_kills,
+                entry_kills = src.entry_kills, entry_deaths = src.entry_deaths,
+                entry_kill_attempts = src.entry_kill_attempts, entry_kill_attempt_wins = src.entry_kill_attempt_wins,
+                trade_kills = src.trade_kills, traded_deaths = src.traded_deaths,
+                high_impact_kills = src.high_impact_kills, low_impact_kills = src.low_impact_kills, trade_opportunities = src.trade_opportunities,
+                trade_windows_missed = src.trade_windows_missed, multi_kills = src.multi_kills, opening_duels_won = src.opening_duels_won,
+                opening_duels_lost = src.opening_duels_lost, revenges = src.revenges,
+                clutches_won = src.clutches_won, clutches_lost = src.clutches_lost, clutch_points = src.clutch_points,
+                mvps_eliminations = src.mvps_eliminations, mvps_bomb = src.mvps_bomb, mvps_hostage = src.mvps_hostage,
+                headshots_hit = src.headshots_hit, chest_hits = src.chest_hits, stomach_hits = src.stomach_hits,
+                arm_hits = src.arm_hits, leg_hits = src.leg_hits,
+                kd_ratio = src.kd_ratio, headshot_percentage = src.headshot_percentage,
+                accuracy_percentage = src.accuracy_percentage, kast_percentage = src.kast_percentage,
+                average_damage_per_round = src.average_damage_per_round, hltv_rating = src.hltv_rating,
+                impact_rating = src.impact_rating, survival_rating = src.survival_rating,
+                utility_score = src.utility_score,
+                noscope_kills = src.noscope_kills, thru_smoke_kills = src.thru_smoke_kills,
+                attacker_blind_kills = src.attacker_blind_kills, flash_assisted_kills = src.flash_assisted_kills,
+                wallbang_kills = src.wallbang_kills, pings = src.pings, footsteps = src.footsteps;
             """;
 
         await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);

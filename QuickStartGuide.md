@@ -1,25 +1,26 @@
-# statsCollector Quick Start v1.7.0
+# statsCollector — Quick Start (v3.1.0)
 
-Get up and running fast with enterprise-grade CS2 stats collection. For full details, see README.md.
-
-## New in v1.7.0
-- **Mediator Pattern**: Decoupled event processing for maximum extensibility and performance.
-- **Dedicated Analytics**: All Rating 2.0 and Impact logic moved to a high-performance `AnalyticsService`.
-- **Spatial Optimization**: Native MySQL `POINT` types and `SPATIAL` indexes for advanced heatmap queries.
-- **Series Tracking**: Support for `SeriesUuid` to group multiple matches (BO3/BO5).
-- **Efficient Persistence**: **Dirty Flag** optimization reduces database writes by only flushing changed stats.
+Get up and running fast. For full details, see [README.md](README.md).
 
 ## Prerequisites
-- CounterStrikeSharp v1.0.340+
-- MySQL 8.0+ or MariaDB 10.6+ (Required for `POINT` and `SPATIAL` index support)
-- .NET 8.0 or 9.0 runtime
+- CounterStrikeSharp v1.0.369+ (.NET 10)
+- .NET 10 SDK to build, .NET 10 runtime to run
+- MySQL 8.0+ / 9.x or MariaDB 10.6+ (required for `POINT` and spatial indexes)
 - CS2 server with admin access
 
+## Database (Docker)
+A MySQL 9.6 + phpMyAdmin stack is included:
+```bash
+cd MySQL-docker
+docker compose up -d
+```
+This applies `database/init.sql` automatically on first start. To use an existing
+MySQL server instead, run `database/init.sql` against it manually.
+
 ## Install
-1) Stop the CS2 server.  
-2) Download the latest release and extract to:  
-   `game/csgo/addons/counterstrikesharp/plugins/statsCollector/`  
-3) Create `config.json` in that folder (see `config.sample.json` for all options):
+1. Stop the CS2 server.
+2. Extract the plugin to `game/csgo/addons/counterstrikesharp/plugins/statsCollector/`.
+3. Create `config.json` in that folder (see `config.sample.json`):
 ```json
 {
   "DatabaseHost": "127.0.0.1",
@@ -32,39 +33,30 @@ Get up and running fast with enterprise-grade CS2 stats collection. For full det
   "LogLevel": "Information"
 }
 ```
-4) Execute `database/init.sql` on your MySQL server to create the schema and optimized views.
-5) Start the server. The plugin will connect and begin tracking.  
-   Verify with: `css_plugins list`
+   To have the plugin create the schema for you, set `"AutoCreateSchema": true` instead of running
+   `init.sql` manually (the DB user needs `CREATE` privileges).
+4. Start the server and verify with `css_plugins list`.
 
-## Verify Relational Data (Late 2025)
-- **Matches**: `SELECT * FROM matches;` (Check for 'IN_PROGRESS' or 'COMPLETED' status)
-- **Player Profiles**: `SELECT * FROM view_player_profile;` (Aggregated summary)
+## Verify
+- **Console / logs**: look for `statsCollector v3.1.0 loading...` and `Background persistence services started.` (logs under `logs/statscollector-*.log`).
+- **Matches**: `SELECT * FROM matches;`
+- **Players**: `SELECT * FROM view_player_profile;`
 - **Leaderboard**: `SELECT * FROM view_global_leaderboard LIMIT 10;`
-- **Heatmaps**: `SELECT * FROM kill_positions WHERE match_id = 1;` (Spatial data)
-
-## Verify (Late 2025 Tracing)
-- **Console**: Look for "statsCollector plugin loaded successfully with full observability".
-- **Logs**: Check `logs/statscollector-*.log` for "Creating new session for player" and "Flushing batch".
-- **DB**: Check `player_advanced_analytics` for Rating 2.0 snapshots.
-- **Heatmaps**: Check `kill_positions` and `utility_positions` for spatial data.
+- **Heatmaps**: `SELECT * FROM kill_positions LIMIT 10;`
 
 ## Build from source
-1) Install .NET 8 SDK.  
-2) From repo root, run: `dotnet publish -c Release -o out`  
-3) Copy the built plugin from `out/` to your server.
+```bash
+dotnet publish -c Release -o out
+```
+Copy the built plugin from `out/` to your server.
 
 ## Troubleshooting
-- **No data in views**: Views like `view_global_leaderboard` have a 10-round activity threshold by default.
-- **DB Errors**: Check `logs/statscollector-*.log` for "Failed to persist batch".
-- DB connection failed: confirm MySQL is running, credentials, firewall, SSL mode.  
-- Plugin won’t load: check CounterStrikeSharp install, .NET runtime, permissions, logs.  
-- Stats not saving: DB perms, AutoSaveSeconds reasonable, check console errors.
+- **Plugin won't load**: check the CounterStrikeSharp install, .NET 10 runtime, and `logs/statscollector-*.log`.
+- **DB connection failed**: confirm MySQL is reachable, credentials are correct, and `DatabaseSslMode` matches the server.
+- **No data**: `view_global_leaderboard` has a 10-round activity threshold; check the log for `Failed to process persistence batch`.
+- **Config overrides**: any option can be set via `STATSCOLLECTOR_`-prefixed environment variables.
 
-## Environment overrides (optional)
-Prefix with `STATSCOLLECTOR_`, e.g. `STATSCOLLECTOR_DATABASE_PASSWORD`.
-
-## Resources
-- README.md (full guide)
+## Links
+- [README.md](README.md)
 - GitHub: https://github.com/ezspot/cs2-statscollector
 - CounterStrikeSharp docs: https://docs.cssharp.dev/
-- CS2 game events: https://cs2.poggu.me/dumped-data/game-events

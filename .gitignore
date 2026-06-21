@@ -1,4 +1,69 @@
-/.windsurf
-/bin
-/obj
-/out
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
+[Bb]in/
+[Oo]bj/
+/out/
+[Dd]ebug/
+[Rr]elease/
+*.dll
+*.pdb
+*.user
+*.suo
+*.userprefs
+
+# ---------------------------------------------------------------------------
+# .NET / NuGet
+# ---------------------------------------------------------------------------
+project.lock.json
+project.assets.json
+*.nuget.props
+*.nuget.targets
+*.nupkg
+*.snupkg
+.packages/
+artifacts/
+msbuild.binlog
+
+# ---------------------------------------------------------------------------
+# IDEs / editors
+# ---------------------------------------------------------------------------
+.vs/
+.vscode/
+.idea/
+*.swp
+*~
+
+# Claude Code workspace
+/.claude/
+
+# ---------------------------------------------------------------------------
+# OS files
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# Plugin runtime artifacts (generated on the game server, not source)
+# ---------------------------------------------------------------------------
+logs/
+*.log
+# Crash-recovery state written at runtime
+pending_stats.json
+pending_stats.json.tmp
+scrim_state.json
+scrim_state.json.tmp
+
+# Local plugin config (contains the database password — never commit it)
+config.json
+
+# ---------------------------------------------------------------------------
+# MySQL Docker stack
+# ---------------------------------------------------------------------------
+# Database files / volumes if bind-mounted locally
+MySQL-docker/data/
+MySQL-docker/mysql_data/
+# Real secret values — commit *.example templates instead, not the live files
+MySQL-docker/secrets/*.txt
+!MySQL-docker/secrets/*.example

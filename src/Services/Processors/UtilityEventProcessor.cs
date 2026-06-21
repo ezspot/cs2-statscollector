@@ -6,6 +6,8 @@ using System.Diagnostics;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
 
@@ -21,30 +23,24 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
     private readonly ILogger<UtilityEventProcessor> _logger;
     private readonly IPositionPersistenceService _positionPersistence;
     private readonly IMatchTrackingService _matchTracker;
-    private readonly IMapDataService _mapData;
-    private readonly IPersistenceChannel _persistenceChannel;
-    private readonly IGameScheduler _scheduler;
+    private readonly IOptionsMonitor<PluginConfig> _config;
 
     private readonly ConcurrentDictionary<string, PendingGrenade> _pendingGrenades = new();
     private DateTime _roundStartUtc;
     private int _currentRoundNumber;
 
     public UtilityEventProcessor(
-        IPlayerSessionService playerSessions, 
+        IPlayerSessionService playerSessions,
         ILogger<UtilityEventProcessor> logger,
         IPositionPersistenceService positionPersistence,
         IMatchTrackingService matchTracker,
-        IMapDataService mapData,
-        IPersistenceChannel persistenceChannel,
-        IGameScheduler scheduler)
+        IOptionsMonitor<PluginConfig> config)
     {
         _playerSessions = playerSessions;
         _logger = logger;
         _positionPersistence = positionPersistence;
         _matchTracker = matchTracker;
-        _mapData = mapData;
-        _persistenceChannel = persistenceChannel;
-        _scheduler = scheduler;
+        _config = config;
     }
 
     private record PendingGrenade(ulong OwnerSteamId, UtilityType Type, DateTime DetonationTime)
@@ -56,6 +52,29 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
     {
         _currentRoundNumber = context.RoundNumber;
         _roundStartUtc = context.RoundStartUtc;
+        _pendingGrenades.Clear();
+    }
+
+    public void OnRoundEnd(int winnerTeam, int winReason)
+    {
+        // A grenade that produced no hurt/blind effect during the round counts as wasted utility.
+        // Evaluating once at round end (rather than a per-grenade timer task) avoids spawning a
+        // thread-pool task for every detonation on a busy server.
+        foreach (var kvp in _pendingGrenades)
+        {
+            var p = kvp.Value;
+            if (p.HasEffect) continue;
+
+            _playerSessions.MutatePlayer(p.OwnerSteamId, stats =>
+            {
+                stats.Utility.UtilityWasteCount++;
+                if (p.Type == UtilityType.Flash) stats.Utility.WastedFlashes++;
+            });
+            Instrumentation.FlashWasteCounter.Add(1,
+                new KeyValuePair<string, object?>("player", p.OwnerSteamId),
+                new KeyValuePair<string, object?>("type", p.Type.ToString()));
+        }
+        _pendingGrenades.Clear();
     }
 
     public void RegisterEvents(IEventDispatcher dispatcher)
@@ -171,32 +190,13 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
             {
                 var now = DateTime.UtcNow;
                 var pendingKey = $"{typeName}_{playerState.SteamId}";
-                var pending = new PendingGrenade(playerState.SteamId, type, now);
-                _pendingGrenades[pendingKey] = pending;
+                _pendingGrenades[pendingKey] = new PendingGrenade(playerState.SteamId, type, now);
 
-                // Schedule a check for waste after 500ms (to allow all hurt/blind events to arrive)
-                _ = Task.Run(async () => 
-                {
-                    await Task.Delay(500);
-                    if (_pendingGrenades.TryRemove(pendingKey, out var p) && !p.HasEffect)
-                    {
-                        _playerSessions.MutatePlayer(p.OwnerSteamId, stats => 
-                        {
-                            stats.Utility.UtilityWasteCount++;
-                            if (p.Type == UtilityType.Flash)
-                            {
-                                stats.Utility.WastedFlashes++;
-                            }
-                        });
-                        Instrumentation.FlashWasteCounter.Add(1, new KeyValuePair<string, object?>("player", p.OwnerSteamId), new KeyValuePair<string, object?>("type", p.Type.ToString()));
-                    }
-                });
-
-                Instrumentation.GrenadesDetonatedCounter.Add(1, 
+                Instrumentation.GrenadesDetonatedCounter.Add(1,
                     new KeyValuePair<string, object?>("type", typeName),
                     new KeyValuePair<string, object?>("map", CounterStrikeSharp.API.Server.MapName));
 
-                if (playerState.PawnHandle != 0)
+                if (playerState.PawnHandle != 0 && _config.CurrentValue.EnablePositionTracking)
                 {
                     var matchUuid = _matchTracker?.CurrentMatch?.MatchUuid;
                     var posEvent = _positionPersistence.GetUtilityEvent();

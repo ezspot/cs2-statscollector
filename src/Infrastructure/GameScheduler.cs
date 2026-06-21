@@ -26,13 +26,10 @@ public sealed class GameScheduler : IGameScheduler
 
         var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        Server.NextFrame(() =>
-        {
-            if (!cts.IsCancellationRequested)
-            {
-                tcs.TrySetResult();
-            }
-        });
+        // Don't touch `cts` inside the callback: on timeout the method returns and disposes it
+        // before the next frame runs, which would throw ObjectDisposedException on the game thread.
+        // TrySetResult is a harmless no-op if the awaiter already timed out.
+        Server.NextFrame(() => tcs.TrySetResult());
 
         await tcs.Task.WaitAsync(cts.Token);
     }
@@ -49,18 +46,16 @@ public sealed class GameScheduler : IGameScheduler
 
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        // See YieldToGameThread: avoid referencing the (possibly disposed) cts inside the callback.
         Server.NextFrame(() =>
         {
-            if (!cts.IsCancellationRequested)
+            try
             {
-                try
-                {
-                    tcs.TrySetResult(func());
-                }
-                catch (Exception ex)
-                {
-                    tcs.TrySetException(ex);
-                }
+                tcs.TrySetResult(func());
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
             }
         });
 

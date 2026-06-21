@@ -1,7 +1,5 @@
 using System;
-using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
-using System.Globalization;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 
@@ -39,10 +37,6 @@ public sealed class PluginConfig : BasePluginConfig
     [RegularExpression("None|Preferred|Required|VerifyCA|VerifyFull", ErrorMessage = "DatabaseSslMode must be one of: None, Preferred, Required, VerifyCA, VerifyFull.")]
     public string DatabaseSslMode { get; set; } = "Required";
 
-    [JsonPropertyName("FlushConcurrency")]
-    [Range(1, 32)]
-    public int FlushConcurrency { get; set; } = 4;
-
     [JsonPropertyName("PersistenceChannelCapacity")]
     [Range(50, 5000)]
     public int PersistenceChannelCapacity { get; set; } = 1000;
@@ -55,15 +49,28 @@ public sealed class PluginConfig : BasePluginConfig
     [Range(1, 15)]
     public int TradeWindowSeconds { get; set; } = 5;
 
-    [JsonPropertyName("TradeDistanceThreshold")]
-    [Range(100.0, 5000.0)]
-    public float TradeDistanceThreshold { get; set; } = 1000.0f;
-
     [JsonPropertyName("ClutchSettings")]
     public ClutchConfig ClutchSettings { get; set; } = new();
 
     [JsonPropertyName("DeathmatchMode")]
     public bool DeathmatchMode { get; set; } = false;
+
+    // Run database/init.sql automatically on startup if the schema is missing.
+    [JsonPropertyName("AutoCreateSchema")]
+    public bool AutoCreateSchema { get; set; } = false;
+
+    // Spatial heatmap data (kill/death/utility positions) is the heaviest write path; disable on small servers.
+    [JsonPropertyName("EnablePositionTracking")]
+    public bool EnablePositionTracking { get; set; } = true;
+
+    // High-frequency, low-value counters (footsteps, jumps, pings).
+    [JsonPropertyName("EnableMovementTracking")]
+    public bool EnableMovementTracking { get; set; } = true;
+
+    // Scrim/match-management system (lobby, captains, picking, knife, pauses). When false, stat
+    // tracking runs on every round without requiring a scrim to be started.
+    [JsonPropertyName("EnableScrim")]
+    public bool EnableScrim { get; set; } = true;
 
     [JsonPropertyName("LogLevel")]
     public LogLevel LogLevel { get; set; } = LogLevel.Information;
@@ -71,13 +78,13 @@ public sealed class PluginConfig : BasePluginConfig
     [JsonPropertyName("Scrim")]
     public ScrimConfig Scrim { get; set; } = new();
 
-    public string BuildConnectionString()
+    public string BuildConnectionString(bool includeDatabase = true)
     {
         var builder = new MySqlConnectionStringBuilder
         {
             Server = DatabaseHost,
             Port = (uint)DatabasePort,
-            Database = DatabaseName,
+            Database = includeDatabase ? DatabaseName : string.Empty,
             UserID = DatabaseUsername,
             Password = DatabasePassword,
             MinimumPoolSize = 0,
@@ -92,30 +99,14 @@ public sealed class PluginConfig : BasePluginConfig
 
     public PluginConfig WithEnvironmentOverrides()
     {
-        var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(ToConfigurationDictionary())
+        // Overlay only the keys actually present as environment variables onto the
+        // JSON-loaded values; every other property keeps its configured value.
+        new ConfigurationBuilder()
             .AddEnvironmentVariables(EnvironmentPrefix)
-            .Build();
+            .Build()
+            .Bind(this);
 
-        var merged = new PluginConfig();
-        configuration.Bind(merged);
-        return merged;
-    }
-
-    public IDictionary<string, string?> ToConfigurationDictionary()
-    {
-        return new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
-        {
-            [nameof(DatabaseHost)] = DatabaseHost,
-            [nameof(DatabasePort)] = DatabasePort.ToString(CultureInfo.InvariantCulture),
-            [nameof(DatabaseName)] = DatabaseName,
-            [nameof(DatabaseUsername)] = DatabaseUsername,
-            [nameof(DatabasePassword)] = DatabasePassword,
-            [nameof(DatabaseSslMode)] = DatabaseSslMode,
-            [nameof(FlushConcurrency)] = FlushConcurrency.ToString(CultureInfo.InvariantCulture),
-            [nameof(PersistenceChannelCapacity)] = PersistenceChannelCapacity.ToString(CultureInfo.InvariantCulture),
-            [nameof(AutoSaveSeconds)] = AutoSaveSeconds.ToString(CultureInfo.InvariantCulture)
-        };
+        return this;
     }
 
     public void Validate()

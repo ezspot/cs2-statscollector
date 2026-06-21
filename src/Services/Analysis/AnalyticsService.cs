@@ -18,6 +18,7 @@ public interface IAnalyticsService
     decimal CalculateUtilityScore(PlayerStats stats);
     decimal CalculatePerformanceScore(PlayerStats stats);
     string GetPlayerRank(decimal performanceScore);
+    decimal CalculateHltv2Rating(int kills, int assists, int deaths, int rounds, decimal kastPercent, decimal adr);
     PlayerSnapshot CreateSnapshot(PlayerStats stats, int? matchId = null, string? matchUuid = null);
 }
 
@@ -43,17 +44,6 @@ public sealed class AnalyticsService : IAnalyticsService
         var teamFlashPenalty = (stats.Utility.TeamFlashDuration / 2000m) * 0.1m;
         
         return Math.Max(0m, killsRating + deathsRating + impactRating + kastRating + survivalRating + roundSwingRating - teamFlashPenalty);
-    }
-
-    private decimal CalculateEcoAdjustedKills(PlayerStats stats)
-    {
-        // Ideally we'd need a list of every kill with victim equipment value.
-        // Since we aggregate, we might need to store this in stats or calculate it during the event.
-        // For now, if we don't have per-kill equipment value, we'll use a placeholder or assume 
-        // the user has added this to the CombatStats model.
-        // Let's assume we use a simplified version: (Total Kills - Eco Frags) + (Eco Frags * 0.2)
-        // However, a better way is to track 'WeightedKills' in CombatStats.
-        return stats.Combat.Kills; // Fallback for now, but will recommend adding WeightedKills
     }
 
     public decimal CalculateImpactRating(PlayerStats stats)
@@ -116,6 +106,20 @@ public sealed class AnalyticsService : IAnalyticsService
         var impactScoreValue = Math.Min(15m, CalculateImpactRating(stats) * 7.5m);
 
         return kdScore + adrScore + kastScore + mvpScore + impactScoreValue;
+    }
+
+    // Standard HLTV 2.0 rating formula, computed from a single match's totals. Used for
+    // per-match summaries where the inputs are match-scoped deltas rather than session totals.
+    public decimal CalculateHltv2Rating(int kills, int assists, int deaths, int rounds, decimal kastPercent, decimal adr)
+    {
+        if (rounds <= 0) return 0m;
+
+        var kpr = (decimal)kills / rounds;
+        var dpr = (decimal)deaths / rounds;
+        var apr = (decimal)assists / rounds;
+        var impact = (2.13m * kpr) + (0.42m * apr) - 0.41m;
+        var rating = (0.0073m * kastPercent) + (0.3591m * kpr) - (0.5329m * dpr) + (0.2372m * impact) + (0.0032m * adr) + 0.1587m;
+        return Math.Max(0m, Math.Round(rating, 3));
     }
 
     public string GetPlayerRank(decimal performanceScore)
@@ -233,7 +237,7 @@ public sealed class AnalyticsService : IAnalyticsService
             stats.Bomb.BombDeaths,
             stats.Round.Jumps,
             stats.Round.TotalSpawns,
-            stats.Round.PlaytimeSeconds,
+            (int)(DateTime.UtcNow - stats.SessionStartUtc).TotalSeconds,
             stats.Economy.MoneySpent,
             stats.Economy.EquipmentValue,
             stats.Economy.ItemsPurchased,

@@ -1,9 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using OpenTelemetry;
-using OpenTelemetry.Metrics;
-using OpenTelemetry.Resources;
-using OpenTelemetry.Trace;
 using Serilog;
 using Serilog.Events;
 using statsCollector.Config;
@@ -24,28 +19,6 @@ public static class Bootstrapper
             .WriteTo.Console()
             .WriteTo.File("logs/statscollector-.log", rollingInterval: RollingInterval.Day)
             .CreateLogger();
-    }
-
-    public static (TracerProvider? Tracer, MeterProvider? Meter) InitializeOpenTelemetry()
-    {
-        var resourceBuilder = ResourceBuilder.CreateDefault()
-            .AddService(Instrumentation.ServiceName, serviceVersion: Instrumentation.ServiceVersion);
-
-        var tracerProvider = Sdk.CreateTracerProviderBuilder()
-            .SetResourceBuilder(resourceBuilder)
-            .AddSource(Instrumentation.ServiceName)
-            .AddSource("MySqlConnector")
-            .AddOtlpExporter()
-            .Build();
-
-        var meterProvider = Sdk.CreateMeterProviderBuilder()
-            .SetResourceBuilder(resourceBuilder)
-            .AddMeter(Instrumentation.ServiceName)
-            .AddRuntimeInstrumentation()
-            .AddOtlpExporter()
-            .Build();
-
-        return (tracerProvider, meterProvider);
     }
 
     private static LogEventLevel GetSerilogLevel(LogLevel level) => level switch

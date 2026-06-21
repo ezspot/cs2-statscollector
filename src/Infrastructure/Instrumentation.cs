@@ -7,7 +7,7 @@ namespace statsCollector.Infrastructure;
 public static class Instrumentation
 {
     public const string ServiceName = "cs2-statscollector";
-    public const string ServiceVersion = "3.0.0";
+    public const string ServiceVersion = "3.1.0";
 
     public static readonly ActivitySource ActivitySource = new(ServiceName, ServiceVersion);
     public static readonly Meter Meter = new(ServiceName, ServiceVersion);
@@ -22,7 +22,6 @@ public static class Instrumentation
     public static readonly Counter<long> DbOperationsCounter = Meter.CreateCounter<long>("cs2_db_operations_total", description: "Total database operations");
     
     // Gameplay Counters
-    public static readonly Counter<long> TradeOpportunitiesCounter = Meter.CreateCounter<long>("cs2_trade_opportunities_total", description: "Total trade kill opportunities");
     public static readonly Counter<long> FlashWasteCounter = Meter.CreateCounter<long>("cs2_flash_waste_total", description: "Total flashes thrown that were considered waste");
     public static readonly Counter<long> RoundsPlayedCounter = Meter.CreateCounter<long>("cs2_rounds_played_total", description: "Total rounds played");
     
@@ -42,11 +41,7 @@ public static class Instrumentation
     public static readonly Counter<long> PositionEventsEnqueuedCounter = Meter.CreateCounter<long>("cs2_position_events_enqueued_total", description: "Total position events enqueued");
     public static readonly Counter<long> PositionEventsDroppedCounter = Meter.CreateCounter<long>("cs2_position_events_dropped_total", description: "Total position events dropped due to full channel");
     public static readonly Counter<long> PositionEventsTrackedCounter = Meter.CreateCounter<long>("cs2_position_events_tracked_total", description: "Total position events tracked in DB");
-    
-    // Match Lifecycle Counters
-    public static readonly Counter<long> MatchLifecycleEventsCounter = Meter.CreateCounter<long>("cs2_match_lifecycle_events_total", description: "Total match lifecycle events enqueued");
-    public static readonly Counter<long> MatchLifecycleErrorsCounter = Meter.CreateCounter<long>("cs2_match_lifecycle_errors_total", description: "Total match lifecycle event processing errors");
-    
+
     // Circuit Breaker Counters
     public static readonly Counter<long> CircuitBreakerStateCounter = Meter.CreateCounter<long>("cs2_circuit_breaker_state_changes_total", description: "Total circuit breaker state changes");
 }

@@ -56,7 +56,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
         _serviceProvider = serviceProvider;
         _config = config;
 
-        var options = new BoundedChannelOptions(10000)
+        var options = new BoundedChannelOptions(config.CurrentValue.PersistenceChannelCapacity)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,

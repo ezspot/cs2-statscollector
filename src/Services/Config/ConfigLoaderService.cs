@@ -32,7 +32,7 @@ public class ConfigLoaderService : IConfigLoaderService
 
     public async Task LoadAndExecuteConfigAsync(string fileName)
     {
-        var configPath = Path.Combine(_gameDir, "csgo", _config.Scrim.MatchZyConfigPath, fileName);
+        var configPath = Path.Combine(_gameDir, "csgo", _config.Scrim.ScrimConfigPath, fileName);
         
         if (!File.Exists(configPath))
         {
@@ -70,7 +70,7 @@ public class ConfigLoaderService : IConfigLoaderService
     public async Task ReloadWhitelistAsync()
     {
         _whitelistedSteamIds.Clear();
-        var whitelistPath = Path.Combine(_gameDir, "csgo", _config.Scrim.MatchZyConfigPath, "whitelist.cfg");
+        var whitelistPath = Path.Combine(_gameDir, "csgo", _config.Scrim.ScrimConfigPath, "whitelist.cfg");
 
         if (!File.Exists(whitelistPath))
         {

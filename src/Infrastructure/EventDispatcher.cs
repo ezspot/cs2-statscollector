@@ -7,15 +7,9 @@ using Microsoft.Extensions.Logging;
 
 namespace statsCollector.Infrastructure;
 
-public interface IEventHandler<in T> where T : GameEvent
-{
-    HookResult Handle(T @event, GameEventInfo info);
-}
-
 public interface IEventDispatcher
 {
     void Subscribe<T>(Func<T, GameEventInfo, HookResult> handler) where T : GameEvent;
-    void Subscribe<T>(IEventHandler<T> handler) where T : GameEvent;
     HookResult Dispatch<T>(T @event, GameEventInfo info) where T : GameEvent;
 }
 
@@ -24,24 +18,26 @@ public sealed class EventDispatcher(ILogger<EventDispatcher> logger) : IEventDis
     private readonly ConcurrentDictionary<Type, object> _handlers = new();
     private readonly ILogger<EventDispatcher> _logger = logger;
 
+    // Cached per-type span name so dispatch (which runs on the game thread for high-frequency
+    // events) does not allocate an interpolated string on every call.
+    private static class EventName<T>
+    {
+        public static readonly string DispatchName = $"EventDispatcher.Dispatch.{typeof(T).Name}";
+    }
+
     public void Subscribe<T>(Func<T, GameEventInfo, HookResult> handler) where T : GameEvent
     {
         _handlers.AddOrUpdate(typeof(T),
             _ => ImmutableArray.Create<Func<T, GameEventInfo, HookResult>>(handler),
             (_, existing) => ((ImmutableArray<Func<T, GameEventInfo, HookResult>>)existing).Add(handler));
-        
-        _logger.LogTrace("Subscribed to event {EventType} (Delegate)", typeof(T).Name);
-    }
 
-    public void Subscribe<T>(IEventHandler<T> handler) where T : GameEvent
-    {
-        Subscribe<T>(handler.Handle);
+        _logger.LogTrace("Subscribed to event {EventType} (Delegate)", typeof(T).Name);
     }
 
     public HookResult Dispatch<T>(T @event, GameEventInfo info) where T : GameEvent
     {
-        using var activity = Instrumentation.ActivitySource.StartActivity($"EventDispatcher.Dispatch.{typeof(T).Name}");
-        
+        using var activity = Instrumentation.ActivitySource.StartActivity(EventName<T>.DispatchName);
+
         if (!_handlers.TryGetValue(typeof(T), out var handlersObj))
         {
             return HookResult.Continue;

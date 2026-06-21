@@ -1,29 +1,38 @@
-# statsCollector v1.7.0
+# statsCollector v3.1.0
 
-A high-performance CounterStrikeSharp plugin for CS2 that collects advanced player statistics with enterprise-grade architecture. Built for late 2025 standards using .NET 8+, Polly v8 Resilience, and full OpenTelemetry observability.
+A CounterStrikeSharp plugin for CS2 that collects detailed player statistics into MySQL, with non-blocking persistence and a scrim/match management system.
 
 ## Features
-- **Relational Match Tracking**: Automated `matches` and `rounds` management with support for `SeriesUuid` (BO3/BO5).
-- **Decoupled Architecture**: Mediator pattern via `IEventDispatcher` for extensible, high-performance event processing.
-- **Dedicated Analytics**: Centralized `AnalyticsService` for precise HLTV Rating 2.0, Impact, KAST, and ADR calculations.
-- **Spatial Analytics (Heatmaps)**: High-resolution tracking using MySQL **POINT** types and **SPATIAL indexes** for optimized geometric queries.
-- **Optimized Persistence**: **Dirty Flag** pattern ensures only changed player data is flushed to the database, minimizing I/O.
-- **Accurate ADR Tracking**: Uses `player_hurt` events for precise damage calculation (not capped at 100).
-- **Enterprise Observability**: Full OpenTelemetry (OTEL) integration for traces and metrics.
-- **Robust Resilience**: Polly v8 pipelines with automated retries and circuit breakers for all database operations.
-- **Tactical Pause System**: MatchZy-style `.pause` and `.unpause` with technical/tactical limits.
-- **Scrim Management**: Automated knife rounds, side selection, and captain-based picking.
-- **Round Backup & Restore**: `.restore <round>` to instantly roll back match state and scores.
-- **Dashboard Optimized**: Pre-aggregated views for global leaderboards and Leetify-style analytics.
+- **Relational match tracking** — `matches` and `rounds` are tracked automatically, with optional `series_uuid` to group BO3/BO5 series.
+- **Lifetime player stats** — 100+ aggregated metrics per player (combat, utility, economy, bomb, clutch, entry).
+- **Per-match stats** — `match_player_stats` / `match_weapon_stats` populated at match end from start-of-match deltas, with a standard HLTV 2.0 per-match rating.
+- **Spatial data** — kill / death / utility positions stored as MySQL `POINT` with spatial indexes for heatmaps.
+- **Non-blocking persistence** — game-thread events are snapshotted and written to MySQL on a background channel; the server thread never waits on the database.
+- **Dirty-flag flushing** — only players whose stats changed are written on each auto-save.
+- **Resilience** — Polly v8 pipeline (retry + circuit breaker + timeout) wraps every database operation.
+- **Bulk writes** — player and position batches are written with `MySqlBulkCopy` into a temporary table, then merged.
+- **Scrim management** — lobby/ready-up, captain assignment, map vote, player picking, knife round + side selection.
+- **Tactical pause system** — `.pause` / `.unpause` with technical/tactical limits.
+
+## Requirements
+- CounterStrikeSharp v1.0.369+ (.NET 10 runtime)
+- .NET 10 SDK (to build) / .NET 10 runtime (to run)
+- MySQL 8.0+ / 9.x (or MariaDB 10.6+) — required for `POINT` columns and spatial indexes
+
+A ready-to-run MySQL 9.6 + phpMyAdmin stack is provided under `MySQL-docker/` (`docker compose up -d`).
+
+> Note: current CounterStrikeSharp targets .NET 10. If your server still runs a .NET 8 build of
+> CounterStrikeSharp, pin `CounterStrikeSharp.API` to its last `net8.0` release and set
+> `<TargetFramework>net8.0</TargetFramework>`.
 
 ## Installation
 1. Install [CounterStrikeSharp](https://docs.cssharp.dev/) on your CS2 server.
-2. Place the plugin files in `game/csgo/addons/counterstrikesharp/plugins/statsCollector`.
-3. Configure `config.json` (see `config.sample.json`).
-4. Execute `database/init.sql` on your MySQL/MariaDB server.
-5. Ensure .NET 8.0 or 9.0 runtime is installed.
+2. Copy the plugin to `game/csgo/addons/counterstrikesharp/plugins/statsCollector/`.
+3. Create `config.json` in that folder (see `config.sample.json`).
+4. Run `database/init.sql` against your MySQL server to create the schema and views.
+5. Start the server and confirm with `css_plugins list`.
 
-### Minimal config example
+### Minimal config
 ```json
 {
   "DatabaseHost": "127.0.0.1",
@@ -32,55 +41,59 @@ A high-performance CounterStrikeSharp plugin for CS2 that collects advanced play
   "DatabaseUsername": "cs2_statscollector",
   "DatabasePassword": "your_password",
   "DatabaseSslMode": "Required",
-  "FlushConcurrency": 4,
-  "PersistenceChannelCapacity": 1000,
   "AutoSaveSeconds": 60,
-  "TradeWindowSeconds": 5,
-  "TradeDistanceThreshold": 1000.0,
-  "ClutchSettings": {
-    "BaseMultiplier": 1.0,
-    "DifficultyWeight": 0.2
-  },
-  "DeathmatchMode": false,
   "LogLevel": "Information"
 }
 ```
+See `config.sample.json` for the full set of options (persistence, trade window, clutch weighting, scrim settings).
 
-## Data Model (Late 2025 Relational)
-- **`matches` / `rounds`**: Core lifecycle entities for grouping events.
-- **`players`**: Core registry with first/last seen timestamps.
-- **`player_stats`**: Lifetime aggregated statistics across 100+ metrics.
-- **`match_player_stats`**: Per-match performance summaries (Fast for dashboards).
-- **`match_weapon_stats`**: Per-match weapon lethality and accuracy.
-- **`player_advanced_analytics`**: Temporal snapshots of performance (Rating 2.0, Impact, etc.).
-- **`kill_positions` / `death_positions` / `utility_positions`**: XYZ coordinates linked to `match_id` for heatmaps.
+Any option can be overridden by an environment variable prefixed with `STATSCOLLECTOR_`
+(e.g. `STATSCOLLECTOR_DatabasePassword`).
 
-## Dashboard Integration (Optimized Views)
-The database includes pre-optimized views for near-instant dashboard rendering:
-- `view_enhanced_player_analytics`: HLTV/Leetify style performance summary.
-- `view_clutch_performance`: Detailed 1vX success rates.
-- `view_entry_efficiency`: Opening duel metrics.
-- `view_global_leaderboard`: Ranked by Rating 2.0 with activity filters.
-- `view_player_match_history`: Complete match-by-match breakdown.
+### Notable toggles
+- `AutoCreateSchema` (default `false`) — apply the embedded `init.sql` on startup if the schema is missing.
+- `EnablePositionTracking` (default `true`) — records the X/Y/Z coordinates of every kill, death, and
+  utility throw into `kill_positions` / `death_positions` / `utility_positions` (the data behind
+  heatmaps and spatial queries). **Performance:** this is the heaviest write path — it generates the
+  most database rows and the most batched inserts, so on busy or resource-constrained servers it is
+  the first thing to disable if you don't need heatmaps. Disabling it has no effect on combat,
+  economy, or match statistics.
+- `EnableMovementTracking` (default `true`) — counts footsteps, jumps, and pings per player.
+  **Performance:** `player_footstep` fires very frequently (multiple times per second for every moving
+  player), and each one takes a per-player lock to increment a counter on the game thread. The
+  analytical value is low, so disabling it removes a constant source of game-thread work on a busy
+  server. When off, these handlers aren't even subscribed (zero per-event cost).
+- `EnableScrim` (default `true`) — scrim/match-management commands. When `false`, stat tracking runs on
+  every round without needing a scrim to be started (plain stats server).
+
+## Data model
+- `players` — registry with first/last seen timestamps.
+- `player_stats` — lifetime aggregated statistics.
+- `matches` / `rounds` — match and round lifecycle.
+- `kill_positions` / `death_positions` / `utility_positions` — spatial event data linked to a match.
+- `match_player_stats` / `match_weapon_stats` — per-match performance and weapon breakdowns (written at match end).
+- `player_advanced_analytics` — temporal performance snapshots (Rating 2.0, Impact, KAST, ADR).
+
+### Dashboard views
+- `view_global_leaderboard` — ranked by HLTV rating (10-round activity threshold).
+- `view_player_profile` — per-player summary.
+- `view_player_match_history` — match-by-match breakdown.
+- `view_clutch_performance`, `view_entry_efficiency`, `view_enhanced_player_analytics`.
 
 ## Architecture
-- **Centralized Instrumentation**: Global `Instrumentation` class for OTEL ActivitySource and Meters.
-- **Resilience**: Polly v8 Pipelines for all DB interactions.
-- **Async Flow**: CS2 event → processor → PlayerSessionService → PlayerSnapshot → Channel → StatsRepository → MySQL.
+Flow: CS2 event → event processor → `PlayerSessionService` (per-player locked state) →
+`PlayerSnapshot` → `PersistenceChannel` (bounded background queue) → `StatsRepository` → MySQL.
 
-## Enterprise Best Practices (Late 2025)
-- **Non-blocking I/O**: Game thread never waits for the database.
-- **Resilience**: Database transient failures are handled gracefully by Polly v8.
-- **Observability**: Metrics (Meters) and Traces (ActivitySource) ready for Prometheus/Grafana/Jaeger.
-- **Resource Management**: Proper `IAsyncDisposable` implementation for clean shutdowns.
+- Database access goes through `IConnectionFactory` + Dapper, wrapped in a Polly resilience pipeline.
+- Logging is via Serilog (console + daily rolling file under `logs/`).
+- Lightweight `System.Diagnostics` `ActivitySource`/`Meter` instrumentation is present but has no exporter wired by default (no external collector required).
 
 ## Development
-- Build: `dotnet build`
-- Publish: `dotnet publish -c Release`
-- Requirements: .NET 8 SDK, CounterStrikeSharp SDK, MySQL Connector
-- License: MIT
+- Build: `dotnet build -c Release`
+- Publish: `dotnet publish -c Release -o out`
+- Requirements: .NET 10 SDK
 
-## Support
+## Links
 - Issues: https://github.com/ezspot/cs2-statscollector/issues
 - CounterStrikeSharp docs: https://docs.cssharp.dev/
 - CS2 game events: https://cs2.poggu.me/dumped-data/game-events

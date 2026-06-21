@@ -23,7 +23,8 @@ public sealed class MatchFlowHandler : IGameHandler
     private readonly IDamageReportService _damageReport;
     private readonly IPersistenceChannel _persistenceChannel;
     private readonly IGameScheduler _scheduler;
-    
+    private readonly IMatchStatsService _matchStats;
+
     private PluginConfig _config => _configMonitor.CurrentValue;
     private int _currentRoundNumber = 0;
 
@@ -38,7 +39,8 @@ public sealed class MatchFlowHandler : IGameHandler
         IOptionsMonitor<PluginConfig> configMonitor,
         IDamageReportService damageReport,
         IPersistenceChannel persistenceChannel,
-        IGameScheduler scheduler)
+        IGameScheduler scheduler,
+        IMatchStatsService matchStats)
     {
         _logger = logger;
         _processors = processors;
@@ -51,6 +53,7 @@ public sealed class MatchFlowHandler : IGameHandler
         _damageReport = damageReport;
         _persistenceChannel = persistenceChannel;
         _scheduler = scheduler;
+        _matchStats = matchStats;
     }
 
     public void Register(BasePlugin plugin)
@@ -59,13 +62,27 @@ public sealed class MatchFlowHandler : IGameHandler
         plugin.RegisterEventHandler<EventRoundFreezeEnd>(OnRoundFreezeEnd);
         plugin.RegisterEventHandler<EventRoundEnd>(OnRoundEnd);
         plugin.RegisterEventHandler<EventRoundAnnounceMatchStart>(OnRoundAnnounceMatchStart);
+        plugin.RegisterEventHandler<EventCsWinPanelMatch>(OnMatchEnd);
+    }
+
+    private HookResult OnMatchEnd(EventCsWinPanelMatch @event, GameEventInfo info)
+    {
+        if (_config.DeathmatchMode) return HookResult.Continue;
+
+        // Persist per-match summaries (delta vs. the start-of-match baseline), then close the match.
+        _matchStats.FinalizeMatch();
+        _matchTracker.EndMatch();
+        _logger.LogInformation("Match ended; per-match statistics finalized.");
+        return HookResult.Continue;
     }
 
     private HookResult OnRoundAnnounceMatchStart(EventRoundAnnounceMatchStart @event, GameEventInfo info)
     {
+        // The match row is created by MatchTrackingService.StartMatch on map start; this event only
+        // marks the live phase. (A direct MatchStart write here used the wrong tuple shape and was ignored.)
         _logger.LogInformation("Match start announced. Live tracking enabled.");
         _currentRoundNumber = 1;
-        _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.MatchStart, (Server.MapName, (string?)null)));
+        _matchStats.CaptureBaseline();
         return HookResult.Continue;
     }
 
@@ -91,19 +108,21 @@ public sealed class MatchFlowHandler : IGameHandler
     private HookResult OnRoundFreezeEnd(EventRoundFreezeEnd @event, GameEventInfo info)
     {
         if (_config.DeathmatchMode) return HookResult.Continue;
-        if (_scrimManager.CurrentState is not (ScrimState.Live))
+        // When the scrim system is enabled, round processing only runs once a scrim is Live.
+        // With scrim disabled this is a plain stats server, so every round is processed.
+        if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live)
         {
-            _logger.LogDebug("Skipping RoundFreezeEnd logic: Scrim is not InProgress or Live.");
+            _logger.LogDebug("Skipping RoundFreezeEnd logic: scrim enabled but not Live.");
             return HookResult.Continue;
         }
 
         var roundStartUtc = DateTime.UtcNow;
         var ctAlive = 0;
         var tAlive = 0;
-        
+
         // Capture player states on the game thread
         var playerStates = new List<PlayerControllerState>();
-        _playerSessions.GetActiveSteamIds().ToList().ForEach(steamId => 
+        foreach (var steamId in _playerSessions.GetActiveSteamIds())
         {
             var player = Utilities.GetPlayerFromSteamId(steamId);
             if (player is { IsValid: true })
@@ -113,7 +132,7 @@ public sealed class MatchFlowHandler : IGameHandler
                 if (state.Team == PlayerTeam.CounterTerrorist) ctAlive++;
                 else if (state.Team == PlayerTeam.Terrorist) tAlive++;
             }
-        });
+        }
 
         var context = new RoundContext(_currentRoundNumber, roundStartUtc, ctAlive, tAlive);
         foreach (var processor in _processors)

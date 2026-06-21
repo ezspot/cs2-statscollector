@@ -13,10 +13,6 @@ using CounterStrikeSharp.API.Modules.Events;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using OpenTelemetry;
-using OpenTelemetry.Metrics;
-using OpenTelemetry.Resources;
-using OpenTelemetry.Trace;
 using Polly;
 using Polly.Registry;
 using Serilog;
@@ -41,13 +37,10 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
     private IPluginLifecycleService? _lifecycle;
     private readonly CancellationTokenSource _cancellationTokenSource = new();
 
-    private MeterProvider? _meterProvider;
-    private TracerProvider? _tracerProvider;
-
     public override string ModuleName => "statsCollector";
     public override string ModuleVersion => Instrumentation.ServiceVersion;
     public override string ModuleAuthor => "Anders Giske Hagen";
-    public override string ModuleDescription => "High-performance CS2 stats collection with late 2025 observability";
+    public override string ModuleDescription => "CS2 player statistics collection to MySQL";
 
     public PluginConfig Config { get; set; } = new();
 
@@ -91,10 +84,6 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
 
     private async Task InitializePluginAsync(bool hotReload, CancellationToken ct)
     {
-        var (tracer, meter) = Bootstrapper.InitializeOpenTelemetry();
-        _tracerProvider = tracer;
-        _meterProvider = meter;
-
         var services = new ServiceCollection();
 
         // DI Registration
@@ -111,6 +100,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         });
 
         services.AddSingleton<IConnectionFactory, ConnectionFactory>();
+        services.AddSingleton<ISchemaInitializer, SchemaInitializer>();
         services.AddSingleton<IEventDispatcher, EventDispatcher>();
         services.AddSingleton<IAnalyticsService, AnalyticsService>();
         services.AddSingleton<IMatchTrackingService, MatchTrackingService>();
@@ -131,16 +121,16 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddTransient<IBombEventProcessor>(sp => (IBombEventProcessor)sp.GetRequiredService<IEnumerable<IEventProcessor>>().First(p => p is BombEventProcessor));
         services.AddTransient<IEconomyEventProcessor>(sp => (IEconomyEventProcessor)sp.GetRequiredService<IEnumerable<IEventProcessor>>().First(p => p is EconomyEventProcessor));
 
-        services.AddTransient<IPositionTrackingService, PositionTrackingService>();
+        services.AddSingleton<IPositionTrackingService, PositionTrackingService>();
+        services.AddSingleton<IPositionPersistenceService, PositionPersistenceService>();
         services.AddSingleton<IGameScheduler, GameScheduler>();
+        // Lifecycle (Start/Stop) is driven explicitly by PluginLifecycleService, not by a generic Host.
         services.AddSingleton<IPersistenceChannel, PersistenceChannel>();
-        services.AddHostedService(sp => (PersistenceChannel)sp.GetRequiredService<IPersistenceChannel>());
         services.AddSingleton<IJsonRecoveryService, JsonRecoveryService>();
-        services.AddSingleton<IMapDataService, MapDataService>();
         services.AddSingleton<IConfigLoaderService, ConfigLoaderService>();
-        services.AddSingleton<IFlashEfficiencyService, FlashEfficiencyService>();
         services.AddSingleton<IRoundBackupService, RoundBackupService>();
         services.AddSingleton<IScrimManager, ScrimManager>();
+        services.AddSingleton<IMatchStatsService, MatchStatsService>();
         services.AddSingleton<IDamageReportService, DamageReportService>();
         services.AddSingleton<IPauseService, PauseService>();
         services.AddSingleton<IMatchReadyService, MatchReadyService>();
@@ -183,11 +173,6 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
                 matchTracker.StartMatch(mapName);
             });
 
-            RegisterListener<Listeners.OnTick>(() =>
-            {
-                _lifecycle.OnTick();
-            });
-
             _logger.LogInformation("statsCollector plugin initialized successfully on game thread.");
         });
 
@@ -216,9 +201,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             if (_lifecycle != null) await _lifecycle.StopAsync();
 
             _cancellationTokenSource.Cancel();
-            _tracerProvider?.Dispose();
-            _meterProvider?.Dispose();
-            
+
             _logger.LogInformation("statsCollector cleanup complete.");
             Log.CloseAndFlush();
         }

@@ -119,30 +119,16 @@ public sealed class UtilityPositionEvent : PositionEvent
     }
 }
 
-public sealed class PositionTickEvent : PositionEvent
-{
-    public string MapName { get; set; } = string.Empty;
-    public List<PlayerPositionSnapshot> Positions { get; } = new(64);
-
-    public override void Reset()
-    {
-        MatchUuid = null;
-        MapName = string.Empty;
-        Positions.Clear();
-    }
-}
-
 public interface IPositionPersistenceService : IAsyncDisposable
 {
     Task StartAsync(CancellationToken cancellationToken);
     Task EnqueueAsync(PositionEvent @event, CancellationToken cancellationToken);
     Task StopAsync(TimeSpan timeout, CancellationToken cancellationToken);
-    
+
     // Pooling methods
     KillPositionEvent GetKillEvent();
     DeathPositionEvent GetDeathEvent();
     UtilityPositionEvent GetUtilityEvent();
-    PositionTickEvent GetTickEvent();
 }
 
 public sealed class PositionPersistenceService : IPositionPersistenceService
@@ -161,7 +147,6 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
     private readonly ObjectPool<KillPositionEvent> _killPool;
     private readonly ObjectPool<DeathPositionEvent> _deathPool;
     private readonly ObjectPool<UtilityPositionEvent> _utilityPool;
-    private readonly ObjectPool<PositionTickEvent> _tickPool;
 
     public PositionPersistenceService(
         IPositionTrackingService repository,
@@ -175,7 +160,6 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         _killPool = policy.Create(new PositionEventPooledObjectPolicy<KillPositionEvent>());
         _deathPool = policy.Create(new PositionEventPooledObjectPolicy<DeathPositionEvent>());
         _utilityPool = policy.Create(new PositionEventPooledObjectPolicy<UtilityPositionEvent>());
-        _tickPool = policy.Create(new PositionEventPooledObjectPolicy<PositionTickEvent>());
 
         var capacity = Math.Max(100, config.CurrentValue.PersistenceChannelCapacity);
         _channel = Channel.CreateBounded<PositionEvent>(new BoundedChannelOptions(capacity)
@@ -190,7 +174,6 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
     public KillPositionEvent GetKillEvent() => _killPool.Get();
     public DeathPositionEvent GetDeathEvent() => _deathPool.Get();
     public UtilityPositionEvent GetUtilityEvent() => _utilityPool.Get();
-    public PositionTickEvent GetTickEvent() => _tickPool.Get();
 
     private class PositionEventPooledObjectPolicy<T> : IPooledObjectPolicy<T> where T : PositionEvent, new()
     {
@@ -337,7 +320,6 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
             case KillPositionEvent k: _killPool.Return(k); break;
             case DeathPositionEvent d: _deathPool.Return(d); break;
             case UtilityPositionEvent u: _utilityPool.Return(u); break;
-            case PositionTickEvent t: _tickPool.Return(t); break;
         }
     }
 
