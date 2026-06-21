@@ -14,8 +14,6 @@ public enum PauseType
 
 public interface IPauseService
 {
-    bool IsPaused { get; }
-    PauseType CurrentPauseType { get; }
     Task RequestPauseAsync(CCSPlayerController? player, PauseType type);
     Task RequestUnpauseAsync(CCSPlayerController? player);
     void OnRoundEnd();

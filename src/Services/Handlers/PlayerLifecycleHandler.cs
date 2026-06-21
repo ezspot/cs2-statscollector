@@ -1,3 +1,6 @@
+using System;
+using System.Threading;
+using System.Threading.Tasks;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
@@ -15,19 +18,48 @@ public sealed class PlayerLifecycleHandler : IGameHandler
     private readonly IScrimManager _scrimManager;
     private readonly IMatchTrackingService _matchTracker;
     private readonly IPersistenceChannel _persistenceChannel;
+    private readonly IStatsRepository _statsRepository;
+    private readonly IMatchStatsService _matchStats;
 
     public PlayerLifecycleHandler(
         ILogger<PlayerLifecycleHandler> logger,
         IPlayerSessionService playerSessions,
         IScrimManager scrimManager,
         IMatchTrackingService matchTracker,
-        IPersistenceChannel persistenceChannel)
+        IPersistenceChannel persistenceChannel,
+        IStatsRepository statsRepository,
+        IMatchStatsService matchStats)
     {
         _logger = logger;
         _playerSessions = playerSessions;
         _scrimManager = scrimManager;
         _matchTracker = matchTracker;
         _persistenceChannel = persistenceChannel;
+        _statsRepository = statsRepository;
+        _matchStats = matchStats;
+
+        // Seed every newly-created session from the database (covers connect, spawn, and hot-reload).
+        _playerSessions.PlayerSessionCreated += OnSessionCreated;
+    }
+
+    // Loads the player's persisted lifetime totals and seeds the in-memory session off the game thread,
+    // then captures a per-match baseline in case they joined mid-match. Until this completes the session
+    // is not eligible for persistence, so it can never overwrite the career row with an empty session.
+    private void OnSessionCreated(ulong steamId)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var lifetime = await _statsRepository.GetLifetimePlayerStatsAsync(steamId, CancellationToken.None);
+                _playerSessions.HydrateLifetime(steamId, lifetime); // null => first-time player
+                _matchStats.EnsureBaseline(steamId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to seed lifetime stats for {SteamId}", steamId);
+            }
+        });
     }
 
     public void Register(BasePlugin plugin)
@@ -46,19 +78,16 @@ public sealed class PlayerLifecycleHandler : IGameHandler
         {
             _logger.LogInformation("Player {Name} fully connected. SteamID: {SteamID}", player.PlayerName, player.SteamID);
             
-            // Capture state and initialize session
+            // Capture state and initialize session. Creating the session raises PlayerSessionCreated,
+            // which triggers the off-thread lifetime seed (see OnSessionCreated).
             var state = PlayerControllerState.From(player);
             _playerSessions.EnsurePlayer(state);
 
-            // If a match is in progress, ensure they are initialized for the current round
+            // Late-joiner into a live match; their spawn is counted by OnPlayerSpawn, so don't
+            // increment TotalSpawns here (doing so double-counted the join).
             if (_scrimManager.CurrentState is ScrimState.Live)
             {
-                _logger.LogInformation("Late-joiner detected: {Name}. Initializing for active match.", player.PlayerName);
-                _playerSessions.MutatePlayer(player.SteamID, stats => 
-                {
-                    stats.Round.TotalSpawns++;
-                    // Additional initialization if needed
-                });
+                _logger.LogInformation("Late-joiner detected: {Name}.", player.PlayerName);
             }
         }
         return HookResult.Continue;
@@ -73,11 +102,14 @@ public sealed class PlayerLifecycleHandler : IGameHandler
             _scrimManager.HandleDisconnect(steamId);
             
             var match = _matchTracker.CurrentMatch;
-            if (_playerSessions.TryGetSnapshot(steamId, out var snapshot, match?.MatchId, match?.MatchUuid))
+            // Persist a final snapshot only if the session was seeded (TryGetSnapshot returns false
+            // otherwise, so a player who left before seeding never overwrites their career row). Always
+            // remove the session afterwards so an unseeded disconnect can't leak it.
+            if (_playerSessions.TryGetSnapshot(steamId, out var snapshot, match?.MatchUuid))
             {
                 _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.PlayerStats, snapshot, match?.MatchUuid ?? "none", snapshot.RoundNumber, steamId));
-                _playerSessions.TryRemovePlayer(steamId, out _);
             }
+            _playerSessions.TryRemovePlayer(steamId, out _);
         }
         return HookResult.Continue;
     }

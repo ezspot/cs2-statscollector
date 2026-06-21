@@ -71,23 +71,46 @@ public sealed class UtilityEventProcessor : IUtilityEventProcessor
                 continue;
             }
 
-            _playerSessions.MutatePlayer(p.OwnerSteamId, stats =>
-            {
-                stats.Utility.UtilityWasteCount++;
-                if (p.Type == UtilityType.Flash) stats.Utility.WastedFlashes++;
-            });
+            if (p.Type == UtilityType.Flash)
+                _playerSessions.MutatePlayer(p.OwnerSteamId, stats => stats.Utility.WastedFlashes++);
         }
         _pendingGrenades.Clear();
     }
 
     public void RegisterEvents(IEventDispatcher dispatcher)
     {
+        dispatcher.Subscribe<EventGrenadeThrown>((e, i) => { HandleGrenadeThrown(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventPlayerBlind>((e, i) => { HandlePlayerBlind(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventPlayerHurt>((e, i) => { HandlePlayerHurt(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventHegrenadeDetonate>((e, i) => { HandleHegrenadeDetonate(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventFlashbangDetonate>((e, i) => { HandleFlashbangDetonate(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventSmokegrenadeDetonate>((e, i) => { HandleSmokegrenadeDetonate(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventMolotovDetonate>((e, i) => { HandleMolotovDetonate(e); return HookResult.Continue; });
+    }
+
+    private void HandleGrenadeThrown(EventGrenadeThrown @event)
+    {
+        var player = @event.GetPlayerOrDefault("userid");
+        var state = PlayerControllerState.From(player);
+        if (!state.IsValid || state.IsBot) return;
+
+        // grenade_thrown reports the grenade's designer name; normalize away any "weapon_" prefix so
+        // we match whether the engine sends "flashbang" or "weapon_flashbang".
+        var weapon = (@event.GetStringValue("weapon", string.Empty) ?? string.Empty)
+            .ToLowerInvariant().Replace("weapon_", string.Empty);
+
+        _playerSessions.MutatePlayer(state.SteamId, stats =>
+        {
+            switch (weapon)
+            {
+                case "flashbang": stats.Utility.FlashbangsThrown++; break;
+                case "smokegrenade": stats.Utility.SmokesThrown++; break;
+                case "molotov":
+                case "incgrenade": stats.Utility.MolotovsThrown++; break;
+                case "hegrenade": stats.Utility.HeGrenadesThrown++; break;
+                case "decoy": stats.Utility.DecoysThrown++; break;
+            }
+        });
     }
 
     private void HandlePlayerHurt(EventPlayerHurt @event)

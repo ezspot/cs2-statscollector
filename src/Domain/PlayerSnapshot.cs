@@ -6,7 +6,6 @@ namespace statsCollector.Domain;
 
 public sealed record PlayerSnapshot
 (
-    int? MatchId,
     string? MatchUuid,
     int RoundNumber,
     DateTime RoundStartUtc,
@@ -133,7 +132,6 @@ public sealed record PlayerSnapshot
     decimal RoundSwing,
     int TeamFlashDuration,
     int FlashAssistDuration,
-    int WastedFlashes,
 
     IReadOnlyDictionary<string, int> WeaponKills,
     IReadOnlyDictionary<string, int> WeaponShots,

@@ -19,7 +19,7 @@ public interface IAnalyticsService
     decimal CalculatePerformanceScore(PlayerStats stats);
     string GetPlayerRank(decimal performanceScore);
     decimal CalculateHltv2Rating(int kills, int assists, int deaths, int rounds, decimal kastPercent, decimal adr);
-    PlayerSnapshot CreateSnapshot(PlayerStats stats, int? matchId = null, string? matchUuid = null);
+    PlayerSnapshot CreateSnapshot(PlayerStats stats, string? matchUuid = null);
 }
 
 public sealed class AnalyticsService : IAnalyticsService
@@ -141,7 +141,7 @@ public sealed class AnalyticsService : IAnalyticsService
         };
     }
 
-    public PlayerSnapshot CreateSnapshot(PlayerStats stats, int? matchId = null, string? matchUuid = null)
+    public PlayerSnapshot CreateSnapshot(PlayerStats stats, string? matchUuid = null)
     {
         using var activity = Instrumentation.ActivitySource.StartActivity("AnalyticsService.CreateSnapshot");
         activity?.SetTag("player.steamid", stats.SteamId);
@@ -182,7 +182,6 @@ public sealed class AnalyticsService : IAnalyticsService
         var topWeapon = stats.Weapon.KillsByWeapon.OrderByDescending(x => x.Value).FirstOrDefault().Key ?? "None";
 
         return new PlayerSnapshot(
-            matchId,
             matchUuid,
             stats.Round.RoundNumber,
             stats.Round.RoundStartUtc,
@@ -300,7 +299,6 @@ public sealed class AnalyticsService : IAnalyticsService
             stats.Combat.RoundSwing,
             stats.Utility.TeamFlashDuration,
             stats.Utility.FlashAssistDuration,
-            stats.Utility.WastedFlashes,
 
             new Dictionary<string, int>(stats.Weapon.KillsByWeapon),
             new Dictionary<string, int>(stats.Weapon.ShotsByWeapon),

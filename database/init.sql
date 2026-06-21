@@ -200,18 +200,6 @@ CREATE TABLE IF NOT EXISTS match_weapon_stats (
     UNIQUE KEY uq_match_weapon (match_id, steam_id, weapon_name)
 ) ENGINE=InnoDB;
 
-CREATE TABLE IF NOT EXISTS weapon_stats (
-    steam_id BIGINT NOT NULL,
-    weapon_name VARCHAR(100) NOT NULL,
-    kills INT DEFAULT 0,
-    deaths INT DEFAULT 0,
-    shots INT DEFAULT 0,
-    hits INT DEFAULT 0,
-    headshots INT DEFAULT 0,
-    PRIMARY KEY (steam_id, weapon_name),
-    FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE
-) ENGINE=InnoDB;
-
 CREATE TABLE IF NOT EXISTS player_advanced_analytics (
     id INT AUTO_INCREMENT PRIMARY KEY,
     match_id INT,

@@ -16,7 +16,7 @@ public sealed class UtilityStats
     private int _teammatesBlinded;
     private int _flashAssists;
     private int _utilitySuccessCount;
-    private int _utilityWasteCount;
+    private int _wastedFlashes;
     private int _timesBlinded;
     private float _totalBlindTime;
     private float _totalBlindTimeInflicted;
@@ -36,7 +36,7 @@ public sealed class UtilityStats
 
     public int FlashAssistDuration { get => _flashAssistDuration; set { _flashAssistDuration = value; _markDirty(); } }
     public int TeamFlashDuration { get => _teamFlashDuration; set { _teamFlashDuration = value; _markDirty(); } }
-    public int WastedFlashes { get => _utilityWasteCount; set { _utilityWasteCount = value; _markDirty(); } }
+    public int WastedFlashes { get => _wastedFlashes; set { _wastedFlashes = value; _markDirty(); } }
 
     public int FlashbangsThrown { get => _flashbangsThrown; set { _flashbangsThrown = value; _markDirty(); } }
     public int SmokesThrown { get => _smokesThrown; set { _smokesThrown = value; _markDirty(); } }
@@ -48,7 +48,6 @@ public sealed class UtilityStats
     public int TeammatesBlinded { get => _teammatesBlinded; set { _teammatesBlinded = value; _markDirty(); } }
     public int FlashAssists { get => _flashAssists; set { _flashAssists = value; _markDirty(); } }
     public int UtilitySuccessCount { get => _utilitySuccessCount; set { _utilitySuccessCount = value; _markDirty(); } }
-    public int UtilityWasteCount { get => _utilityWasteCount; set { _utilityWasteCount = value; _markDirty(); } }
     public int TimesBlinded { get => _timesBlinded; set { _timesBlinded = value; _markDirty(); } }
     public float TotalBlindTime { get => _totalBlindTime; set { _totalBlindTime = value; _markDirty(); } }
     public float TotalBlindTimeInflicted { get => _totalBlindTimeInflicted; set { _totalBlindTimeInflicted = value; _markDirty(); } }
@@ -62,7 +61,7 @@ public sealed class UtilityStats
     {
         _flashbangsThrown = _smokesThrown = _heGrenadesThrown = _molotovsThrown = _decoysThrown = 0;
         _utilityDamage = _enemiesBlinded = _teammatesBlinded = 0;
-        _flashAssists = _utilitySuccessCount = _utilityWasteCount = 0;
+        _flashAssists = _utilitySuccessCount = _wastedFlashes = 0;
         _timesBlinded = 0;
         _totalBlindTime = 0f;
         _totalBlindTimeInflicted = 0f;

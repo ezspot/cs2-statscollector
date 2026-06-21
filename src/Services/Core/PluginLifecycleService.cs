@@ -21,7 +21,6 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     private readonly IPlayerSessionService _playerSessions;
     private readonly IGameEventHandlerService _eventHandler;
     private readonly IPersistenceChannel _persistenceChannel;
-    private readonly IGameScheduler _scheduler;
     private readonly ISchemaInitializer _schemaInitializer;
     private readonly IMatchStatsService _matchStats;
 
@@ -36,7 +35,6 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         IPlayerSessionService playerSessions,
         IGameEventHandlerService eventHandler,
         IPersistenceChannel persistenceChannel,
-        IGameScheduler scheduler,
         ISchemaInitializer schemaInitializer,
         IMatchStatsService matchStats)
     {
@@ -47,7 +45,6 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         _playerSessions = playerSessions;
         _eventHandler = eventHandler;
         _persistenceChannel = persistenceChannel;
-        _scheduler = scheduler;
         _schemaInitializer = schemaInitializer;
         _matchStats = matchStats;
     }
@@ -115,7 +112,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     private Task SaveAllStatsAsync()
     {
         var match = _matchTracker.CurrentMatch;
-        var snapshots = _playerSessions.CaptureSnapshots(true, match?.MatchId, match?.MatchUuid);
+        var snapshots = _playerSessions.CaptureSnapshots(true, match?.MatchUuid);
         
         foreach (var snapshot in snapshots)
         {

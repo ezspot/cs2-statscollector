@@ -22,7 +22,6 @@ public sealed class MatchFlowHandler : IGameHandler
     private readonly IOptionsMonitor<PluginConfig> _configMonitor;
     private readonly IDamageReportService _damageReport;
     private readonly IPersistenceChannel _persistenceChannel;
-    private readonly IGameScheduler _scheduler;
     private readonly IMatchStatsService _matchStats;
 
     private PluginConfig _config => _configMonitor.CurrentValue;
@@ -39,7 +38,6 @@ public sealed class MatchFlowHandler : IGameHandler
         IOptionsMonitor<PluginConfig> configMonitor,
         IDamageReportService damageReport,
         IPersistenceChannel persistenceChannel,
-        IGameScheduler scheduler,
         IMatchStatsService matchStats)
     {
         _logger = logger;
@@ -52,7 +50,6 @@ public sealed class MatchFlowHandler : IGameHandler
         _configMonitor = configMonitor;
         _damageReport = damageReport;
         _persistenceChannel = persistenceChannel;
-        _scheduler = scheduler;
         _matchStats = matchStats;
     }
 
@@ -185,10 +182,17 @@ public sealed class MatchFlowHandler : IGameHandler
             if (stats.Round.HadKillThisRound || stats.Round.HadAssistThisRound || stats.Round.SurvivedThisRound || stats.Round.DidTradeThisRound) stats.Round.KASTRounds++;
             
             var player = Utilities.GetPlayerFromSteamId(stats.SteamId);
-            if (player is { IsValid: true, InGameMoneyServices: not null })
+            if (player is { IsValid: true })
             {
-                stats.Economy.RoundEndMoney = player.InGameMoneyServices.Account;
-                stats.Economy.EquipmentValueEnd = stats.Economy.EquipmentValue;
+                // Sync the in-game scoreboard score; nothing else writes Combat.Score, so the
+                // persisted `score` column was previously always 0.
+                stats.Combat.Score = player.Score;
+
+                if (player.InGameMoneyServices is not null)
+                {
+                    stats.Economy.RoundEndMoney = player.InGameMoneyServices.Account;
+                    stats.Economy.EquipmentValueEnd = stats.Economy.EquipmentValue;
+                }
             }
         });
         
@@ -201,7 +205,7 @@ public sealed class MatchFlowHandler : IGameHandler
     private void SaveStatsAtRoundEnd()
     {
         var match = _matchTracker.CurrentMatch;
-        var snapshots = _playerSessions.CaptureSnapshots(true, match?.MatchId, match?.MatchUuid);
+        var snapshots = _playerSessions.CaptureSnapshots(true, match?.MatchUuid);
         
         foreach (var snapshot in snapshots)
         {

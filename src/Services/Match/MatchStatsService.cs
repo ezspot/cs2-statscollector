@@ -11,6 +11,10 @@ public interface IMatchStatsService
     /// <summary>Records each present player's cumulative totals as the start-of-match baseline.</summary>
     void CaptureBaseline();
 
+    /// <summary>Captures a baseline for a single player who joined after the match started (and after
+    /// their lifetime totals were seeded), so their per-match delta reflects only this match.</summary>
+    void EnsureBaseline(ulong steamId);
+
     /// <summary>Computes per-match deltas against the baseline and enqueues match summary + weapon rows.</summary>
     void FinalizeMatch();
 }
@@ -47,6 +51,25 @@ public sealed class MatchStatsService(
         _logger.LogInformation("Captured per-match baseline for {Count} players.", snapshots.Length);
     }
 
+    public void EnsureBaseline(ulong steamId)
+    {
+        // Only meaningful while a match is live; if the player is already in the baseline (present at
+        // match start) leave it untouched.
+        if (_matchTracker.CurrentMatch?.MatchUuid is null) return;
+
+        lock (_lock)
+        {
+            if (_baseline.ContainsKey(steamId)) return;
+        }
+
+        // TryGetSnapshot returns false until the session is seeded, so this baseline already includes
+        // the player's lifetime totals — making the end-of-match delta their contribution this match.
+        if (_playerSessions.TryGetSnapshot(steamId, out var snapshot))
+        {
+            lock (_lock) { _baseline[steamId] = snapshot; }
+        }
+    }
+
     public void FinalizeMatch()
     {
         var match = _matchTracker.CurrentMatch;
@@ -61,7 +84,7 @@ public sealed class MatchStatsService(
         }
 
         var baselineById = baseline.ToDictionary(b => b.SteamId);
-        var current = _playerSessions.CaptureSnapshots(onlyDirty: false, match.MatchId, match.MatchUuid);
+        var current = _playerSessions.CaptureSnapshots(onlyDirty: false, matchUuid: match.MatchUuid);
         var calculatedAt = DateTime.UtcNow;
 
         var written = 0;

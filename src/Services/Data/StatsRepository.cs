@@ -20,7 +20,7 @@ namespace statsCollector.Services;
 public interface IStatsRepository
 {
     Task UpsertPlayersAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken);
-    Task UpsertPlayerAsync(PlayerSnapshot snapshot, CancellationToken cancellationToken);
+    Task<LifetimePlayerStatsRow?> GetLifetimePlayerStatsAsync(ulong steamId, CancellationToken cancellationToken);
     Task UpsertMatchSummariesAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken);
     Task UpsertMatchWeaponStatsAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken);
     Task UpsertPlayerAnalyticsAsync(IEnumerable<PlayerAnalyticsSnapshot> snapshots, CancellationToken cancellationToken);
@@ -37,6 +37,14 @@ public sealed class StatsRepository : IStatsRepository
     private readonly IConnectionFactory _connectionFactory;
     private readonly ResiliencePipeline _resiliencePipeline;
     private readonly ILogger<StatsRepository> _logger;
+
+    static StatsRepository()
+    {
+        // Let Dapper map snake_case columns (e.g. damage_dealt) onto PascalCase DTO properties
+        // (DamageDealt) when reading the lifetime row back. All write paths use explicit column lists,
+        // so this is safe globally.
+        Dapper.DefaultTypeMap.MatchNamesWithUnderscores = true;
+    }
 
     public StatsRepository(
         IConnectionFactory connectionFactory,
@@ -71,8 +79,17 @@ public sealed class StatsRepository : IStatsRepository
         }, cancellationToken);
     }
 
-    public Task UpsertPlayerAsync(PlayerSnapshot snapshot, CancellationToken cancellationToken) =>
-        UpsertPlayersAsync([snapshot], cancellationToken);
+    public async Task<LifetimePlayerStatsRow?> GetLifetimePlayerStatsAsync(ulong steamId, CancellationToken cancellationToken)
+    {
+        return await _resiliencePipeline.ExecuteAsync(async ct =>
+        {
+            using var activity = Instrumentation.ActivitySource.StartActivity("GetLifetimePlayerStatsAsync");
+            await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            const string sql = "SELECT * FROM player_stats WHERE steam_id = @SteamId";
+            return await connection.QueryFirstOrDefaultAsync<LifetimePlayerStatsRow>(
+                new CommandDefinition(sql, new { SteamId = steamId }, cancellationToken: ct)).ConfigureAwait(false);
+        }, cancellationToken);
+    }
 
     public async Task UpsertMatchSummariesAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
     {

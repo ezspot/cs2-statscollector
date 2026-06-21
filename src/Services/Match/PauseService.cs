@@ -27,9 +27,6 @@ public sealed class PauseService(
     private int _requestingTeam;
     private CounterStrikeSharp.API.Modules.Timers.Timer? _pauseTimer;
 
-    public bool IsPaused => _isPaused;
-    public PauseType CurrentPauseType => _currentPauseType;
-
     public Task RequestPauseAsync(CCSPlayerController? player, PauseType type)
     {
         if (_isPaused) return Task.CompletedTask;

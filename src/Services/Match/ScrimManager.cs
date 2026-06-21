@@ -17,7 +17,6 @@ public sealed class ScrimManager : IScrimManager
     private readonly ILogger<ScrimManager> _logger;
     private readonly IOptionsMonitor<PluginConfig> _configMonitor;
     private readonly IConfigLoaderService _configLoader;
-    private readonly IMatchTrackingService _matchTracker;
     private readonly IJsonRecoveryService _recovery;
     private readonly IGameScheduler _scheduler;
 
@@ -48,14 +47,12 @@ public sealed class ScrimManager : IScrimManager
         ILogger<ScrimManager> logger,
         IOptionsMonitor<PluginConfig> configMonitor,
         IConfigLoaderService configLoader,
-        IMatchTrackingService matchTracker,
         IJsonRecoveryService recovery,
         IGameScheduler scheduler)
     {
         _logger = logger;
         _configMonitor = configMonitor;
         _configLoader = configLoader;
-        _matchTracker = matchTracker;
         _recovery = recovery;
         _scheduler = scheduler;
 
@@ -112,7 +109,6 @@ public sealed class ScrimManager : IScrimManager
     {
         var data = new ScrimRecoveryData(
             CurrentState,
-            _matchTracker.CurrentMatch?.MatchId,
             [.. _team1],
             [.. _team2],
             new Dictionary<int, ulong>(_captains),
@@ -137,19 +133,6 @@ public sealed class ScrimManager : IScrimManager
             _logger.LogWarning("No scrim recovery data found.");
             _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] No recovery data found to restore."));
             return;
-        }
-
-        // Validate match status in DB before restoring.
-        if (data.MatchId.HasValue)
-        {
-            var status = await _matchTracker.GetMatchStatusAsync(data.MatchId.Value);
-            if (status is "COMPLETED" or "CANCELLED")
-            {
-                _logger.LogWarning("Recovery aborted: Match {MatchId} is already {Status}", data.MatchId, status);
-                _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] Recovery aborted: Match {data.MatchId} is already {status}."));
-                await _recovery.ClearScrimStateAsync();
-                return;
-            }
         }
 
         // Restore in-memory state.

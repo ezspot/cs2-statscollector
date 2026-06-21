@@ -4,7 +4,7 @@ A CounterStrikeSharp plugin for CS2 that collects detailed player statistics int
 
 ## Features
 - **Relational match tracking** — `matches` and `rounds` are tracked automatically, with optional `series_uuid` to group BO3/BO5 series.
-- **Lifetime player stats** — 100+ aggregated metrics per player (combat, utility, economy, bomb, clutch, entry).
+- **Lifetime player stats** — 100+ aggregated metrics per player (combat, utility, economy, bomb, clutch, entry). Career totals are **seeded from the database on connect**, so they accumulate correctly across reconnects and across multiple servers sharing one database (see *Multi-server* below).
 - **Per-match stats** — `match_player_stats` / `match_weapon_stats` populated at match end from start-of-match deltas, with a standard HLTV 2.0 per-match rating.
 - **Spatial data** — kill / death / utility positions stored as MySQL `POINT` with spatial indexes for heatmaps.
 - **Non-blocking persistence** — game-thread events are snapshotted and written to MySQL on a background channel; the server thread never waits on the database.
@@ -79,6 +79,18 @@ Any option can be overridden by an environment variable prefixed with `STATSCOLL
 - `view_player_profile` — per-player summary.
 - `view_player_match_history` — match-by-match breakdown.
 - `view_clutch_performance`, `view_entry_efficiency`, `view_enhanced_player_analytics`.
+
+## Multi-server (shared database)
+Several CS2 servers (target: up to ~5) can run this plugin against one MySQL database safely:
+
+- **Player identity** is the SteamID64 (`player_stats.steam_id`, primary key) — globally unique, so a player has exactly one lifetime row no matter which server they play on.
+- **Match identity** is a per-server generated UUID (`matches.match_uuid`, `UNIQUE`); the integer `matches.id` is assigned by the database. No cross-server collisions, so match UUIDs do not need to be a primary key.
+- **Lifetime stats are seeded on connect** — when a player joins, their existing `player_stats` row is loaded into the in-memory session (off the game thread) *before* new stats accumulate, then written back. Since a Steam account can only be on one server at a time there is no write race on a row, and moving between servers never overwrites history with a single session.
+- **Per-match rows** (`match_player_stats`, `match_weapon_stats`, `rounds`, position tables) are immutable per `(match_id, …)`, so every server records its own matches independently.
+
+> **Connection budget:** each server opens its own MySqlConnector pool (max **50** connections per server). For *N* servers, make sure MySQL `max_connections` comfortably exceeds `N × 50` — e.g. for 5 servers set `max_connections >= 300`.
+
+> **Note on derived ratings after a reseed:** raw counters (K/D/A, damage, accuracy, KAST, utility, bomb, economy) are restored exactly. A few rating *sub-terms* whose intermediate counts aren't stored as columns (per-tier multi-kills, clutch-kill impact, exact weighted-kill bonuses) are reconstructed approximately, so `hltv_rating`/`impact_rating` can differ very slightly immediately after a reconnect; they re-converge as the session plays. KAST and the KAST-driven part of the rating are reconstructed exactly from the stored KAST%.
 
 ## Round Swing
 

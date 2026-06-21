@@ -40,7 +40,6 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
     private readonly Channel<StatsUpdate> _channel;
     private readonly ILogger<PersistenceChannel> _logger;
     private readonly IServiceProvider _serviceProvider;
-    private readonly IOptionsMonitor<PluginConfig> _config;
     private readonly string _recoveryPath = "pending_stats.json";
 
     private readonly Queue<List<StatsUpdate>> _failedBatches = new();
@@ -54,7 +53,6 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
     {
         _logger = logger;
         _serviceProvider = serviceProvider;
-        _config = config;
 
         var options = new BoundedChannelOptions(config.CurrentValue.PersistenceChannelCapacity)
         {
@@ -117,12 +115,18 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
 
         var recoveryTimer = new PeriodicTimer(TimeSpan.FromSeconds(60));
         var currentBatch = new List<StatsUpdate>(100);
+        // currentBatch is mutated by this drain loop and read by the recovery timer below; List<T> is
+        // not thread-safe, so all access is guarded. The timer serializes a copy taken under the lock,
+        // never the live list, so file I/O happens without blocking the drain.
+        var batchLock = new object();
 
         _ = Task.Run(async () =>
         {
             while (await recoveryTimer.WaitForNextTickAsync(stoppingToken))
             {
-                await SaveRecoveryStateAsync(currentBatch);
+                List<StatsUpdate> snapshot;
+                lock (batchLock) { snapshot = [.. currentBatch]; }
+                await SaveRecoveryStateAsync(snapshot);
             }
         }, stoppingToken);
 
@@ -139,7 +143,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                     {
                         if (_channel.Reader.TryRead(out var update))
                         {
-                            currentBatch.Add(update);
+                            lock (batchLock) { currentBatch.Add(update); }
                         }
                     }
                 }
@@ -151,7 +155,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                 if (currentBatch.Count > 0)
                 {
                     await ProcessBatchAsync(currentBatch, stoppingToken);
-                    currentBatch.Clear();
+                    lock (batchLock) { currentBatch.Clear(); }
                 }
             }
         }

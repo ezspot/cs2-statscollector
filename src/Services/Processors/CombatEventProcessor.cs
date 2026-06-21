@@ -68,7 +68,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     private readonly int[] _playerRoundKills = new int[MaxPlayers];
     private readonly DateTime[] _playerLastDeathTime = new DateTime[MaxPlayers];
     private readonly DateTime[] _playerFirstKillTime = new DateTime[MaxPlayers];
-    private readonly (ulong KillerId, DateTime Time)[] _playerLastKiller = new (ulong, DateTime)[MaxPlayers];
 
     // Entry Kill Attempt tracking
     private bool _firstEngagementHappened;
@@ -134,7 +133,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         Array.Clear(_playerRoundKills);
         Array.Clear(_playerFirstKillTime);
         Array.Clear(_playerLastDeathTime);
-        Array.Clear(_playerLastKiller);
         
         _ctAliveCount = 0;
         _tAliveCount = 0;
@@ -179,8 +177,10 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             var damage = @event.GetIntValue("dmg_health", 0);
             
             var noscope = @event.GetBoolValue("noscope", false);
-            var thruSmoke = @event.GetBoolValue("thru_smoke", false);
-            var attackerBlind = @event.GetBoolValue("attacker_blind", false);
+            // CS2 player_death keys are "thrusmoke"/"attackerblind" (no underscore); the underscored
+            // forms silently returned false, leaving ThroughSmokeKills/BlindKills always 0.
+            var thruSmoke = @event.GetBoolValue("thrusmoke", false);
+            var attackerBlind = @event.GetBoolValue("attackerblind", false);
             var flashAssisted = @event.GetBoolValue("assistedflash", false);
             var penetrated = @event.GetIntValue("penetrated", 0) > 0;
 
@@ -240,11 +240,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
                 _lastTeamDeathTime[victimTeam] = now;
                 _playerLastDeathTime[victimIndex] = now;
-
-                if (attackerState.IsValid && !attackerState.IsBot)
-                {
-                    _playerLastKiller[victimIndex] = (attackerState.SteamId, now);
-                }
             }
 
             if (attackerState.IsValid && !attackerState.IsBot && attackerState.SteamId != victimState.SteamId)
@@ -269,13 +264,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
                 bool isClutchKill = teammatesAlive == 1 && enemyAlive >= 1;
                 if (isClutchKill) killWeight += 0.1m;
-
-                bool isRevengeKill = false;
-                if (victimState.IsValid && _playerLastKiller[attackerIndex].KillerId == victimState.SteamId)
-                {
-                    isRevengeKill = true;
-                    _playerLastKiller[attackerIndex] = default;
-                }
 
                 if (attackerState.PawnHandle != 0 && victimState.PawnHandle != 0 && _config.CurrentValue.EnablePositionTracking)
                 {
@@ -331,7 +319,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     stats.Weapon.RecordKill(weaponName);
                     stats.CurrentTeam = attackerTeam;
 
-                    if (isRevengeKill) stats.Combat.RevengeKills++;
                     if (isClutchKill) stats.Combat.ClutchKills++;
 
                     if (_playerFirstKillTime[attackerIndex] == DateTime.MinValue)
@@ -503,27 +490,14 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             _playerSessions.MutatePlayer(playerState.SteamId, stats =>
             {
                 // Grenade throws are not gun shots; counting them would inflate accuracy (ShotsFired
-                // is the denominator for hit-rate, and a grenade can never register a ShotsHit).
+                // is the denominator for hit-rate, and a grenade can never register a ShotsHit). The
+                // per-type thrown counts come from the dedicated grenade_thrown event
+                // (UtilityEventProcessor); here we only exclude grenades from the gun-accuracy math.
                 if (GrenadeWeaponNames.Contains(weaponLower))
-                {
-                    switch (weaponLower)
-                    {
-                        case "weapon_flashbang": stats.Utility.FlashbangsThrown++; break;
-                        case "weapon_smokegrenade": stats.Utility.SmokesThrown++; break;
-                        case "weapon_molotov":
-                        case "weapon_incgrenade": stats.Utility.MolotovsThrown++; break;
-                        case "weapon_hegrenade": stats.Utility.HeGrenadesThrown++; break;
-                        case "weapon_decoy": stats.Utility.DecoysThrown++; break;
-                    }
                     return;
-                }
 
                 stats.Combat.ShotsFired++;
                 stats.Combat.CurrentRoundShotsFired++;
-
-                if (playerState.Velocity.Length() < 15.0f)
-                    stats.Combat.ShotsFiredWhileStationary++;
-
                 stats.Weapon.RecordShot(weapon);
             });
         }

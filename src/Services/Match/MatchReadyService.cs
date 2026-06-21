@@ -1,11 +1,8 @@
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Linq;
 using CounterStrikeSharp.API;
-using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Utils;
-using Microsoft.Extensions.Logging;
 
 namespace statsCollector.Services;
 
@@ -14,22 +11,13 @@ public interface IMatchReadyService
     bool IsReady(ulong steamId);
     void SetReady(ulong steamId, bool ready);
     bool AreAllReady();
-    void Reset();
-    IReadOnlyCollection<ulong> GetReadyPlayers();
     int GetReadyCount();
     int GetRequiredCount();
 }
 
 public sealed class MatchReadyService : IMatchReadyService
 {
-    private readonly ILogger<MatchReadyService> _logger;
     private readonly ConcurrentDictionary<ulong, bool> _readyStatus = new();
-    private const int MinPlayersRequired = 10; // Default competitive requirement
-
-    public MatchReadyService(ILogger<MatchReadyService> logger)
-    {
-        _logger = logger;
-    }
 
     public bool IsReady(ulong steamId) => _readyStatus.TryGetValue(steamId, out var ready) && ready;
 
@@ -51,13 +39,6 @@ public sealed class MatchReadyService : IMatchReadyService
 
         return activePlayers.All(p => IsReady(p.SteamID));
     }
-
-    public void Reset()
-    {
-        _readyStatus.Clear();
-    }
-
-    public IReadOnlyCollection<ulong> GetReadyPlayers() => _readyStatus.Where(kvp => kvp.Value).Select(kvp => kvp.Key).ToList();
 
     public int GetReadyCount() => _readyStatus.Count(kvp => kvp.Value);
 

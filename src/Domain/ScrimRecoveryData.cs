@@ -4,7 +4,6 @@ namespace statsCollector.Domain;
 
 public record ScrimRecoveryData(
     ScrimState State,
-    int? MatchId,
     List<ulong> Team1,
     List<ulong> Team2,
     Dictionary<int, ulong> Captains,

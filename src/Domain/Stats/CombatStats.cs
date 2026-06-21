@@ -16,11 +16,7 @@ public sealed class CombatStats
     private int _shotsHit;
     private int _shotsFired;
     private int _mvps;
-    private int _teamKills;
-    private int _suicides;
     private int _enemiesFlashed;
-    private int _friendliesFlashed;
-    private int _knifeKills;
     private int _wallbangKills;
     private int _noscopes;
     private int _throughSmokeKills;
@@ -32,9 +28,6 @@ public sealed class CombatStats
     private int _clutchKills;
     private int _clutchesWon;
     private int _clutchesLost;
-    private int _revengeKills;
-    private int _killStreak;
-    private int _maxKillStreak;
     private int _multiKill2;
     private int _multiKill3;
     private int _multiKill4;
@@ -56,10 +49,6 @@ public sealed class CombatStats
     private int _mvpsEliminations;
     private int _mvpsBomb;
     private decimal _clutchPoints;
-    private int _noscopeKills;
-    private int _thruSmokeKills;
-    private int _attackerBlindKills;
-    private int _flashAssistedKills;
     private int _revenges;
     private int _currentRoundKills;
     private int _currentRoundDeaths;
@@ -101,19 +90,11 @@ public sealed class CombatStats
     public int ShotsHit { get => _shotsHit; set { _shotsHit = value; _markDirty(); } }
     public int ShotsFired { get => _shotsFired; set { _shotsFired = value; _markDirty(); } }
     public int MVPs { get => _mvps; set { _mvps = value; _markDirty(); } }
-    public int TeamKills { get => _teamKills; set { _teamKills = value; _markDirty(); } }
-    public int Suicides { get => _suicides; set { _suicides = value; _markDirty(); } }
     public int EnemiesFlashed { get => _enemiesFlashed; set { _enemiesFlashed = value; _markDirty(); } }
-    public int FriendliesFlashed { get => _friendliesFlashed; set { _friendliesFlashed = value; _markDirty(); } }
-    public int KnifeKills { get => _knifeKills; set { _knifeKills = value; _markDirty(); } }
     public int WallbangKills { get => _wallbangKills; set { _wallbangKills = value; _markDirty(); } }
     public int Noscopes { get => _noscopes; set { _noscopes = value; _markDirty(); } }
-    public int NoscopeKills { get => _noscopeKills; set { _noscopeKills = value; _markDirty(); } }
     public int ThroughSmokeKills { get => _throughSmokeKills; set { _throughSmokeKills = value; _markDirty(); } }
-    public int ThruSmokeKills { get => _thruSmokeKills; set { _thruSmokeKills = value; _markDirty(); } }
     public int BlindKills { get => _blindKills; set { _blindKills = value; _markDirty(); } }
-    public int AttackerBlindKills { get => _attackerBlindKills; set { _attackerBlindKills = value; _markDirty(); } }
-    public int FlashAssistedKills { get => _flashAssistedKills; set { _flashAssistedKills = value; _markDirty(); } }
     public int FirstKills { get => _firstKills; set { _firstKills = value; _markDirty(); } }
     public int FirstDeaths { get => _firstDeaths; set { _firstDeaths = value; _markDirty(); } }
     public int TradeKills { get => _tradeKills; set { _tradeKills = value; _markDirty(); } }
@@ -121,10 +102,7 @@ public sealed class CombatStats
     public int ClutchKills { get => _clutchKills; set { _clutchKills = value; _markDirty(); } }
     public int ClutchesWon { get => _clutchesWon; set { _clutchesWon = value; _markDirty(); } }
     public int ClutchesLost { get => _clutchesLost; set { _clutchesLost = value; _markDirty(); } }
-    public int RevengeKills { get => _revengeKills; set { _revengeKills = value; _markDirty(); } }
     public int Revenges { get => _revenges; set { _revenges = value; _markDirty(); } }
-    public int KillStreak { get => _killStreak; set { _killStreak = value; _markDirty(); } }
-    public int MaxKillStreak { get => _maxKillStreak; set { _maxKillStreak = value; _markDirty(); } }
     public int MultiKill2 { get => _multiKill2; set { _multiKill2 = value; _markDirty(); } }
     public int MultiKill3 { get => _multiKill3; set { _multiKill3 = value; _markDirty(); } }
     public int MultiKill4 { get => _multiKill4; set { _multiKill4 = value; _markDirty(); } }
@@ -147,7 +125,6 @@ public sealed class CombatStats
     public int CurrentRoundKills { get => _currentRoundKills; set { _currentRoundKills = value; _markDirty(); } }
     public int CurrentRoundDeaths { get => _currentRoundDeaths; set { _currentRoundDeaths = value; _markDirty(); } }
     public int CurrentRoundShotsFired { get => _currentRoundShotsFired; set { _currentRoundShotsFired = value; _markDirty(); } }
-    public int ShotsFiredWhileStationary { get; set; } // Auto-property since we just need simple tracking for now, or backing field if we want dirty flag logic
 
     public int MultiKillNades { get => _multiKillNades; set { _multiKillNades = value; _markDirty(); } }
     public int NadeKills { get => _nadeKills; set { _nadeKills = value; _markDirty(); } }
@@ -158,15 +135,13 @@ public sealed class CombatStats
         _kills = _deaths = _assists = _headshots = _headshotKills = 0;
         _damageDealt = _damageTaken = _shotsHit = _shotsFired = 0;
         _damageArmor = _score = 0;
-        _mvps = _teamKills = _suicides = 0;
-        _enemiesFlashed = _friendliesFlashed = 0;
-        _knifeKills = _wallbangKills = _noscopes = 0;
-        _noscopeKills = _throughSmokeKills = _thruSmokeKills = _blindKills = 0;
-        _attackerBlindKills = _flashAssistedKills = 0;
+        _mvps = 0;
+        _enemiesFlashed = 0;
+        _wallbangKills = _noscopes = 0;
+        _throughSmokeKills = _blindKills = 0;
         _firstKills = _firstDeaths = _tradeKills = _tradedDeaths = 0;
         _clutchKills = _clutchesWon = _clutchesLost = 0;
-        _revengeKills = _revenges = 0;
-        _killStreak = _maxKillStreak = 0;
+        _revenges = 0;
         _multiKill2 = _multiKill3 = _multiKill4 = _multiKill5 = 0;
         _entryKills = _entryDeaths = _entryKillAttempts = _entryKillAttemptWins = 0;
         _mvpsEliminations = _mvpsBomb = _mvpsHostage = 0;

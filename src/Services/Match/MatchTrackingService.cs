@@ -2,12 +2,10 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-using statsCollector.Infrastructure.Database;
-using Dapper;
 
 namespace statsCollector.Services;
 
-public record MatchContext(string MatchUuid, string MapName, string? SeriesUuid = null, int? MatchId = null);
+public record MatchContext(string MatchUuid, string MapName, string? SeriesUuid = null);
 
 public interface IMatchTrackingService
 {
@@ -15,7 +13,6 @@ public interface IMatchTrackingService
     void EndMatch();
     void StartRound(int roundNumber);
     void EndRound(int roundNumber, int winnerTeam, int winType);
-    Task<string?> GetMatchStatusAsync(int matchId, CancellationToken ct = default);
     float GetRoundWinProbability(int ctAlive, int tAlive);
     MatchContext? CurrentMatch { get; }
     int? CurrentRoundNumber { get; }
@@ -25,7 +22,6 @@ public sealed class MatchTrackingService : IMatchTrackingService
 {
     private readonly ILogger<MatchTrackingService> _logger;
     private readonly IPersistenceChannel _persistenceChannel;
-    private readonly IConnectionFactory _connectionFactory;
     private readonly object _lock = new();
     private MatchContext? _currentMatch;
     private int? _currentRoundNumber;
@@ -41,11 +37,9 @@ public sealed class MatchTrackingService : IMatchTrackingService
     }
 
     public MatchTrackingService(
-        IConnectionFactory connectionFactory, 
         ILogger<MatchTrackingService> logger,
         IPersistenceChannel persistenceChannel)
     {
-        _connectionFactory = connectionFactory;
         _logger = logger;
         _persistenceChannel = persistenceChannel;
     }
@@ -107,13 +101,6 @@ public sealed class MatchTrackingService : IMatchTrackingService
         {
             _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.RoundEnd, (uuid, roundNumber, winnerTeam, winType)));
         }
-    }
-
-    public async Task<string?> GetMatchStatusAsync(int matchId, CancellationToken ct = default)
-    {
-        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-        const string sql = "SELECT status FROM matches WHERE id = @MatchId";
-        return await connection.ExecuteScalarAsync<string>(new CommandDefinition(sql, new { MatchId = matchId }, cancellationToken: ct)).ConfigureAwait(false);
     }
 
     public float GetRoundWinProbability(int ctAlive, int tAlive)

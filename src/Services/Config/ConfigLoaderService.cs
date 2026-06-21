@@ -66,27 +66,4 @@ public class ConfigLoaderService : IConfigLoaderService
         if (!_config.Scrim.WhitelistEnabled) return true;
         return _whitelistedSteamIds.Contains(steamId);
     }
-
-    public async Task ReloadWhitelistAsync()
-    {
-        _whitelistedSteamIds.Clear();
-        var whitelistPath = Path.Combine(_gameDir, "csgo", _config.Scrim.ScrimConfigPath, "whitelist.cfg");
-
-        if (!File.Exists(whitelistPath))
-        {
-            _logger.LogWarning("Whitelist file not found: {Path}", whitelistPath);
-            return;
-        }
-
-        var lines = await File.ReadAllLinesAsync(whitelistPath);
-        foreach (var line in lines)
-        {
-            var trimmedLine = line.Trim();
-            if (ulong.TryParse(trimmedLine, out var steamId))
-            {
-                _whitelistedSteamIds.Add(steamId);
-            }
-        }
-        _logger.LogInformation("Loaded {Count} whitelisted SteamIDs", _whitelistedSteamIds.Count);
-    }
 }
