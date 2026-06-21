@@ -139,6 +139,7 @@ public sealed record PlayerSnapshot
     int Footsteps,
 
     decimal WeightedKills,
+    decimal RoundSwing,
     int TeamFlashDuration,
     int FlashAssistDuration,
     int WastedFlashes,

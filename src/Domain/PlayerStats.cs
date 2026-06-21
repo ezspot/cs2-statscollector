@@ -62,6 +62,7 @@ public sealed class PlayerStats
     {
         Round.ResetRoundFlags();
         Combat.KillStreak = 0; // Example of cross-cutting reset
+        Combat.ResetRoundSwing();
         MarkDirty();
     }
 }

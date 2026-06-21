@@ -80,6 +80,23 @@ Any option can be overridden by an environment variable prefixed with `STATSCOLL
 - `view_player_match_history` — match-by-match breakdown.
 - `view_clutch_performance`, `view_entry_efficiency`, `view_enhanced_player_analytics`.
 
+## Round Swing
+
+`player_stats.round_swing` (also surfaced in `view_global_leaderboard`) is an impact metric inspired by
+the Round Swing component of HLTV's Rating 3.0. For each enemy kill it adds the change in the team's
+estimated round-win probability, and — following HLTV's published rule — the round's total is credited
+only if that team wins the round.
+
+How it is computed here:
+- The win probability comes from this plugin's own alive-count table (`MatchTrackingService.GetRoundWinProbability`), i.e. a function of how many players are alive on each side.
+- A kill's swing is `winProb(after the kill) − winProb(before the kill)` for the killer's team. Kills from behind are worth more; kills while already ahead are worth less.
+
+What it is **not**: this is not HLTV's Rating 3.0, and it will not match HLTV's numbers. HLTV's formula
+is proprietary and trained on a large match dataset. This metric implements only the Round Swing idea,
+and only from alive counts — it does **not** model map, side, economy, bomb state, or weapon/equipment
+win-rates, and it does not split kill credit by damage share or flash assists. It is a self-contained
+approximation built from data this plugin already collects.
+
 ## Architecture
 Flow: CS2 event → event processor → `PlayerSessionService` (per-player locked state) →
 `PlayerSnapshot` → `PersistenceChannel` (bounded background queue) → `StatsRepository` → MySQL.

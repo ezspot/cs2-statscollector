@@ -301,11 +301,28 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     _ = _positionPersistence.EnqueueAsync(posEvent, CancellationToken.None);
                 }
 
+                // Round Swing: how much this enemy kill shifted the attacker team's win probability,
+                // using the alive-count win-probability table. (ctAlive/tAlive are post-kill counts;
+                // the pre-kill state had one more player on the victim's team.) Credited at round end
+                // only if the team wins the round.
+                decimal swingDelta = 0m;
+                if (!victimState.IsBot && attackerTeam != victimTeam && victimTeam is PlayerTeam.CounterTerrorist or PlayerTeam.Terrorist)
+                {
+                    var ctBefore = ctAlive;
+                    var tBefore = tAlive;
+                    if (victimTeam == PlayerTeam.CounterTerrorist) ctBefore++; else tBefore++;
+                    var ctWinAfter = _matchTracker?.GetRoundWinProbability(ctAlive, tAlive) ?? 0f;
+                    var ctWinBefore = _matchTracker?.GetRoundWinProbability(ctBefore, tBefore) ?? 0f;
+                    var ctSwing = (decimal)(ctWinAfter - ctWinBefore);
+                    swingDelta = attackerTeam == PlayerTeam.CounterTerrorist ? ctSwing : -ctSwing;
+                }
+
                 _playerSessions.MutatePlayer(attackerState.SteamId, stats =>
                 {
                     stats.Round.HadKillThisRound = true;
                     stats.Combat.Kills++;
                     stats.Combat.WeightedKills += killWeight;
+                    if (swingDelta != 0m) stats.Combat.CurrentRoundSwing += swingDelta;
                     stats.Combat.Headshots += isHeadshot ? 1 : 0;
                     stats.Weapon.RecordKill(weaponName);
                     stats.CurrentTeam = attackerTeam;
@@ -581,6 +598,16 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     public void OnRoundEnd(int winnerTeam, int winReason)
     {
         var winningTeam = winnerTeam switch { 2 => PlayerTeam.Terrorist, 3 => PlayerTeam.CounterTerrorist, _ => PlayerTeam.Spectator };
+
+        // Round Swing is only credited to the team that won the round; everyone's per-round tally is
+        // then cleared for the next round.
+        _playerSessions.ForEachPlayer(stats =>
+        {
+            if (winningTeam != PlayerTeam.Spectator && stats.CurrentTeam == winningTeam)
+                stats.Combat.CommitRoundSwing();
+            stats.Combat.ResetRoundSwing();
+        });
+
         UpdateClutchStats(winningTeam);
     }
 

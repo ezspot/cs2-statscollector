@@ -83,12 +83,23 @@ public sealed class CombatStats
 
     private decimal _weightedKills;
 
+    // Round Swing: sum of win-probability deltas from this player's enemy kills, credited only on
+    // rounds their team won. _currentRoundSwing accumulates within a round; CommitRoundSwing folds it
+    // into the cumulative _roundSwing at round end (winners only).
+    private decimal _roundSwing;
+    private decimal _currentRoundSwing;
+
     public CombatStats(Action markDirty)
     {
         _markDirty = markDirty;
     }
 
     public decimal WeightedKills { get => _weightedKills; set { _weightedKills = value; _markDirty(); } }
+
+    public decimal RoundSwing { get => _roundSwing; set { _roundSwing = value; _markDirty(); } }
+    public decimal CurrentRoundSwing { get => _currentRoundSwing; set { _currentRoundSwing = value; _markDirty(); } }
+    public void CommitRoundSwing() { _roundSwing += _currentRoundSwing; _markDirty(); }
+    public void ResetRoundSwing() { _currentRoundSwing = 0m; }
 
     public int Kills { get => _kills; set { _kills = value; _markDirty(); } }
     public int Deaths { get => _deaths; set { _deaths = value; _markDirty(); } }
@@ -190,6 +201,7 @@ public sealed class CombatStats
         _currentRoundKills = _currentRoundDeaths = _currentRoundShotsFired = 0;
         _multiKillNades = _nadeKills = _highImpactKills = _hostagesRescued = 0;
         _weightedKills = 0;
+        _roundSwing = _currentRoundSwing = 0;
         _markDirty();
     }
 }

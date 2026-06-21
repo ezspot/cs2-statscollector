@@ -146,6 +146,7 @@ CREATE TABLE IF NOT EXISTS player_stats (
     impact_rating DECIMAL(5,3) DEFAULT 0,
     survival_rating DECIMAL(5,3) DEFAULT 0,
     utility_score DECIMAL(5,3) DEFAULT 0,
+    round_swing DECIMAL(7,3) DEFAULT 0,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
@@ -404,6 +405,7 @@ SELECT
     ps.kd_ratio,
     ps.average_damage_per_round AS adr,
     ps.kast_percentage AS kast,
+    ps.round_swing,
     ps.kills,
     ps.deaths,
     ps.rounds_played,

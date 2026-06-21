@@ -408,6 +408,7 @@ public sealed class StatsRepository : IStatsRepository
         dataTable.Columns.Add("wallbang_kills", typeof(int));
         dataTable.Columns.Add("pings", typeof(int));
         dataTable.Columns.Add("footsteps", typeof(int));
+        dataTable.Columns.Add("round_swing", typeof(decimal));
 
         foreach (var s in snapshotList)
         {
@@ -432,7 +433,7 @@ public sealed class StatsRepository : IStatsRepository
                 s.KDRatio, s.HeadshotPercentage, s.AccuracyPercentage, s.KASTPercentage,
                 s.AverageDamagePerRound, s.HLTVRating, s.ImpactRating, s.SurvivalRating, s.UtilityScore,
                 s.NoscopeKills, s.ThruSmokeKills, s.AttackerBlindKills, s.FlashAssistedKills, s.WallbangKills,
-                s.Pings, s.Footsteps
+                s.Pings, s.Footsteps, s.RoundSwing
             );
         }
 
@@ -504,7 +505,8 @@ public sealed class StatsRepository : IStatsRepository
                 utility_score = src.utility_score,
                 noscope_kills = src.noscope_kills, thru_smoke_kills = src.thru_smoke_kills,
                 attacker_blind_kills = src.attacker_blind_kills, flash_assisted_kills = src.flash_assisted_kills,
-                wallbang_kills = src.wallbang_kills, pings = src.pings, footsteps = src.footsteps;
+                wallbang_kills = src.wallbang_kills, pings = src.pings, footsteps = src.footsteps,
+                round_swing = src.round_swing;
             """;
 
         await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);

@@ -303,6 +303,7 @@ public sealed class AnalyticsService : IAnalyticsService
             stats.Round.Footsteps,
 
             stats.Combat.WeightedKills,
+            stats.Combat.RoundSwing,
             stats.Utility.TeamFlashDuration,
             stats.Utility.FlashAssistDuration,
             stats.Utility.WastedFlashes,
