@@ -20,6 +20,7 @@ public sealed class PlayerLifecycleHandler : IGameHandler
     private readonly IPersistenceChannel _persistenceChannel;
     private readonly IStatsRepository _statsRepository;
     private readonly IMatchStatsService _matchStats;
+    private readonly CancellationToken _stoppingToken;
 
     public PlayerLifecycleHandler(
         ILogger<PlayerLifecycleHandler> logger,
@@ -28,7 +29,8 @@ public sealed class PlayerLifecycleHandler : IGameHandler
         IMatchTrackingService matchTracker,
         IPersistenceChannel persistenceChannel,
         IStatsRepository statsRepository,
-        IMatchStatsService matchStats)
+        IMatchStatsService matchStats,
+        CancellationTokenSource cancellationTokenSource)
     {
         _logger = logger;
         _playerSessions = playerSessions;
@@ -37,34 +39,35 @@ public sealed class PlayerLifecycleHandler : IGameHandler
         _persistenceChannel = persistenceChannel;
         _statsRepository = statsRepository;
         _matchStats = matchStats;
+        _stoppingToken = cancellationTokenSource.Token;
 
-        // Seed every newly-created session from the database (covers connect, spawn, and hot-reload).
         _playerSessions.PlayerSessionCreated += OnSessionCreated;
     }
 
-    // Loads the player's persisted lifetime totals and seeds the in-memory session off the game thread,
-    // then captures a per-match baseline in case they joined mid-match. Until this completes the session
-    // is not eligible for persistence, so it can never overwrite the career row with an empty session.
     private void OnSessionCreated(ulong steamId)
     {
-        _ = Task.Run(async () =>
+        _ = SeedLifetimeAsync(steamId);
+    }
+
+    private async Task SeedLifetimeAsync(ulong steamId)
+    {
+        try
         {
-            try
-            {
-                var lifetime = await _statsRepository.GetLifetimePlayerStatsAsync(steamId, CancellationToken.None);
-                _playerSessions.HydrateLifetime(steamId, lifetime); // null => first-time player
-                _matchStats.EnsureBaseline(steamId);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to seed lifetime stats for {SteamId}", steamId);
-            }
-        });
+            var lifetime = await _statsRepository.GetLifetimePlayerStatsAsync(steamId, _stoppingToken).ConfigureAwait(false);
+            _playerSessions.HydrateLifetime(steamId, lifetime);
+            _matchStats.EnsureBaseline(steamId);
+        }
+        catch (OperationCanceledException) when (_stoppingToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to seed lifetime stats for {SteamId}", steamId);
+        }
     }
 
     public void Register(BasePlugin plugin)
     {
-        // Use player_connect_full instead of player_connect for reliable SteamID resolution
         plugin.RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
         plugin.RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
         plugin.RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
@@ -77,14 +80,10 @@ public sealed class PlayerLifecycleHandler : IGameHandler
         if (player != null && !player.IsBot && player.SteamID != 0)
         {
             _logger.LogInformation("Player {Name} fully connected. SteamID: {SteamID}", player.PlayerName, player.SteamID);
-            
-            // Capture state and initialize session. Creating the session raises PlayerSessionCreated,
-            // which triggers the off-thread lifetime seed (see OnSessionCreated).
+
             var state = PlayerControllerState.From(player);
             _playerSessions.EnsurePlayer(state);
 
-            // Late-joiner into a live match; their spawn is counted by OnPlayerSpawn, so don't
-            // increment TotalSpawns here (doing so double-counted the join).
             if (_scrimManager.CurrentState is ScrimState.Live)
             {
                 _logger.LogInformation("Late-joiner detected: {Name}.", player.PlayerName);
@@ -96,20 +95,18 @@ public sealed class PlayerLifecycleHandler : IGameHandler
     private HookResult OnPlayerDisconnect(EventPlayerDisconnect @event, GameEventInfo info)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        if (player != null && !player.IsBot)
+        if (player != null && !player.IsBot && player.SteamID != 0)
         {
             var steamId = player.SteamID;
             _scrimManager.HandleDisconnect(steamId);
-            
+
             var match = _matchTracker.CurrentMatch;
-            // Persist a final snapshot only if the session was seeded (TryGetSnapshot returns false
-            // otherwise, so a player who left before seeding never overwrites their career row). Always
-            // remove the session afterwards so an unseeded disconnect can't leak it.
+            _matchStats.FinalizePlayer(steamId);
             if (_playerSessions.TryGetSnapshot(steamId, out var snapshot, match?.MatchUuid))
             {
-                _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.PlayerStats, snapshot, match?.MatchUuid ?? "none", snapshot.RoundNumber, steamId));
+                _persistenceChannel.TryWrite(new PlayerStatsUpdate(snapshot));
             }
-            _playerSessions.TryRemovePlayer(steamId, out _);
+            _playerSessions.TryRemovePlayer(steamId);
         }
         return HookResult.Continue;
     }
@@ -117,7 +114,7 @@ public sealed class PlayerLifecycleHandler : IGameHandler
     private HookResult OnPlayerSpawn(EventPlayerSpawn @event, GameEventInfo info)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        if (player is { IsBot: false })
+        if (player is { IsBot: false, SteamID: not 0 })
         {
             var state = PlayerControllerState.From(player);
             _playerSessions.EnsurePlayer(state);
@@ -132,14 +129,10 @@ public sealed class PlayerLifecycleHandler : IGameHandler
     private HookResult OnPlayerTeam(EventPlayerTeam @event, GameEventInfo info)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        if (player is { IsBot: false })
+        if (player is { IsBot: false, SteamID: not 0 })
         {
             var team = @event.GetIntValue("team", 0);
-            _playerSessions.MutatePlayer(player.SteamID, stats =>
-            {
-                if (team == 2) stats.Round.TRounds++;
-                else if (team == 3) stats.Round.CtRounds++;
-            });
+            _playerSessions.MutatePlayer(player.SteamID, stats => stats.CurrentTeam = (PlayerTeam)team);
         }
         return HookResult.Continue;
     }

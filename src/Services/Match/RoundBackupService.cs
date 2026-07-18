@@ -8,6 +8,8 @@ namespace statsCollector.Services;
 
 public interface IRoundBackupService
 {
+    void Initialize();
+    void Reset();
     void CreateSnapshot(int roundNumber);
     bool RestoreRound(int roundNumber);
     IReadOnlyList<int> GetAvailableRounds();
@@ -28,23 +30,26 @@ public sealed class RoundBackupService(
     private readonly ILogger<RoundBackupService> _logger = logger;
     private readonly IGameScheduler _scheduler = scheduler;
     private readonly HashSet<int> _rounds = [];
-    private bool _backupsEnabled;
+
+    public void Initialize()
+    {
+        _scheduler.Schedule(() =>
+        {
+            Server.ExecuteCommand($"mp_backup_round_file {BackupPrefix}");
+            Server.ExecuteCommand("mp_backup_round_file_pattern %prefix%_round%round%.txt");
+        });
+    }
+
+    public void Reset()
+    {
+        lock (_rounds) _rounds.Clear();
+    }
 
     public void CreateSnapshot(int roundNumber)
     {
         lock (_rounds) _rounds.Add(roundNumber);
 
-        _scheduler.Schedule(() =>
-        {
-            if (!_backupsEnabled)
-            {
-                // Ensure the engine writes a backup file for every round.
-                Server.ExecuteCommand($"mp_backup_round_file {BackupPrefix}");
-                Server.ExecuteCommand("mp_backup_round_file_pattern %prefix%_round%round%.txt");
-                _backupsEnabled = true;
-            }
-            _logger.LogDebug("Round {RoundNumber} backup point recorded.", roundNumber);
-        });
+        _logger.LogDebug("Round {RoundNumber} backup point recorded.", roundNumber);
     }
 
     public bool RestoreRound(int roundNumber)

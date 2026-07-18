@@ -5,7 +5,6 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Dapper;
-using Microsoft.Extensions.Logging;
 using MySqlConnector;
 using statsCollector.Infrastructure;
 using statsCollector.Infrastructure.Database;
@@ -24,16 +23,13 @@ public interface IPositionTrackingService
 public sealed class PositionTrackingService : IPositionTrackingService
 {
     private readonly IConnectionFactory _connectionFactory;
-    private readonly ILogger<PositionTrackingService> _logger;
     private readonly ResiliencePipeline _resiliencePipeline;
 
     public PositionTrackingService(
         IConnectionFactory connectionFactory,
-        ResiliencePipelineProvider<string> pipelineProvider,
-        ILogger<PositionTrackingService> logger)
+        ResiliencePipelineProvider<string> pipelineProvider)
     {
         _connectionFactory = connectionFactory;
-        _logger = logger;
         _resiliencePipeline = pipelineProvider.GetPipeline("database");
     }
 
@@ -82,11 +78,12 @@ public sealed class PositionTrackingService : IPositionTrackingService
 
             // kill_positions stores POINT geometry, so the temp staging table holds raw x/y floats
             // with an explicit schema (matching the DataTable column order) and the merge builds POINTs.
-            await connection.ExecuteAsync(
-                "CREATE TEMPORARY TABLE temp_kill_positions_uuid (match_uuid VARCHAR(64), killer_steam_id BIGINT UNSIGNED, victim_steam_id BIGINT UNSIGNED, killer_x FLOAT, killer_y FLOAT, killer_z FLOAT, victim_x FLOAT, victim_y FLOAT, victim_z FLOAT, weapon_used VARCHAR(100), is_headshot TINYINT(1), is_wallbang TINYINT(1), distance FLOAT, killer_team INT, victim_team INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);").ConfigureAwait(false);
+            await ExecuteAsync(connection,
+                "CREATE TEMPORARY TABLE temp_kill_positions_uuid (match_uuid VARCHAR(64), killer_steam_id BIGINT UNSIGNED, victim_steam_id BIGINT UNSIGNED, killer_x FLOAT, killer_y FLOAT, killer_z FLOAT, victim_x FLOAT, victim_y FLOAT, victim_z FLOAT, weapon_used VARCHAR(100), is_headshot TINYINT(1), is_wallbang TINYINT(1), distance FLOAT, killer_team INT, victim_team INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);",
+                ct).ConfigureAwait(false);
 
             var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_kill_positions_uuid" };
-            await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false);
+            EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
 
             const string mergeSql = """
                 INSERT INTO kill_positions
@@ -100,8 +97,11 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 JOIN matches m ON t.match_uuid = m.match_uuid;
                 """;
 
-            await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);
-            await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_kill_positions_uuid;").ConfigureAwait(false);
+            await ExecuteAsync(connection,
+                "INSERT IGNORE INTO players (steam_id) SELECT killer_steam_id FROM temp_kill_positions_uuid UNION SELECT victim_steam_id FROM temp_kill_positions_uuid;",
+                ct).ConfigureAwait(false);
+            var inserted = await ExecuteAsync(connection, mergeSql, ct).ConfigureAwait(false);
+            if (inserted != eventList.Count) throw new InvalidOperationException("Kill positions could not resolve their match UUID.");
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -138,10 +138,10 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 );
             }
 
-            await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_death_positions_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, x FLOAT, y FLOAT, z FLOAT, cause_of_death VARCHAR(64), is_headshot TINYINT(1), team INT, map_name VARCHAR(64), round_number INT, round_time_seconds INT);").ConfigureAwait(false);
+            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_death_positions_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, x FLOAT, y FLOAT, z FLOAT, cause_of_death VARCHAR(100), is_headshot TINYINT(1), team INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);", ct).ConfigureAwait(false);
 
             var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_death_positions_uuid" };
-            await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false);
+            EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
 
             const string mergeSql = """
                 INSERT INTO death_positions
@@ -151,8 +151,9 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 JOIN matches m ON t.match_uuid = m.match_uuid;
                 """;
 
-            await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);
-            await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_death_positions_uuid;").ConfigureAwait(false);
+            await ExecuteAsync(connection, "INSERT IGNORE INTO players (steam_id) SELECT DISTINCT steam_id FROM temp_death_positions_uuid;", ct).ConfigureAwait(false);
+            var inserted = await ExecuteAsync(connection, mergeSql, ct).ConfigureAwait(false);
+            if (inserted != eventList.Count) throw new InvalidOperationException("Death positions could not resolve their match UUID.");
 
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -196,10 +197,10 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 );
             }
 
-            await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_utility_positions_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, throw_x FLOAT, throw_y FLOAT, throw_z FLOAT, land_x FLOAT, land_y FLOAT, land_z FLOAT, utility_type INT, opponents_affected INT, teammates_affected INT, damage INT, map_name VARCHAR(64), round_number INT, round_time_seconds INT);").ConfigureAwait(false);
+            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_utility_positions_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, throw_x FLOAT, throw_y FLOAT, throw_z FLOAT, land_x FLOAT, land_y FLOAT, land_z FLOAT, utility_type INT, opponents_affected INT, teammates_affected INT, damage INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);", ct).ConfigureAwait(false);
 
             var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_utility_positions_uuid" };
-            await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false);
+            EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
 
             const string mergeSql = """
                 INSERT INTO utility_positions
@@ -213,9 +214,21 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 JOIN matches m ON t.match_uuid = m.match_uuid;
                 """;
 
-            await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);
-            await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_utility_positions_uuid;").ConfigureAwait(false);
+            await ExecuteAsync(connection, "INSERT IGNORE INTO players (steam_id) SELECT DISTINCT steam_id FROM temp_utility_positions_uuid;", ct).ConfigureAwait(false);
+            var inserted = await ExecuteAsync(connection, mergeSql, ct).ConfigureAwait(false);
+            if (inserted != eventList.Count) throw new InvalidOperationException("Utility positions could not resolve their match UUID.");
 
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static Task<int> ExecuteAsync(MySqlConnection connection, string sql, CancellationToken cancellationToken) =>
+        connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: cancellationToken));
+
+    private static void EnsureBulkCopySucceeded(MySqlBulkCopyResult result)
+    {
+        if (result.Warnings.Count > 0)
+        {
+            throw new InvalidOperationException(string.Join("; ", result.Warnings.Select(warning => warning.Message)));
+        }
     }
 }

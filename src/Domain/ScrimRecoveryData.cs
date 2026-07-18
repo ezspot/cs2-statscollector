@@ -9,7 +9,6 @@ public record ScrimRecoveryData(
     Dictionary<int, ulong> Captains,
     string? SelectedMap,
     DateTime SavedAtUtc,
-    // New fields for exact sub-state recovery
     Dictionary<ulong, bool> ReadyPlayers = null!,
     Dictionary<string, int> MapVotes = null!,
     Dictionary<ulong, string> PlayerVotes = null!,

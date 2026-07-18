@@ -14,6 +14,7 @@ public interface IMatchStatsService
     /// <summary>Captures a baseline for a single player who joined after the match started (and after
     /// their lifetime totals were seeded), so their per-match delta reflects only this match.</summary>
     void EnsureBaseline(ulong steamId);
+    void FinalizePlayer(ulong steamId);
 
     /// <summary>Computes per-match deltas against the baseline and enqueues match summary + weapon rows.</summary>
     void FinalizeMatch();
@@ -83,30 +84,44 @@ public sealed class MatchStatsService(
             _baseline.Clear();
         }
 
-        var baselineById = baseline.ToDictionary(b => b.SteamId);
+        var baselineById = baseline.ToDictionary(snapshot => snapshot.SteamId);
         var current = _playerSessions.CaptureSnapshots(onlyDirty: false, matchUuid: match.MatchUuid);
         var calculatedAt = DateTime.UtcNow;
 
         var written = 0;
         foreach (var cur in current)
         {
-            var b = baselineById.GetValueOrDefault(cur.SteamId);
-            var rounds = cur.RoundsPlayed - (b?.RoundsPlayed ?? 0);
-            if (rounds <= 0) continue; // player did not play this match
-
-            var delta = BuildMatchDelta(cur, b, match.MatchUuid, rounds);
-
-            _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.MatchSummary, delta, match.MatchUuid, delta.RoundNumber, delta.SteamId));
-            _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.WeaponStats, delta, match.MatchUuid, delta.RoundNumber, delta.SteamId));
-
-            // Temporal analytics snapshot: the player's current (lifetime) computed analytics, stamped
-            // with this match. One row per match builds the performance timeline.
-            var pa = BuildAnalyticsSnapshot(cur, match.MatchUuid, calculatedAt);
-            _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.Analytics, pa, match.MatchUuid, cur.RoundNumber, cur.SteamId));
-            written++;
+            if (WriteMatchStats(cur, baselineById.GetValueOrDefault(cur.SteamId), match.MatchUuid, calculatedAt)) written++;
         }
 
         _logger.LogInformation("Finalized per-match stats for {Count} players in match {Uuid}.", written, match.MatchUuid);
+    }
+
+    public void FinalizePlayer(ulong steamId)
+    {
+        var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
+        if (matchUuid is null || !_playerSessions.TryGetSnapshot(steamId, out var current, matchUuid)) return;
+
+        PlayerSnapshot? baseline;
+        lock (_lock)
+        {
+            if (!_baseline.Remove(steamId, out baseline)) return;
+        }
+
+        if (WriteMatchStats(current, baseline, matchUuid, DateTime.UtcNow))
+        {
+            _logger.LogInformation("Finalized per-match stats for disconnected player {SteamId}.", steamId);
+        }
+    }
+
+    private bool WriteMatchStats(PlayerSnapshot current, PlayerSnapshot? baseline, string matchUuid, DateTime calculatedAt)
+    {
+        var rounds = current.RoundsPlayed - (baseline?.RoundsPlayed ?? 0);
+        if (rounds <= 0) return false;
+
+        var delta = BuildMatchDelta(current, baseline, matchUuid, rounds);
+        var analytics = BuildAnalyticsSnapshot(current, matchUuid, calculatedAt);
+        return _persistenceChannel.TryWrite(new MatchPlayerStatsUpdate(delta, analytics));
     }
 
     private PlayerSnapshot BuildMatchDelta(PlayerSnapshot cur, PlayerSnapshot? b, string matchUuid, int rounds)
@@ -146,7 +161,7 @@ public sealed class MatchStatsService(
 
     private PlayerAnalyticsSnapshot BuildAnalyticsSnapshot(PlayerSnapshot cur, string matchUuid, DateTime calculatedAt)
     {
-        // rating2 is HLTV 2.0 computed from the player's lifetime totals at this point in time.
+        // Rating 2.0 approximation from lifetime totals at this point in time.
         var rating2 = _analytics.CalculateHltv2Rating(cur.Kills, cur.Assists, cur.Deaths, cur.RoundsPlayed, cur.KASTPercentage, cur.AverageDamagePerRound);
         var entrySuccessRate = cur.EntryKillAttempts > 0
             ? (decimal)cur.EntryKillAttemptWins / cur.EntryKillAttempts * 100m

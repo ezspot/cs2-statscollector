@@ -6,5 +6,5 @@ public interface IPluginLifecycleService
 {
     void Initialize(BasePlugin plugin);
     Task StartAsync(CancellationToken ct);
-    Task StopAsync();
+    Task StopAsync(CancellationToken cancellationToken);
 }

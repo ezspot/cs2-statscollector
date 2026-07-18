@@ -1,204 +1,213 @@
-using System;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
 using System.Threading.Channels;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
-using System.Text.Json;
-using System.IO;
 
 namespace statsCollector.Services;
 
-public enum UpdateType
-{
-    PlayerStats,
-    MatchSummary,
-    WeaponStats,
-    Analytics,
-    RoundStart,
-    RoundEnd,
-    MatchStart,
-    MatchEnd
-}
+public abstract record StatsUpdate(string? MatchUuid = null, int? RoundNumber = null, ulong? SteamId = null);
 
-public record StatsUpdate(UpdateType Type, object Data, string? MatchUuid = null, int? RoundNumber = null, ulong? SteamId = null);
+public sealed record PlayerStatsUpdate(PlayerSnapshot Snapshot)
+    : StatsUpdate(Snapshot.MatchUuid, Snapshot.RoundNumber, Snapshot.SteamId);
+
+public sealed record MatchPlayerStatsUpdate(PlayerSnapshot Snapshot, PlayerAnalyticsSnapshot Analytics)
+    : StatsUpdate(Snapshot.MatchUuid, Snapshot.RoundNumber, Snapshot.SteamId);
+
+public sealed record RoundStartUpdate(string MatchId, int Number)
+    : StatsUpdate(MatchId, Number);
+
+public sealed record RoundEndUpdate(string MatchId, int Number, int WinnerTeam, int WinReason)
+    : StatsUpdate(MatchId, Number);
+
+public sealed record MatchStartUpdate(string MapName, string MatchId, string? SeriesUuid)
+    : StatsUpdate(MatchId);
+
+public sealed record MatchEndUpdate(string MatchId)
+    : StatsUpdate(MatchId);
 
 public interface IPersistenceChannel
 {
     bool TryWrite(StatsUpdate update);
-    Task FlushAsync(CancellationToken ct = default);
+    Task FlushAsync(CancellationToken cancellationToken = default);
 }
 
 public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
 {
-    private readonly Channel<StatsUpdate> _channel;
-    private readonly ILogger<PersistenceChannel> _logger;
-    private readonly IServiceProvider _serviceProvider;
-    private readonly string _recoveryPath = "pending_stats.json";
+    private abstract record PersistenceMessage;
+    private sealed record UpdateMessage(StatsUpdate Update) : PersistenceMessage;
+    private sealed record FlushMessage(TaskCompletionSource Completion) : PersistenceMessage;
 
+    private readonly Channel<PersistenceMessage> _channel;
+    private readonly ILogger<PersistenceChannel> _logger;
+    private readonly IStatsRepository _repository;
     private readonly Queue<List<StatsUpdate>> _failedBatches = new();
-    private readonly long _maxBufferSize = 50 * 1024 * 1024; // 50MB
-    private long _currentBufferSize = 0;
+    private const long MaxBufferSize = 50 * 1024 * 1024;
+    private long _currentBufferSize;
+    private volatile bool _acceptingWrites;
 
     public PersistenceChannel(
         ILogger<PersistenceChannel> logger,
-        IServiceProvider serviceProvider,
+        IStatsRepository repository,
         IOptionsMonitor<PluginConfig> config)
     {
         _logger = logger;
-        _serviceProvider = serviceProvider;
-
-        var options = new BoundedChannelOptions(config.CurrentValue.PersistenceChannelCapacity)
+        _repository = repository;
+        _channel = Channel.CreateBounded<PersistenceMessage>(new BoundedChannelOptions(config.CurrentValue.PersistenceChannelCapacity)
         {
-            // DropWrite (not DropOldest) so a full channel surfaces via TryWrite returning false and we
-            // can log/account for the drop, rather than silently discarding earlier-round data.
-            FullMode = BoundedChannelFullMode.DropWrite,
+            FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
             SingleWriter = false
-        };
-        _channel = Channel.CreateBounded<StatsUpdate>(options);
-
-        // Load pending stats if they exist (crash recovery)
-        _ = Task.Run(async () => await LoadRecoveryStateAsync());
-    }
-
-    private async Task LoadRecoveryStateAsync()
-    {
-        try
-        {
-            if (!File.Exists(_recoveryPath)) return;
-
-            var json = await File.ReadAllTextAsync(_recoveryPath);
-            var recoveredUpdates = JsonSerializer.Deserialize<List<StatsUpdate>>(json);
-
-            if (recoveredUpdates != null && recoveredUpdates.Count > 0)
-            {
-                _logger.LogInformation("Recovered {Count} pending stats updates from disk.", recoveredUpdates.Count);
-                foreach (var update in recoveredUpdates)
-                {
-                    await _channel.Writer.WriteAsync(update);
-                }
-            }
-
-            File.Delete(_recoveryPath);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to load persistence recovery state");
-        }
+        });
     }
 
     public bool TryWrite(StatsUpdate update)
     {
-        using var activity = Instrumentation.ActivitySource.StartActivity("PersistenceChannel.TryWrite");
-        activity?.SetTag("update.type", update.Type.ToString());
-        activity?.SetTag("player.steamid", update.SteamId);
-
-        if (_channel.Writer.TryWrite(update))
+        if (!_acceptingWrites || !_channel.Writer.TryWrite(new UpdateMessage(update)))
         {
-            return true;
+            _logger.LogWarning(
+                "Persistence channel unavailable or full. Dropped {UpdateType} for {SteamId} in {Match}",
+                update.GetType().Name,
+                update.SteamId,
+                update.MatchUuid);
+            return false;
         }
 
-        _logger.LogWarning("Persistence channel full! Dropped update for {SteamId} in {Match}", update.SteamId, update.MatchUuid);
-        return false;
+        return true;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _acceptingWrites = true;
         _logger.LogInformation("Persistence background worker started.");
 
-        var recoveryTimer = new PeriodicTimer(TimeSpan.FromSeconds(60));
-        var currentBatch = new List<StatsUpdate>(100);
-        // currentBatch is mutated by this drain loop and read by the recovery timer below; List<T> is
-        // not thread-safe, so all access is guarded. The timer serializes a copy taken under the lock,
-        // never the live list, so file I/O happens without blocking the drain.
-        var batchLock = new object();
-
-        _ = Task.Run(async () =>
-        {
-            while (await recoveryTimer.WaitForNextTickAsync(stoppingToken))
-            {
-                List<StatsUpdate> snapshot;
-                lock (batchLock) { snapshot = [.. currentBatch]; }
-                await SaveRecoveryStateAsync(snapshot);
-            }
-        }, stoppingToken);
-
+        var batch = new List<StatsUpdate>(100);
         try
         {
-            while (!stoppingToken.IsCancellationRequested)
+            while (await _channel.Reader.WaitToReadAsync(stoppingToken).ConfigureAwait(false))
             {
-                using var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-                cts.CancelAfter(TimeSpan.FromSeconds(30));
-
-                try
+                while (_channel.Reader.TryRead(out var message))
                 {
-                    while (currentBatch.Count < 100 && await _channel.Reader.WaitToReadAsync(cts.Token))
+                    switch (message)
                     {
-                        if (_channel.Reader.TryRead(out var update))
-                        {
-                            lock (batchLock) { currentBatch.Add(update); }
-                        }
+                        case UpdateMessage update:
+                            batch.Add(update.Update);
+                            if (batch.Count >= 100)
+                            {
+                                await ProcessBatchAsync(batch, stoppingToken).ConfigureAwait(false);
+                                batch.Clear();
+                            }
+                            break;
+
+                        case FlushMessage flush:
+                            if (batch.Count > 0)
+                            {
+                                await ProcessBatchAsync(batch, stoppingToken).ConfigureAwait(false);
+                                batch.Clear();
+                            }
+                            await ProcessRetryQueueAsync(stoppingToken).ConfigureAwait(false);
+                            if (_failedBatches.Count == 0)
+                            {
+                                flush.Completion.TrySetResult();
+                            }
+                            else
+                            {
+                                flush.Completion.TrySetException(new InvalidOperationException(
+                                    $"Unable to flush {_failedBatches.Count} persistence batches."));
+                            }
+                            break;
                     }
                 }
-                catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
-                {
-                    // Timer hit, proceed to flush batch
-                }
 
-                if (currentBatch.Count > 0)
+                if (batch.Count > 0)
                 {
-                    await ProcessBatchAsync(currentBatch, stoppingToken);
-                    lock (batchLock) { currentBatch.Clear(); }
+                    await ProcessBatchAsync(batch, stoppingToken).ConfigureAwait(false);
+                    batch.Clear();
                 }
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            _logger.LogInformation("Persistence worker stopping...");
+            _logger.LogInformation("Persistence worker stopping.");
         }
         finally
         {
-            await FinalFlushAsync();
+            _acceptingWrites = false;
+            foreach (var message in _channel.Reader.ReadAllRemaining())
+            {
+                if (message is UpdateMessage update)
+                {
+                    batch.Add(update.Update);
+                }
+                else if (message is FlushMessage flush)
+                {
+                    flush.Completion.TrySetCanceled(stoppingToken);
+                }
+            }
+
+            if (batch.Count > 0)
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await ProcessBatchAsync(batch, timeout.Token).ConfigureAwait(false);
+            }
         }
     }
 
-    // Safe wrapper: transient DB faults are already retried by the repository's Polly pipeline
-    // (timeout + retry + circuit breaker). If the batch still fails, buffer it in memory instead of
-    // adding a second, compounding retry loop here.
-    private async Task ProcessBatchAsync(IReadOnlyList<StatsUpdate> batch, CancellationToken ct)
+    public async Task FlushAsync(CancellationToken cancellationToken = default)
+    {
+        if (!_acceptingWrites) return;
+
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await _channel.Writer.WriteAsync(new FlushMessage(completion), cancellationToken).ConfigureAwait(false);
+        await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        _acceptingWrites = false;
+        try
+        {
+            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await _channel.Writer.WriteAsync(new FlushMessage(completion), cancellationToken).ConfigureAwait(false);
+            await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await base.StopAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task ProcessBatchAsync(IReadOnlyList<StatsUpdate> batch, CancellationToken cancellationToken)
     {
         try
         {
-            await ProcessBatchCoreAsync(batch, ct);
-
+            await ProcessRetryQueueAsync(cancellationToken).ConfigureAwait(false);
             if (_failedBatches.Count > 0)
             {
-                _ = Task.Run(async () => await ProcessRetryQueueAsync(ct), ct);
+                BufferFailedBatch([.. batch]);
+                return;
             }
+
+            await ProcessBatchCoreAsync(batch, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to process persistence batch after resilience pipeline. Buffering in-memory.");
+            _logger.LogError(ex, "Failed to process persistence batch after resilience retries. Buffering in memory.");
             BufferFailedBatch([.. batch]);
         }
     }
 
-    private async Task ProcessBatchCoreAsync(IReadOnlyList<StatsUpdate> batch, CancellationToken ct)
+    private async Task ProcessBatchCoreAsync(IReadOnlyList<StatsUpdate> batch, CancellationToken cancellationToken)
     {
         using var activity = Instrumentation.ActivitySource.StartActivity("PersistenceChannel.ProcessBatch");
         activity?.SetTag("batch.size", batch.Count);
 
-        using var scope = _serviceProvider.CreateScope();
-        var repository = scope.ServiceProvider.GetRequiredService<IStatsRepository>();
-
-        // Group by type for efficiency
         var playerUpdates = new List<PlayerSnapshot>();
         var matchSummaries = new List<PlayerSnapshot>();
         var weaponStats = new List<PlayerSnapshot>();
@@ -206,137 +215,84 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
 
         foreach (var update in batch)
         {
-            switch (update.Type)
+            switch (update)
             {
-                case UpdateType.PlayerStats:
-                    if (update.Data is PlayerSnapshot ps) playerUpdates.Add(ps);
+                case PlayerStatsUpdate player:
+                    playerUpdates.Add(player.Snapshot);
                     break;
-                case UpdateType.MatchSummary:
-                    if (update.Data is PlayerSnapshot ms) matchSummaries.Add(ms);
+                case MatchPlayerStatsUpdate matchPlayer:
+                    matchSummaries.Add(matchPlayer.Snapshot);
+                    weaponStats.Add(matchPlayer.Snapshot);
+                    analytics.Add(matchPlayer.Analytics);
                     break;
-                case UpdateType.WeaponStats:
-                    if (update.Data is PlayerSnapshot ws) weaponStats.Add(ws);
+                case RoundStartUpdate roundStart:
+                    await _repository.StartRoundAsync(roundStart.MatchId, roundStart.Number, cancellationToken).ConfigureAwait(false);
                     break;
-                case UpdateType.Analytics:
-                    if (update.Data is PlayerAnalyticsSnapshot pa) analytics.Add(pa);
+                case RoundEndUpdate roundEnd:
+                    await _repository.EndRoundAsync(roundEnd.MatchId, roundEnd.Number, roundEnd.WinnerTeam, roundEnd.WinReason, cancellationToken).ConfigureAwait(false);
                     break;
-                case UpdateType.RoundStart:
-                    if (update.Data is (string mUuidRs, int rNumRs))
-                        await repository.StartRoundAsync(mUuidRs, rNumRs, ct);
+                case MatchStartUpdate matchStart:
+                    await _repository.StartMatchAsync(matchStart.MapName, matchStart.MatchId, matchStart.SeriesUuid, cancellationToken).ConfigureAwait(false);
                     break;
-                case UpdateType.RoundEnd:
-                    if (update.Data is (string mUuidRe, int rNumRe, int wTeam, int reason))
-                        await repository.EndRoundAsync(mUuidRe, rNumRe, wTeam, reason, ct);
-                    break;
-                case UpdateType.MatchStart:
-                    if (update.Data is ValueTuple<string, string, string?> matchData)
-                    {
-                        var (mapStart, uuidStart, sUuidStart) = matchData;
-                        await repository.StartMatchAsync(mapStart, uuidStart, sUuidStart, ct);
-                    }
-                    break;
-                case UpdateType.MatchEnd:
-                    if (update.Data is string matchUuid)
-                        await repository.EndMatchAsync(matchUuid, ct);
+                case MatchEndUpdate matchEnd:
+                    await _repository.EndMatchAsync(matchEnd.MatchId, cancellationToken).ConfigureAwait(false);
                     break;
             }
         }
 
-        if (playerUpdates.Count > 0) await repository.UpsertPlayersAsync(playerUpdates, ct);
-        if (matchSummaries.Count > 0) await repository.UpsertMatchSummariesAsync(matchSummaries, ct);
-        if (weaponStats.Count > 0) await repository.UpsertMatchWeaponStatsAsync(weaponStats, ct);
-        if (analytics.Count > 0) await repository.UpsertPlayerAnalyticsAsync(analytics, ct);
+        if (playerUpdates.Count > 0) await _repository.UpsertPlayersAsync(playerUpdates, cancellationToken).ConfigureAwait(false);
+        if (matchSummaries.Count > 0) await _repository.UpsertMatchSummariesAsync(matchSummaries, cancellationToken).ConfigureAwait(false);
+        if (weaponStats.Count > 0) await _repository.UpsertMatchWeaponStatsAsync(weaponStats, cancellationToken).ConfigureAwait(false);
+        if (analytics.Count > 0) await _repository.UpsertPlayerAnalyticsAsync(analytics, cancellationToken).ConfigureAwait(false);
 
         _logger.LogDebug("Processed persistence batch of {Count} items", batch.Count);
     }
 
     private void BufferFailedBatch(List<StatsUpdate> batch)
     {
-        // Simple size estimation
-        var estimatedSize = batch.Count * 1024; // ~1KB per update
-        if (_currentBufferSize + estimatedSize > _maxBufferSize)
+        var estimatedSize = batch.Count * 1024L;
+        while (_failedBatches.Count > 0 && _currentBufferSize + estimatedSize > MaxBufferSize)
         {
-            _logger.LogCritical("Persistence buffer exceeded 50MB! Dropping oldest batch.");
-            if (_failedBatches.TryDequeue(out var oldest))
-            {
-                _currentBufferSize -= oldest.Count * 1024;
-            }
+            var oldest = _failedBatches.Dequeue();
+            _currentBufferSize -= oldest.Count * 1024L;
+            _logger.LogCritical("Persistence retry buffer full. Dropped the oldest batch of {Count} updates.", oldest.Count);
         }
+
+        if (estimatedSize > MaxBufferSize) return;
 
         _failedBatches.Enqueue(batch);
         _currentBufferSize += estimatedSize;
     }
 
-    private async Task ProcessRetryQueueAsync(CancellationToken ct)
+    private async Task ProcessRetryQueueAsync(CancellationToken cancellationToken)
     {
-        if (_failedBatches.Count == 0) return;
-
-        _logger.LogInformation("Attempting to process {Count} failed batches from buffer...", _failedBatches.Count);
-        
         var batchesToProcess = _failedBatches.Count;
-        for (int i = 0; i < batchesToProcess; i++)
+        for (var i = 0; i < batchesToProcess; i++)
         {
-            if (!_failedBatches.TryDequeue(out var batch)) break;
-            
+            var batch = _failedBatches.Peek();
             try
             {
-                // Use the throwing core so a still-down DB re-enqueues rather than silently re-buffering.
-                await ProcessBatchCoreAsync(batch, ct);
-                _currentBufferSize -= batch.Count * 1024;
+                await ProcessBatchCoreAsync(batch, cancellationToken).ConfigureAwait(false);
+                _failedBatches.Dequeue();
+                _currentBufferSize -= batch.Count * 1024L;
             }
-            catch
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                // Re-enqueue at back if failed again
-                _failedBatches.Enqueue(batch);
-                break; // Stop retry for now if DB still down
+                throw;
             }
-        }
-    }
-
-    private async Task SaveRecoveryStateAsync(List<StatsUpdate> currentBatch)
-    {
-        try
-        {
-            if (currentBatch.Count == 0) return;
-
-            var json = JsonSerializer.Serialize(currentBatch, new JsonSerializerOptions { WriteIndented = true });
-            await File.WriteAllTextAsync(_recoveryPath + ".tmp", json);
-            if (File.Exists(_recoveryPath)) File.Delete(_recoveryPath);
-            File.Move(_recoveryPath + ".tmp", _recoveryPath);
-            
-            _logger.LogDebug("Persistence channel recovery state saved to {Path}", _recoveryPath);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to save persistence recovery state");
-        }
-    }
-
-    public async Task FlushAsync(CancellationToken ct = default)
-    {
-        _logger.LogInformation("Manual flush requested for persistence channel.");
-        var flushBatch = new List<StatsUpdate>(100);
-        while (_channel.Reader.TryRead(out var update))
-        {
-            flushBatch.Add(update);
-            if (flushBatch.Count >= 100)
+            catch (Exception ex)
             {
-                await ProcessBatchAsync(flushBatch, ct);
-                flushBatch.Clear();
+                _logger.LogWarning(ex, "Persistence retry remains unavailable; preserving buffered update order.");
+                break;
             }
         }
-
-        if (flushBatch.Count > 0)
-        {
-            await ProcessBatchAsync(flushBatch, ct);
-            flushBatch.Clear();
-        }
     }
+}
 
-    private async Task FinalFlushAsync()
+internal static class ChannelReaderExtensions
+{
+    public static IEnumerable<T> ReadAllRemaining<T>(this ChannelReader<T> reader)
     {
-        _logger.LogInformation("Executing final flush of persistence channel...");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        await FlushAsync(cts.Token);
+        while (reader.TryRead(out var item)) yield return item;
     }
 }

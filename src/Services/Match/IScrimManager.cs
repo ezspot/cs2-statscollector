@@ -16,7 +16,8 @@ public interface IScrimManager
     Task SelectSideAsync(ulong steamId, string side);
     Task HandleKnifeRoundEnd(int winnerTeam);
     Task SetPracticeModeAsync(bool enabled);
-    Task StartVetoAsync();
     void SetOverride(string key, string value);
     void HandleDisconnect(ulong steamId);
+    void HandleMapStart(string mapName);
+    void HandleMatchEnd();
 }

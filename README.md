@@ -5,9 +5,9 @@ A CounterStrikeSharp plugin for CS2 that collects detailed player statistics int
 ## Features
 - **Relational match tracking** — `matches` and `rounds` are tracked automatically, with optional `series_uuid` to group BO3/BO5 series.
 - **Lifetime player stats** — 100+ aggregated metrics per player (combat, utility, economy, bomb, clutch, entry). Career totals are **seeded from the database on connect**, so they accumulate correctly across reconnects and across multiple servers sharing one database (see *Multi-server* below).
-- **Per-match stats** — `match_player_stats` / `match_weapon_stats` populated at match end from start-of-match deltas, with a standard HLTV 2.0 per-match rating.
+- **Per-match stats** — `match_player_stats` / `match_weapon_stats` populated at match end from start-of-match deltas, with a community Rating 2.0 approximation (HLTV's exact formula is not public).
 - **Spatial data** — kill / death / utility positions stored as MySQL `POINT` with spatial indexes for heatmaps.
-- **Non-blocking persistence** — game-thread events are snapshotted and written to MySQL on a background channel; the server thread never waits on the database.
+- **Non-blocking persistence** — game-thread events are snapshotted and written to MySQL on bounded background channels; overload is logged instead of blocking the game thread.
 - **Dirty-flag flushing** — only players whose stats changed are written on each auto-save.
 - **Resilience** — Polly v8 pipeline (retry + circuit breaker + timeout) wraps every database operation.
 - **Bulk writes** — player and position batches are written with `MySqlBulkCopy` into a temporary table, then merged.
@@ -15,11 +15,15 @@ A CounterStrikeSharp plugin for CS2 that collects detailed player statistics int
 - **Tactical pause system** — `.pause` / `.unpause` with technical/tactical limits.
 
 ## Requirements
-- CounterStrikeSharp v1.0.369+ (.NET 10 runtime)
+- CounterStrikeSharp v1.0.371+ (.NET 10 runtime)
 - .NET 10 SDK (to build) / .NET 10 runtime (to run)
-- MySQL 8.0+ / 9.x (or MariaDB 10.6+) — required for `POINT` columns and spatial indexes
+- MySQL 8.0+ / 9.x — required for `POINT` columns and spatial indexes
 
-A ready-to-run MySQL 9.6 + phpMyAdmin stack is provided under `MySQL-docker/` (`docker compose up -d`).
+A MySQL 9.6 stack is provided under `MySQL-docker/`. Copy both `*.example` files in
+`MySQL-docker/secrets/` to matching `*.txt` files, replace their contents, then run
+`docker compose up -d`. phpMyAdmin is optional: `docker compose --profile tools up -d`.
+MySQL and phpMyAdmin bind to loopback by default; set `MYSQL_BIND_ADDRESS` only when the game
+server connects from another host, and restrict that port at the firewall.
 
 > Note: current CounterStrikeSharp targets .NET 10. If your server still runs a .NET 8 build of
 > CounterStrikeSharp, pin `CounterStrikeSharp.API` to its last `net8.0` release and set
@@ -29,7 +33,7 @@ A ready-to-run MySQL 9.6 + phpMyAdmin stack is provided under `MySQL-docker/` (`
 1. Install [CounterStrikeSharp](https://docs.cssharp.dev/) on your CS2 server.
 2. Copy the plugin to `game/csgo/addons/counterstrikesharp/plugins/statsCollector/`.
 3. Create `config.json` in that folder (see `config.sample.json`).
-4. Run `database/init.sql` against your MySQL server to create the schema and views.
+4. Create the configured database, select it, then run `database/init.sql` to create the tables and views.
 5. Start the server and confirm with `css_plugins list`.
 
 ### Minimal config
@@ -45,7 +49,17 @@ A ready-to-run MySQL 9.6 + phpMyAdmin stack is provided under `MySQL-docker/` (`
   "LogLevel": "Information"
 }
 ```
+Use `VerifyFull` and set `DatabaseSslCa` to your CA certificate when connecting to a remote MySQL host.
 See `config.sample.json` for the full set of options (persistence, trade window, clutch weighting, scrim settings).
+
+For an existing database, treat `database/init.sql` as a bootstrap script rather than a migration.
+This release widens `clutch_points`; apply the following before deployment:
+```sql
+ALTER TABLE player_stats MODIFY clutch_points DECIMAL(10,3) DEFAULT 0;
+ALTER TABLE player_advanced_analytics MODIFY clutch_points DECIMAL(10,3) NOT NULL;
+```
+New match foreign keys in `init.sql` apply automatically only to clean installations. Validate and remove
+any orphaned rows before adding those constraints to an existing database.
 
 Any option can be overridden by an environment variable prefixed with `STATSCOLLECTOR_`
 (e.g. `STATSCOLLECTOR_DatabasePassword`).

@@ -17,11 +17,6 @@ public interface ISchemaInitializer
     Task EnsureSchemaAsync(CancellationToken cancellationToken);
 }
 
-/// <summary>
-/// Applies the embedded database/init.sql on startup when AutoCreateSchema is enabled.
-/// The script creates the database, tables, and views (IF NOT EXISTS / OR REPLACE), so it is
-/// safe to run repeatedly. It connects without a default database since the script creates it.
-/// </summary>
 public sealed class SchemaInitializer(
     IOptionsMonitor<PluginConfig> config,
     ILogger<SchemaInitializer> logger) : ISchemaInitializer
@@ -36,21 +31,30 @@ public sealed class SchemaInitializer(
         var script = ReadInitScript();
         if (string.IsNullOrWhiteSpace(script))
         {
-            _logger.LogWarning("AutoCreateSchema is enabled but the embedded init.sql could not be found.");
-            return;
+            throw new InvalidOperationException("AutoCreateSchema is enabled but the embedded init.sql could not be found.");
         }
 
         try
         {
+            var databaseName = _config.CurrentValue.DatabaseName;
+            if (databaseName.Any(character => !char.IsLetterOrDigit(character) && character is not ('_' or '$')))
+            {
+                throw new InvalidOperationException("DatabaseName may contain only letters, digits, underscores, and dollar signs.");
+            }
+
             var connectionString = _config.CurrentValue.BuildConnectionString(includeDatabase: false);
             await using var connection = new MySqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            var createDatabase = $"CREATE DATABASE IF NOT EXISTS `{databaseName}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;";
+            await connection.ExecuteAsync(new CommandDefinition(createDatabase, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            await connection.ChangeDatabaseAsync(databaseName, cancellationToken).ConfigureAwait(false);
             await connection.ExecuteAsync(new CommandDefinition(script, cancellationToken: cancellationToken)).ConfigureAwait(false);
             _logger.LogInformation("Database schema ensured (AutoCreateSchema).");
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "AutoCreateSchema failed; ensure database/init.sql has been applied manually.");
+            throw;
         }
     }
 

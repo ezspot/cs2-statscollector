@@ -45,11 +45,6 @@ public static class GameEventExtensions
         return @event.GetFieldOrDefault<float>(key, defaultValue);
     }
 
-    public static double GetDoubleValue(this GameEvent @event, string key, double defaultValue = 0)
-    {
-        return @event.GetFieldOrDefault<double>(key, defaultValue);
-    }
-
     public static bool GetBoolValue(this GameEvent @event, string key, bool defaultValue = false)
     {
         if (@event.TryGetField<bool>(key, out var value))

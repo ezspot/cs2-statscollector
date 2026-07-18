@@ -7,14 +7,24 @@ namespace statsCollector.Domain;
 public sealed class PlayerStats
 {
     private bool _isDirty;
-    public bool IsDirty 
-    { 
-        get => _isDirty; 
-        private set => _isDirty = value; 
+    private long _version;
+    public bool IsDirty
+    {
+        get => _isDirty;
+        private set => _isDirty = value;
     }
 
-    public void MarkDirty() => _isDirty = true;
-    public void ClearDirty() => _isDirty = false;
+    public long Version => _version;
+    public void MarkDirty()
+    {
+        _isDirty = true;
+        _version++;
+    }
+
+    public void ClearDirty(long persistedVersion)
+    {
+        if (_version == persistedVersion) _isDirty = false;
+    }
 
     // When this player's session started; used to derive playtime. Settable so a seeded lifetime
     // playtime can shift the origin backwards.
@@ -25,24 +35,24 @@ public sealed class PlayerStats
     public bool LifetimeSeeded { get; private set; }
 
     private ulong _steamId;
-    public ulong SteamId 
-    { 
-        get => _steamId; 
-        set { if (_steamId != value) { _steamId = value; MarkDirty(); } } 
+    public ulong SteamId
+    {
+        get => _steamId;
+        set { if (_steamId != value) { _steamId = value; MarkDirty(); } }
     }
 
     private string _name = string.Empty;
-    public string Name 
-    { 
-        get => _name; 
-        set { if (_name != value) { _name = value; MarkDirty(); } } 
+    public string Name
+    {
+        get => _name;
+        set { if (_name != value) { _name = value; MarkDirty(); } }
     }
 
     private PlayerTeam _currentTeam = PlayerTeam.Spectator;
-    public PlayerTeam CurrentTeam 
-    { 
-        get => _currentTeam; 
-        set { if (_currentTeam != value) { _currentTeam = value; MarkDirty(); } } 
+    public PlayerTeam CurrentTeam
+    {
+        get => _currentTeam;
+        set { if (_currentTeam != value) { _currentTeam = value; MarkDirty(); } }
     }
 
     // Sub-models
@@ -75,9 +85,8 @@ public sealed class PlayerStats
     /// extend their career rather than replacing it with a single session — required for correctness
     /// across reconnects and across multiple servers sharing one database. Additive (<c>+=</c>) so any
     /// stat already recorded in the brief window before the async load completes is preserved.
-    /// Only raw counters are seeded; derived ratings are recomputed from them. The two un-stored
-    /// intermediates that dominate the ratings are reconstructed: <c>KASTRounds</c> from the stored
-    /// KAST% × rounds, and <c>WeightedKills</c> approximated by kills (the per-kill bonuses are small).
+    /// Only raw counters are seeded; derived ratings are recomputed from them. KAST rounds are
+    /// reconstructed from the stored percentage and round count.
     /// </summary>
     /// <summary>Marks the session seeded without applying any totals — used for first-time players who
     /// have no persisted lifetime row yet, so their writes are allowed to proceed.</summary>
@@ -132,8 +141,6 @@ public sealed class PlayerStats
         Combat.ArmHits += r.ArmHits;
         Combat.LegHits += r.LegHits;
         Combat.RoundSwing += r.RoundSwing;
-        Combat.WeightedKills += r.Kills; // approximation; per-kill bonuses are not persisted
-
         Round.RoundsPlayed += r.RoundsPlayed;
         Round.RoundsWon += r.RoundsWon;
         Round.TotalSpawns += r.TotalSpawns;
@@ -184,13 +191,13 @@ public sealed class PlayerStats
         Bomb.BombDeaths += r.BombDeaths;
 
         Economy.MoneySpent += r.MoneySpent;
-        Economy.EquipmentValue += r.EquipmentValue;
+        Economy.EquipmentValue = r.EquipmentValue;
         Economy.ItemsPurchased += r.ItemsPurchased;
         Economy.ItemsPickedUp += r.ItemsPickedUp;
-        Economy.RoundStartMoney += r.RoundStartMoney;
-        Economy.RoundEndMoney += r.RoundEndMoney;
-        Economy.EquipmentValueStart += r.EquipmentValueStart;
-        Economy.EquipmentValueEnd += r.EquipmentValueEnd;
+        Economy.RoundStartMoney = r.RoundStartMoney;
+        Economy.RoundEndMoney = r.RoundEndMoney;
+        Economy.EquipmentValueStart = r.EquipmentValueStart;
+        Economy.EquipmentValueEnd = r.EquipmentValueEnd;
 
         // Shift the playtime origin back by the persisted seconds so lifetime playtime continues.
         if (r.PlaytimeSeconds > 0)

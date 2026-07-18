@@ -15,14 +15,14 @@ public interface IPlayerSessionService
     /// can seed it from the database. Fires regardless of how the session was first created
     /// (connect, spawn, or hot-reload).</summary>
     event Action<ulong>? PlayerSessionCreated;
-    PlayerStats EnsurePlayer(PlayerControllerState player);
+    void EnsurePlayer(PlayerControllerState player);
     void HydrateLifetime(ulong steamId, LifetimePlayerStatsRow? lifetime);
-    bool TryGetPlayer(ulong steamId, out PlayerStats stats);
-    bool TryRemovePlayer(ulong steamId, out PlayerStats? stats);
+    bool TryRemovePlayer(ulong steamId);
     void MutatePlayer(ulong steamId, Action<PlayerStats> mutation);
     T WithPlayer<T>(ulong steamId, Func<PlayerStats, T> accessor, T defaultValue = default!);
     void ForEachPlayer(Action<PlayerStats> action);
     PlayerSnapshot[] CaptureSnapshots(bool onlyDirty = false, string? matchUuid = null);
+    void MarkPersisted(ulong steamId, long version);
     IReadOnlyCollection<ulong> GetActiveSteamIds();
     bool TryGetSnapshot(ulong steamId, out PlayerSnapshot snapshot, string? matchUuid = null);
 }
@@ -41,7 +41,7 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
 
     public event Action<ulong>? PlayerSessionCreated;
 
-    public PlayerStats EnsurePlayer(PlayerControllerState player)
+    public void EnsurePlayer(PlayerControllerState player)
     {
         var isNew = false;
         var wrapper = _playerStats.GetOrAdd(player.SteamId, id =>
@@ -68,7 +68,6 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
         // Notify outside the lock so the seeding consumer can hydrate this session from the database
         // before it is eligible for persistence (see the LifetimeSeeded guard in the capture methods).
         if (isNew) PlayerSessionCreated?.Invoke(player.SteamId);
-        return wrapper.Stats;
     }
 
     public void HydrateLifetime(ulong steamId, LifetimePlayerStatsRow? lifetime)
@@ -89,21 +88,9 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
         }
     }
 
-    public bool TryGetPlayer(ulong steamId, out PlayerStats stats)
-    {
-        if (_playerStats.TryGetValue(steamId, out var wrapper))
-        {
-            stats = wrapper.Stats;
-            return true;
-        }
-        stats = null!;
-        return false;
-    }
-
-    public bool TryRemovePlayer(ulong steamId, out PlayerStats? stats)
+    public bool TryRemovePlayer(ulong steamId)
     {
         var removed = _playerStats.TryRemove(steamId, out var wrapper);
-        stats = wrapper?.Stats;
         wrapper?.Dispose();
         return removed;
     }
@@ -165,7 +152,7 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
         var snapshots = new List<PlayerSnapshot>();
         foreach (var wrapper in _playerStats.Values)
         {
-            wrapper.Lock.EnterUpgradeableReadLock();
+            wrapper.Lock.EnterReadLock();
             try
             {
                 // Never persist a session that hasn't been seeded from its lifetime row yet — doing so
@@ -175,29 +162,22 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
                 if (!onlyDirty || wrapper.Stats.IsDirty)
                 {
                     snapshots.Add(_analytics.CreateSnapshot(wrapper.Stats, matchUuid));
-                    if (onlyDirty)
-                    {
-                        wrapper.Lock.EnterWriteLock();
-                        try
-                        {
-                            wrapper.Stats.ClearDirty();
-                        }
-                        finally
-                        {
-                            wrapper.Lock.ExitWriteLock();
-                        }
-                    }
                 }
             }
             finally
             {
-                wrapper.Lock.ExitUpgradeableReadLock();
+                wrapper.Lock.ExitReadLock();
             }
         }
         return snapshots.ToArray();
     }
 
     public IReadOnlyCollection<ulong> GetActiveSteamIds() => _playerStats.Keys.ToArray();
+
+    public void MarkPersisted(ulong steamId, long version)
+    {
+        MutatePlayer(steamId, stats => stats.ClearDirty(version));
+    }
 
     public bool TryGetSnapshot(ulong steamId, out PlayerSnapshot snapshot, string? matchUuid = null)
     {

@@ -1,10 +1,9 @@
 using Microsoft.Extensions.Logging;
+using MySqlConnector;
 using Polly;
 using Polly.CircuitBreaker;
 using Polly.Retry;
 using Polly.Timeout;
-using System;
-using System.Threading.Tasks;
 
 namespace statsCollector.Infrastructure;
 
@@ -22,7 +21,7 @@ public static class ResiliencePolicies
             })
             .AddRetry(new RetryStrategyOptions
             {
-                ShouldHandle = new PredicateBuilder().Handle<MySqlConnector.MySqlException>()
+                ShouldHandle = new PredicateBuilder().Handle<MySqlException>()
                     .Handle<TimeoutRejectedException>()
                     .Handle<TimeoutException>(),
                 MaxRetryAttempts = 3,
@@ -31,14 +30,14 @@ public static class ResiliencePolicies
                 Delay = TimeSpan.FromMilliseconds(200),
                 OnRetry = args =>
                 {
-                    logger.LogWarning(args.Outcome.Exception, "DB operation failed, retry {Attempt} after {Delay}ms", 
+                    logger.LogWarning(args.Outcome.Exception, "Database operation failed, retry {Attempt} after {Delay}ms",
                         args.AttemptNumber, args.RetryDelay.TotalMilliseconds);
                     return default;
                 }
             })
             .AddCircuitBreaker(new CircuitBreakerStrategyOptions
             {
-                ShouldHandle = new PredicateBuilder().Handle<MySqlConnector.MySqlException>()
+                ShouldHandle = new PredicateBuilder().Handle<MySqlException>()
                     .Handle<TimeoutRejectedException>()
                     .Handle<TimeoutException>(),
                 FailureRatio = 0.5,
@@ -47,20 +46,19 @@ public static class ResiliencePolicies
                 BreakDuration = TimeSpan.FromSeconds(60),
                 OnOpened = args =>
                 {
-                    logger.LogCritical(args.Outcome.Exception, 
-                        "🔴 DATABASE CIRCUIT BREAKER OPENED - Stats persistence disabled for {Duration}s. " +
-                        "Server will continue operating but stats will be lost until circuit recovers.",
+                    logger.LogCritical(args.Outcome.Exception,
+                        "Database circuit breaker opened for {Duration}s. Pending statistics will remain in the bounded retry buffer.",
                         args.BreakDuration.TotalSeconds);
                     return default;
                 },
                 OnClosed = _ =>
                 {
-                    logger.LogInformation("🟢 DATABASE CIRCUIT BREAKER CLOSED - Stats persistence restored");
+                    logger.LogInformation("Database circuit breaker closed. Persistence restored.");
                     return default;
                 },
                 OnHalfOpened = _ =>
                 {
-                    logger.LogInformation("🟡 DATABASE CIRCUIT BREAKER HALF-OPEN - Testing connection recovery");
+                    logger.LogInformation("Database circuit breaker half-open. Testing recovery.");
                     return default;
                 }
             })

@@ -25,8 +25,6 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     private readonly IMatchStatsService _matchStats;
 
     private CounterStrikeSharp.API.Modules.Timers.Timer? _autoSaveTimer;
-    private BasePlugin? _plugin;
-
     public PluginLifecycleService(
         ILogger<PluginLifecycleService> logger,
         IOptionsMonitor<PluginConfig> config,
@@ -51,14 +49,12 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
 
     public void Initialize(BasePlugin plugin)
     {
-        _plugin = plugin;
         _eventHandler.RegisterEvents(plugin);
-        
-        // Auto-save timer
+
         var autoSaveInterval = Math.Max(30, _config.CurrentValue.AutoSaveSeconds);
-        _autoSaveTimer = plugin.AddTimer(autoSaveInterval, () => 
+        _autoSaveTimer = plugin.AddTimer(autoSaveInterval, () =>
         {
-            _ = SaveAllStatsAsync();
+            SaveAllStats();
         }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.REPEAT);
 
         _logger.LogInformation("Plugin lifecycle initialized.");
@@ -66,13 +62,10 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
 
     public async Task StartAsync(CancellationToken ct)
     {
-        // Apply the schema first (no-op unless AutoCreateSchema is enabled) so writes have tables.
         await _schemaInitializer.EnsureSchemaAsync(ct);
 
         await _positionPersistence.StartAsync(ct);
 
-        // The plugin builds its own ServiceProvider (no generic Host), so the
-        // BackgroundService that drains the stats channel must be started explicitly.
         if (_persistenceChannel is IHostedService hosted)
         {
             await hosted.StartAsync(ct);
@@ -81,48 +74,43 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         _logger.LogInformation("Background persistence services started.");
     }
 
-    public async Task StopAsync()
+    public async Task StopAsync(CancellationToken cancellationToken)
     {
         _autoSaveTimer?.Kill();
 
-        await SaveAllStatsAsync();
+        SaveAllStats();
 
-        // Persist per-match summaries for the in-progress match, then close it. EndMatch enqueues a
-        // MatchEnd with the correct match UUID (a direct write here passed an int MatchId, which the
-        // channel handler ignored).
         if (_matchTracker.CurrentMatch != null)
         {
             _matchStats.FinalizeMatch();
             _matchTracker.EndMatch();
         }
 
-        await _persistenceChannel.FlushAsync(CancellationToken.None);
-
-        // Stops the channel worker and runs its final drain.
         if (_persistenceChannel is IHostedService hosted)
         {
-            await hosted.StopAsync(CancellationToken.None);
+            await hosted.StopAsync(cancellationToken);
+        }
+        else
+        {
+            await _persistenceChannel.FlushAsync(cancellationToken);
         }
 
-        await _positionPersistence.StopAsync(TimeSpan.FromSeconds(3), CancellationToken.None);
+        await _positionPersistence.StopAsync(TimeSpan.FromSeconds(10), cancellationToken);
 
         _logger.LogInformation("Plugin lifecycle stopped.");
     }
 
-    private Task SaveAllStatsAsync()
+    private void SaveAllStats()
     {
         var match = _matchTracker.CurrentMatch;
         var snapshots = _playerSessions.CaptureSnapshots(true, match?.MatchUuid);
-        
+
         foreach (var snapshot in snapshots)
         {
-            _persistenceChannel.TryWrite(new StatsUpdate(
-                UpdateType.PlayerStats, 
-                snapshot, 
-                match?.MatchUuid ?? "none", 
-                snapshot.RoundNumber, 
-                snapshot.SteamId));
+            if (_persistenceChannel.TryWrite(new PlayerStatsUpdate(snapshot)))
+            {
+                _playerSessions.MarkPersisted(snapshot.SteamId, snapshot.Version);
+            }
         }
-        return Task.CompletedTask;
     }
 }

@@ -12,7 +12,7 @@ using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public sealed class ScrimManager : IScrimManager
+public sealed class ScrimManager : IScrimManager, IDisposable
 {
     private readonly ILogger<ScrimManager> _logger;
     private readonly IOptionsMonitor<PluginConfig> _configMonitor;
@@ -39,7 +39,7 @@ public sealed class ScrimManager : IScrimManager
     private int _knifeWinnerTeam;
     private CounterStrikeSharp.API.Modules.Timers.Timer? _sideSelectionTimer;
 
-    private ScrimState _state = ScrimState.Idle;
+    private volatile ScrimState _state = ScrimState.Idle;
 
     public ScrimState CurrentState => _state;
 
@@ -60,36 +60,30 @@ public sealed class ScrimManager : IScrimManager
         _minReadyPlayers = _config.Scrim.MinReadyPlayers;
     }
 
-    // Single point of state change: runs exit/entry side effects and persists recovery state.
     private async Task TransitionToAsync(ScrimState target)
     {
         var from = _state;
         if (from == target) return;
 
-        // Exit actions
         if (from == ScrimState.Practice)
         {
-            await _configLoader.LoadAndExecuteConfigAsync("live.cfg");
+            await _configLoader.LoadAndExecuteConfigAsync(_config.Scrim.LiveConfigPath);
         }
 
         _state = target;
         _logger.LogInformation("Scrim state transition: {From} -> {To}", from, target);
 
-        // Entry actions
         switch (target)
         {
             case ScrimState.Lobby:
                 await OnLobbyEntry();
-                break;
-            case ScrimState.Veto:
-                _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Map Veto started!"));
                 break;
             case ScrimState.Practice:
                 await _configLoader.LoadAndExecuteConfigAsync("practice.cfg");
                 _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Practice Mode enabled! God, noclip, and infinite ammo active."));
                 break;
             case ScrimState.CaptainSetup:
-                _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Ready players confirmed. Admins, please appoint captains (.scrim setcaptain team1/team2 <name>)."));
+                _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Ready players confirmed. Admins, use .scrim setcaptain <1|2> <SteamID64>."));
                 break;
             case ScrimState.MapVote:
                 OnMapVoteEntry();
@@ -97,17 +91,21 @@ public sealed class ScrimManager : IScrimManager
             case ScrimState.Picking:
                 StartPicking();
                 break;
+            case ScrimState.KnifeRound:
+                await OnKnifeRoundEntry();
+                break;
             case ScrimState.Live:
                 await OnLiveEntry();
                 break;
         }
 
-        _scheduler.Schedule(() => _ = SaveCurrentStateAsync());
+        await SaveCurrentStateAsync();
     }
 
     private async Task SaveCurrentStateAsync()
     {
-        var data = new ScrimRecoveryData(
+        ScrimRecoveryData? data = null;
+        await RunOnGameThreadAsync(() => data = new ScrimRecoveryData(
             CurrentState,
             [.. _team1],
             [.. _team2],
@@ -120,9 +118,8 @@ public sealed class ScrimManager : IScrimManager
             PickPool: [.. _pickPool],
             Team1Picking: _team1Picking,
             PickTurn: _pickTurn,
-            KnifeWinnerTeam: _knifeWinnerTeam
-        );
-        await _recovery.SaveScrimStateAsync(data);
+            KnifeWinnerTeam: _knifeWinnerTeam));
+        await _recovery.SaveScrimStateAsync(data!);
     }
 
     public async Task RecoverAsync()
@@ -135,37 +132,26 @@ public sealed class ScrimManager : IScrimManager
             return;
         }
 
-        // Restore in-memory state.
-        _readyPlayers.Clear();
-        foreach (var kvp in data.ReadyPlayers ?? []) _readyPlayers[kvp.Key] = kvp.Value;
+        if (!Enum.IsDefined(data.State))
+        {
+            _logger.LogError("Scrim recovery contains invalid state value {State}.", (int)data.State);
+            return;
+        }
 
-        _captains.Clear();
-        foreach (var kvp in data.Captains ?? []) _captains[kvp.Key] = kvp.Value;
-
-        _team1.Clear();
-        if (data.Team1 != null) _team1.AddRange(data.Team1);
-
-        _team2.Clear();
-        if (data.Team2 != null) _team2.AddRange(data.Team2);
-
-        _mapVotes.Clear();
-        foreach (var kvp in data.MapVotes ?? []) _mapVotes[kvp.Key] = kvp.Value;
-
-        _playerVotes.Clear();
-        foreach (var kvp in data.PlayerVotes ?? []) _playerVotes[kvp.Key] = kvp.Value;
-
-        _pickPool.Clear();
-        if (data.PickPool != null) _pickPool.AddRange(data.PickPool);
-
-        _selectedMap = data.SelectedMap;
-        _team1Picking = data.Team1Picking;
-        _pickTurn = data.PickTurn;
-        _knifeWinnerTeam = data.KnifeWinnerTeam;
-
-        // Set the state directly; entry side effects are intentionally not re-run on recovery.
-        _state = data.State;
+        await RunOnGameThreadAsync(() => RestoreState(data));
         _logger.LogInformation("Recovered scrim to state: {State}", data.State);
         _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] Scrim successfully recovered to state: {data.State}."));
+        await ApplyCurrentStateAsync();
+    }
+
+    public void HandleMatchEnd()
+    {
+        if (_state != ScrimState.Live) return;
+
+        _state = ScrimState.Idle;
+        _sideSelectionTimer?.Kill();
+        _sideSelectionTimer = null;
+        RunTransition(_recovery.ClearScrimStateAsync(), "clear completed scrim recovery state");
     }
 
     private async Task OnLobbyEntry()
@@ -175,7 +161,12 @@ public sealed class ScrimManager : IScrimManager
         _team1.Clear();
         _team2.Clear();
         _pickPool.Clear();
-        await _configLoader.LoadAndExecuteConfigAsync("config.cfg");
+        _mapVotes.Clear();
+        _playerVotes.Clear();
+        _selectedMap = null;
+        _knifeWinnerTeam = 0;
+        _sideSelectionTimer?.Kill();
+        _sideSelectionTimer = null;
         await _configLoader.LoadAndExecuteConfigAsync("warmup.cfg");
         _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Lobby started! Type .ready to prepare."));
     }
@@ -193,6 +184,8 @@ public sealed class ScrimManager : IScrimManager
     private void StartPicking()
     {
         _pickPool.Clear();
+        _team1.Clear();
+        _team2.Clear();
         _pickPool.AddRange(_readyPlayers.Where(p => p.Value && !_captains.ContainsValue(p.Key)).Select(p => p.Key));
 
         if (_captains.TryGetValue(1, out var c1)) _team1.Add(c1);
@@ -217,16 +210,33 @@ public sealed class ScrimManager : IScrimManager
         _scheduler.Schedule(() =>
         {
             var captain = Utilities.GetPlayerFromSteamId(captainSteamId);
-            captain?.PrintToChat(" [Scrim] It's YOUR turn to pick a player (.pick <name/index>).");
+            captain?.PrintToChat(" [Scrim] It's YOUR turn to pick a player (.pick <SteamID64>).");
 
             string pool = string.Join(", ", _pickPool.Select(id => Utilities.GetPlayerFromSteamId(id)?.PlayerName ?? id.ToString()));
             captain?.PrintToChat($" [Scrim] Available players: {pool}");
         });
     }
 
+    private async Task OnKnifeRoundEntry()
+    {
+        MovePlayersToTeams();
+        if (ScheduleSelectedMapChange()) return;
+
+        await _configLoader.LoadAndExecuteConfigAsync(_config.Scrim.KnifeConfigPath);
+        _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Knife round started!"));
+    }
+
     private async Task OnLiveEntry()
     {
-        // Move players to their respective teams.
+        MovePlayersToTeams();
+        if (ScheduleSelectedMapChange()) return;
+
+        await _configLoader.LoadAndExecuteConfigAsync(_config.Scrim.LiveConfigPath);
+        _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Match is live!"));
+    }
+
+    private void MovePlayersToTeams()
+    {
         _scheduler.Schedule(() =>
         {
             foreach (var steamId in _team1)
@@ -240,12 +250,18 @@ public sealed class ScrimManager : IScrimManager
                 player?.SwitchTeam(CsTeam.CounterTerrorist);
             }
         });
+    }
 
-        if (_config.Scrim.KnifeRoundEnabled)
+    private bool ScheduleSelectedMapChange()
+    {
+        if (string.IsNullOrWhiteSpace(_selectedMap) ||
+            string.Equals(Server.MapName, _selectedMap, StringComparison.OrdinalIgnoreCase))
         {
-            await _configLoader.LoadAndExecuteConfigAsync(_config.Scrim.KnifeConfigPath);
-            _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Knife round started!"));
+            return false;
         }
+
+        _scheduler.Schedule(() => Server.ExecuteCommand($"changelevel {_selectedMap}"));
+        return true;
     }
 
     public async Task StartScrimAsync()
@@ -256,6 +272,8 @@ public sealed class ScrimManager : IScrimManager
 
     public async Task StopScrimAsync()
     {
+        _sideSelectionTimer?.Kill();
+        _sideSelectionTimer = null;
         await TransitionToAsync(ScrimState.Idle);
         await _recovery.ClearScrimStateAsync();
         Server.PrintToChatAll(" [Scrim] Scrim stopped by admin.");
@@ -275,6 +293,14 @@ public sealed class ScrimManager : IScrimManager
             return;
         }
 
+        if (ready && !_readyPlayers.GetValueOrDefault(steamId) &&
+            _readyPlayers.Values.Count(value => value) >= _playersPerTeam * 2)
+        {
+            _scheduler.Schedule(() => Utilities.GetPlayerFromSteamId(steamId)?
+                .PrintToChat(" [Scrim] The player slots are full."));
+            return;
+        }
+
         _readyPlayers[steamId] = ready;
         var readyCount = _readyPlayers.Values.Count(v => v);
         _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] Player {(ready ? "ready" : "unready")}. ({readyCount}/{_minReadyPlayers})"));
@@ -283,12 +309,17 @@ public sealed class ScrimManager : IScrimManager
         {
             await TransitionToAsync(ScrimState.CaptainSetup);
         }
+        else
+        {
+            await SaveCurrentStateAsync();
+        }
     }
 
     public async Task SetCaptainAsync(int team, ulong steamId)
     {
         if (_state != ScrimState.CaptainSetup) return;
         if (team != 1 && team != 2) return;
+        if (!_readyPlayers.GetValueOrDefault(steamId) || _captains.Values.Contains(steamId)) return;
 
         _captains[team] = steamId;
         _scheduler.Schedule(() =>
@@ -301,13 +332,18 @@ public sealed class ScrimManager : IScrimManager
         {
             await TransitionToAsync(ScrimState.MapVote);
         }
+        else
+        {
+            await SaveCurrentStateAsync();
+        }
     }
 
     public async Task VoteMapAsync(ulong steamId, string mapName)
     {
         if (_state != ScrimState.MapVote) return;
+        if (!_readyPlayers.GetValueOrDefault(steamId)) return;
 
-        var normalizedMap = mapName.ToLower();
+        var normalizedMap = mapName.ToLowerInvariant();
         if (!_config.Scrim.MapPool.Contains(normalizedMap))
         {
             _scheduler.Schedule(() =>
@@ -333,6 +369,10 @@ public sealed class ScrimManager : IScrimManager
             _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] Map selected: {_selectedMap}"));
             await TransitionToAsync(ScrimState.Picking);
         }
+        else
+        {
+            await SaveCurrentStateAsync();
+        }
     }
 
     public async Task PickPlayerAsync(ulong steamId, ulong targetSteamId)
@@ -343,18 +383,19 @@ public sealed class ScrimManager : IScrimManager
         if (!_pickPool.Contains(targetSteamId)) return;
 
         _pickPool.Remove(targetSteamId);
-        if (_team1Picking) _team1.Add(targetSteamId);
+        var pickedByTeam1 = _team1Picking;
+        if (pickedByTeam1) _team1.Add(targetSteamId);
         else _team2.Add(targetSteamId);
 
         _scheduler.Schedule(() =>
         {
             var player = Utilities.GetPlayerFromSteamId(targetSteamId);
-            Server.PrintToChatAll($" [Scrim] Captain {(_team1Picking ? "1" : "2")} picked {player?.PlayerName}.");
+            Server.PrintToChatAll($" [Scrim] Captain {(pickedByTeam1 ? "1" : "2")} picked {player?.PlayerName}.");
         });
 
         if (_pickPool.Count == 0)
         {
-            await TransitionToAsync(ScrimState.KnifeRound);
+            await TransitionToAsync(_config.Scrim.KnifeRoundEnabled ? ScrimState.KnifeRound : ScrimState.Live);
             return;
         }
 
@@ -365,24 +406,27 @@ public sealed class ScrimManager : IScrimManager
         }
         if (_pickTurn == 4) _pickTurn = 0;
 
+        await SaveCurrentStateAsync();
         NotifyPickTurn();
     }
 
     public Task HandleKnifeRoundEnd(int winnerTeam)
     {
         if (_state != ScrimState.KnifeRound) return Task.CompletedTask;
+        if (winnerTeam is not (2 or 3)) return Task.CompletedTask;
 
         _knifeWinnerTeam = winnerTeam;
+        RunTransition(SaveCurrentStateAsync(), "save knife-round result");
         var winnerName = winnerTeam == 2 ? "Terrorists" : "Counter-Terrorists";
 
-        _scheduler.Schedule(async () =>
+        _scheduler.Schedule(() =>
         {
             Server.PrintToChatAll($" [Scrim] {winnerName} won the knife round!");
 
             var winningCaptainId = winnerTeam == 2 ? _team1.FirstOrDefault() : _team2.FirstOrDefault();
             if (winningCaptainId == 0)
             {
-                await TransitionToAsync(ScrimState.Live);
+                RunTransition(TransitionToAsync(ScrimState.Live), "start live match after knife round");
                 return;
             }
 
@@ -393,10 +437,10 @@ public sealed class ScrimManager : IScrimManager
             _sideSelectionTimer = new CounterStrikeSharp.API.Modules.Timers.Timer(30.0f, () =>
             {
                 _logger.LogInformation("Side selection timed out. Auto-assigning sides.");
-                _scheduler.Schedule(async () =>
+                _scheduler.Schedule(() =>
                 {
                     Server.PrintToChatAll(" [Scrim] Side selection timed out. Proceeding with current sides.");
-                    await TransitionToAsync(ScrimState.Live);
+                    RunTransition(TransitionToAsync(ScrimState.Live), "start live match after side-selection timeout");
                 });
             });
         });
@@ -411,11 +455,12 @@ public sealed class ScrimManager : IScrimManager
         var winningCaptainId = _knifeWinnerTeam == 2 ? _team1.FirstOrDefault() : _team2.FirstOrDefault();
         if (steamId != winningCaptainId) return Task.CompletedTask;
 
-        _scheduler.Schedule(async () =>
+        _scheduler.Schedule(() =>
         {
             _sideSelectionTimer?.Kill();
 
-            bool stay = (side.ToLower() == "t" && _knifeWinnerTeam == 2) || (side.ToLower() == "ct" && _knifeWinnerTeam == 3);
+            bool stay = (string.Equals(side, "t", StringComparison.OrdinalIgnoreCase) && _knifeWinnerTeam == 2) ||
+                (string.Equals(side, "ct", StringComparison.OrdinalIgnoreCase) && _knifeWinnerTeam == 3);
 
             if (!stay)
             {
@@ -434,8 +479,8 @@ public sealed class ScrimManager : IScrimManager
                 Server.ExecuteCommand("mp_swapteams");
             }
 
-            Server.PrintToChatAll($" [Scrim] Side selected: {side.ToUpper()}. Match starting...");
-            await TransitionToAsync(ScrimState.Live);
+            Server.PrintToChatAll($" [Scrim] Side selected: {side.ToUpperInvariant()}. Match starting...");
+            RunTransition(TransitionToAsync(ScrimState.Live), "start live match after side selection");
         });
 
         return Task.CompletedTask;
@@ -449,12 +494,6 @@ public sealed class ScrimManager : IScrimManager
             await TransitionToAsync(ScrimState.Idle);
     }
 
-    public async Task StartVetoAsync()
-    {
-        if (_state == ScrimState.Lobby)
-            await TransitionToAsync(ScrimState.Veto);
-    }
-
     public void HandleDisconnect(ulong steamId)
     {
         if (_readyPlayers.TryGetValue(steamId, out var ready) && ready)
@@ -463,25 +502,107 @@ public sealed class ScrimManager : IScrimManager
             if (_state == ScrimState.Lobby)
             {
                 _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] Player disconnected. ({_readyPlayers.Values.Count(v => v)}/{_minReadyPlayers})"));
+                RunTransition(SaveCurrentStateAsync(), "save disconnected player state");
             }
             else if (_state != ScrimState.Idle && _state != ScrimState.Live)
             {
                 _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Critical player disconnected. Scrim aborted."));
-                _ = TransitionToAsync(ScrimState.Idle);
+                RunTransition(TransitionToAsync(ScrimState.Idle), "abort scrim after disconnect");
             }
         }
     }
 
     public void SetOverride(string key, string value)
     {
-        switch (key.ToLower())
+        switch (key.ToLowerInvariant())
         {
             case "playersperteam":
-                if (int.TryParse(value, out var p)) _playersPerTeam = p;
+                if (int.TryParse(value, out var p) && p is >= 1 and <= 32 && _minReadyPlayers <= p * 2) _playersPerTeam = p;
                 break;
             case "minready":
-                if (int.TryParse(value, out var m)) _minReadyPlayers = m;
+                if (int.TryParse(value, out var m) && m is >= 2 and <= 64 && m <= _playersPerTeam * 2) _minReadyPlayers = m;
                 break;
         }
+        RunTransition(SaveCurrentStateAsync(), "save scrim override");
     }
+
+    public void HandleMapStart(string mapName)
+    {
+        if (_state is ScrimState.KnifeRound or ScrimState.Live)
+        {
+            RunTransition(ApplyCurrentStateAsync(), $"apply {_state} configuration on {mapName}");
+        }
+    }
+
+    private async Task ApplyCurrentStateAsync()
+    {
+        if (_state is not (ScrimState.KnifeRound or ScrimState.Live)) return;
+
+        MovePlayersToTeams();
+        if (_state == ScrimState.KnifeRound)
+        {
+            await _configLoader.LoadAndExecuteConfigAsync(_config.Scrim.KnifeConfigPath);
+        }
+        else if (_state == ScrimState.Live)
+        {
+            await _configLoader.LoadAndExecuteConfigAsync(_config.Scrim.LiveConfigPath);
+        }
+    }
+
+    private void RunTransition(Task task, string operation) => _ = ObserveTransitionAsync(task, operation);
+
+    private async Task ObserveTransitionAsync(Task task, string operation)
+    {
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to {Operation}", operation);
+        }
+    }
+
+    private void RestoreState(ScrimRecoveryData data)
+    {
+        _readyPlayers.Clear();
+        foreach (var kvp in data.ReadyPlayers ?? []) _readyPlayers[kvp.Key] = kvp.Value;
+        _captains.Clear();
+        foreach (var kvp in data.Captains ?? []) _captains[kvp.Key] = kvp.Value;
+        _team1.Clear();
+        if (data.Team1 != null) _team1.AddRange(data.Team1);
+        _team2.Clear();
+        if (data.Team2 != null) _team2.AddRange(data.Team2);
+        _mapVotes.Clear();
+        foreach (var kvp in data.MapVotes ?? []) _mapVotes[kvp.Key] = kvp.Value;
+        _playerVotes.Clear();
+        foreach (var kvp in data.PlayerVotes ?? []) _playerVotes[kvp.Key] = kvp.Value;
+        _pickPool.Clear();
+        if (data.PickPool != null) _pickPool.AddRange(data.PickPool);
+        _selectedMap = data.SelectedMap;
+        _team1Picking = data.Team1Picking;
+        _pickTurn = data.PickTurn;
+        _knifeWinnerTeam = data.KnifeWinnerTeam;
+        _state = data.State;
+    }
+
+    private Task RunOnGameThreadAsync(Action action)
+    {
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _scheduler.Schedule(() =>
+        {
+            try
+            {
+                action();
+                completion.TrySetResult();
+            }
+            catch (Exception ex)
+            {
+                completion.TrySetException(ex);
+            }
+        });
+        return completion.Task;
+    }
+
+    public void Dispose() => _sideSelectionTimer?.Kill();
 }

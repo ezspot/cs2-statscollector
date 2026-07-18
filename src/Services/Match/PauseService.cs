@@ -1,9 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
-using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using statsCollector.Config;
@@ -14,7 +12,7 @@ namespace statsCollector.Services;
 public sealed class PauseService(
     ILogger<PauseService> logger,
     IOptions<PluginConfig> config,
-    IGameScheduler scheduler) : IPauseService
+    IGameScheduler scheduler) : IPauseService, IDisposable
 {
     private readonly ILogger<PauseService> _logger = logger;
     private readonly PluginConfig _config = config.Value;
@@ -27,49 +25,46 @@ public sealed class PauseService(
     private int _requestingTeam;
     private CounterStrikeSharp.API.Modules.Timers.Timer? _pauseTimer;
 
-    public Task RequestPauseAsync(CCSPlayerController? player, PauseType type)
+    public void RequestPause(CCSPlayerController? player, PauseType type)
     {
-        if (_isPaused) return Task.CompletedTask;
+        if (_isPaused || _pauseRequested) return;
 
         if (player != null)
         {
             var team = player.TeamNum;
-            if (team is < 2 or > 3) return Task.CompletedTask;
+            if (team is < 2 or > 3) return;
 
             if (type == PauseType.Tactical)
             {
                 if (_tacticalPausesUsed[team] >= (_config.Scrim.MaxTacticalPauses > 0 ? _config.Scrim.MaxTacticalPauses : 4))
                 {
                     _scheduler.Schedule(() => player.PrintToChat(" [Scrim] Your team has no tactical pauses left."));
-                    return Task.CompletedTask;
+                    return;
                 }
             }
-            
+
             _requestingTeam = team;
         }
 
         _pauseRequested = true;
         _currentPauseType = type;
-        
-        var typeStr = type == PauseType.Technical ? "Technical" : "Tactical";
-        _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] {typeStr} pause requested by Team {(_requestingTeam == 2 ? "T" : "CT")}. It will take effect at the end of the round."));
-        
-        return Task.CompletedTask;
+
+        var typeStr = type.ToString();
+        var requester = player is null ? "server console" : $"Team {(_requestingTeam == 2 ? "T" : "CT")}";
+        _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] {typeStr} pause requested by {requester}. It will take effect at the end of the round."));
     }
 
-    public Task RequestUnpauseAsync(CCSPlayerController? player)
+    public void RequestUnpause(CCSPlayerController? player)
     {
-        if (!_isPaused) return Task.CompletedTask;
+        if (!_isPaused) return;
 
-        // Admin can always unpause
         if (player == null || AdminUtils.HasPermission(player, "@css/root", "@css/admin"))
         {
             Unpause();
-            return Task.CompletedTask;
+            return;
         }
 
-        _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] Player {player.PlayerName} requested unpause. Waiting for admin or both teams."));
-        return Task.CompletedTask;
+        player.PrintToChat(" [Scrim] An admin must unpause the match.");
     }
 
     public void OnRoundEnd()
@@ -83,31 +78,21 @@ public sealed class PauseService(
 
     private void Pause()
     {
-        _scheduler.Schedule(() => 
+        _scheduler.Schedule(() =>
         {
-            var gameRules = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules").FirstOrDefault()?.GameRules;
-            if (gameRules == null)
-            {
-                _logger.LogError("Failed to find GameRules for pausing.");
-                return;
-            }
-
             _isPaused = true;
-            
-            // Use GameRules for a cleaner pause if available, otherwise fallback to command
             Server.ExecuteCommand("mp_pause_match");
-            
+
             _logger.LogInformation("Match paused. Type: {Type}", _currentPauseType);
-            
+
             if (_currentPauseType == PauseType.Tactical)
             {
                 _tacticalPausesUsed[_requestingTeam]++;
-                
-                // Tactical pauses usually have a duration
+
                 var duration = _config.Scrim.TacticalPauseDuration > 0 ? _config.Scrim.TacticalPauseDuration : 30;
-                _pauseTimer = new CounterStrikeSharp.API.Modules.Timers.Timer(duration, () => 
+                _pauseTimer = new CounterStrikeSharp.API.Modules.Timers.Timer(duration, () =>
                 {
-                    _scheduler.Schedule(() => 
+                    _scheduler.Schedule(() =>
                     {
                         Server.PrintToChatAll(" [Scrim] Tactical pause finished. Unpausing...");
                         Unpause();
@@ -119,13 +104,31 @@ public sealed class PauseService(
 
     private void Unpause()
     {
-        _scheduler.Schedule(() => 
+        _scheduler.Schedule(() =>
         {
             _pauseTimer?.Kill();
+            _pauseTimer = null;
             _isPaused = false;
+            _pauseRequested = false;
             _currentPauseType = PauseType.None;
+            _requestingTeam = 0;
             Server.ExecuteCommand("mp_unpause_match");
             _logger.LogInformation("Match unpaused.");
         });
     }
+
+    public void Reset()
+    {
+        _pauseTimer?.Kill();
+        _pauseTimer = null;
+        if (_isPaused) _scheduler.Schedule(() => Server.ExecuteCommand("mp_unpause_match"));
+        _isPaused = false;
+        _pauseRequested = false;
+        _currentPauseType = PauseType.None;
+        _requestingTeam = 0;
+        _tacticalPausesUsed[2] = 0;
+        _tacticalPausesUsed[3] = 0;
+    }
+
+    public void Dispose() => _pauseTimer?.Kill();
 }

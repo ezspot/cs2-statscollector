@@ -1,7 +1,5 @@
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Diagnostics.Metrics;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
 using Microsoft.Extensions.Logging;
@@ -10,12 +8,7 @@ using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public interface IBombEventProcessor : IEventProcessor
-{
-    void ResetBombState();
-}
-
-public sealed class BombEventProcessor : IBombEventProcessor
+public sealed class BombEventProcessor : IEventProcessor
 {
     private readonly IPlayerSessionService _playerSessions;
     private readonly ICombatEventProcessor _combatProcessor;
@@ -24,6 +17,8 @@ public sealed class BombEventProcessor : IBombEventProcessor
 
     private DateTime? _bombPlantTime;
     private DateTime? _bombDefuseStartTime;
+    private bool _defuseHasKit;
+    private bool _defuseStartedAsClutch;
 
     public BombEventProcessor(
         IPlayerSessionService playerSessions,
@@ -48,7 +43,6 @@ public sealed class BombEventProcessor : IBombEventProcessor
         dispatcher.Subscribe<EventBombPickup>((e, i) => { HandleBombPickup(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventBombBegindefuse>((e, i) => { HandleBombBegindefuse(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventBombAbortdefuse>((e, i) => { HandleBombAbortdefuse(e); return HookResult.Continue; });
-        dispatcher.Subscribe<EventDefuserDropped>((e, i) => { HandleDefuserDropped(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventDefuserPickup>((e, i) => { HandleDefuserPickup(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventPlayerDeath>((e, i) => { HandlePlayerDeath(e); return HookResult.Continue; });
     }
@@ -101,8 +95,8 @@ public sealed class BombEventProcessor : IBombEventProcessor
             var playerState = PlayerControllerState.From(player);
             if (playerState.IsValid && !playerState.IsBot)
             {
-                var plantDuration = _bombPlantTime.HasValue 
-                    ? (_timeProvider.GetUtcNow().UtcDateTime - _bombPlantTime.Value).TotalSeconds 
+                var plantDuration = _bombPlantTime.HasValue
+                    ? (_timeProvider.GetUtcNow().UtcDateTime - _bombPlantTime.Value).TotalSeconds
                     : 0;
 
                 _playerSessions.MutatePlayer(playerState.SteamId, stats =>
@@ -126,21 +120,20 @@ public sealed class BombEventProcessor : IBombEventProcessor
             var playerState = PlayerControllerState.From(player);
             if (playerState.IsValid && !playerState.IsBot)
             {
-                var defuseDuration = _bombDefuseStartTime.HasValue 
-                    ? (_timeProvider.GetUtcNow().UtcDateTime - _bombDefuseStartTime.Value).TotalSeconds 
+                var defuseDuration = _bombDefuseStartTime.HasValue
+                    ? (_timeProvider.GetUtcNow().UtcDateTime - _bombDefuseStartTime.Value).TotalSeconds
                     : 0;
-
-                var (ctAlive, tAlive) = _combatProcessor.GetAliveCounts();
-                var isClutchDefuse = ctAlive == 1 && tAlive >= 1;
 
                 _playerSessions.MutatePlayer(playerState.SteamId, stats =>
                 {
                     stats.Bomb.BombDefuses++;
                     stats.Bomb.TotalDefuseTime += (int)(defuseDuration * 1000);
-                    if (isClutchDefuse) stats.Bomb.ClutchDefuses++;
+                    if (_defuseHasKit) stats.Bomb.BombDefuseWithKit++;
+                    else stats.Bomb.BombDefuseWithoutKit++;
+                    if (_defuseStartedAsClutch) stats.Bomb.ClutchDefuses++;
                 });
 
-                _logger.LogInformation("Bomb defused by {SteamId} (Clutch: {Clutch})", playerState.SteamId, isClutchDefuse);
+                _logger.LogInformation("Bomb defused by {SteamId} (Clutch: {Clutch})", playerState.SteamId, _defuseStartedAsClutch);
             }
         }
         catch (Exception ex) { _logger.LogError(ex, "Error handling bomb defused event"); }
@@ -159,7 +152,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         {
             var player = @event.GetPlayerOrDefault("userid");
             var playerState = PlayerControllerState.From(player);
-            
+
             if (playerState.IsValid && !playerState.IsBot)
             {
                 _playerSessions.MutatePlayer(playerState.SteamId, stats =>
@@ -177,7 +170,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
         {
             var player = @event.GetPlayerOrDefault("userid");
             var playerState = PlayerControllerState.From(player);
-            
+
             if (playerState.IsValid && !playerState.IsBot)
             {
                 _playerSessions.MutatePlayer(playerState.SteamId, stats =>
@@ -195,16 +188,16 @@ public sealed class BombEventProcessor : IBombEventProcessor
         {
             var player = @event.GetPlayerOrDefault("userid");
             var playerState = PlayerControllerState.From(player);
-            
+
             if (playerState.IsValid && !playerState.IsBot)
             {
                 _bombDefuseStartTime = _timeProvider.GetUtcNow().UtcDateTime;
-                var hasKit = @event.GetBoolValue("haskit", false);
+                _defuseHasKit = @event.GetBoolValue("haskit", false);
+                var (ctAlive, tAlive) = _combatProcessor.GetAliveCounts();
+                _defuseStartedAsClutch = ctAlive == 1 && tAlive >= 1;
                 _playerSessions.MutatePlayer(playerState.SteamId, stats =>
                 {
                     stats.Bomb.BombDefuseAttempts++;
-                    if (hasKit) stats.Bomb.BombDefuseWithKit++;
-                    else stats.Bomb.BombDefuseWithoutKit++;
                 });
             }
         }
@@ -217,10 +210,12 @@ public sealed class BombEventProcessor : IBombEventProcessor
         {
             var player = @event.GetPlayerOrDefault("userid");
             var playerState = PlayerControllerState.From(player);
-            
+
             if (playerState.IsValid && !playerState.IsBot)
             {
                 _bombDefuseStartTime = null;
+                _defuseHasKit = false;
+                _defuseStartedAsClutch = false;
                 _playerSessions.MutatePlayer(playerState.SteamId, stats =>
                 {
                     stats.Bomb.BombDefuseAborts++;
@@ -230,31 +225,13 @@ public sealed class BombEventProcessor : IBombEventProcessor
         catch (Exception ex) { _logger.LogError(ex, "Error handling bomb abortdefuse event"); }
     }
 
-    private void HandleDefuserDropped(EventDefuserDropped @event)
-    {
-        try
-        {
-            var player = @event.GetPlayerOrDefault("userid");
-            var playerState = PlayerControllerState.From(player);
-            
-            if (playerState.IsValid && !playerState.IsBot)
-            {
-                _playerSessions.MutatePlayer(playerState.SteamId, stats =>
-                {
-                    stats.Bomb.DefuserDrops++;
-                });
-            }
-        }
-        catch (Exception ex) { _logger.LogError(ex, "Error handling defuser dropped event"); }
-    }
-
     private void HandleDefuserPickup(EventDefuserPickup @event)
     {
         try
         {
             var player = @event.GetPlayerOrDefault("userid");
             var playerState = PlayerControllerState.From(player);
-            
+
             if (playerState.IsValid && !playerState.IsBot)
             {
                 _playerSessions.MutatePlayer(playerState.SteamId, stats =>
@@ -275,7 +252,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
 
             var victim = @event.GetPlayerOrDefault("userid");
             var victimState = PlayerControllerState.From(victim);
-            
+
             if (victimState.IsValid && !victimState.IsBot)
             {
                 _playerSessions.MutatePlayer(victimState.SteamId, stats =>
@@ -286,7 +263,7 @@ public sealed class BombEventProcessor : IBombEventProcessor
 
             var attacker = @event.GetPlayerOrDefault("attacker");
             var attackerState = PlayerControllerState.From(attacker);
-            
+
             if (attackerState.IsValid && !attackerState.IsBot && attackerState.SteamId != victimState.SteamId)
             {
                 _playerSessions.MutatePlayer(attackerState.SteamId, stats =>
@@ -308,5 +285,11 @@ public sealed class BombEventProcessor : IBombEventProcessor
         ResetBombState();
     }
 
-    public void ResetBombState() { _bombPlantTime = null; _bombDefuseStartTime = null; }
+    private void ResetBombState()
+    {
+        _bombPlantTime = null;
+        _bombDefuseStartTime = null;
+        _defuseHasKit = false;
+        _defuseStartedAsClutch = false;
+    }
 }

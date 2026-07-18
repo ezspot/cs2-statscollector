@@ -6,6 +6,7 @@ namespace statsCollector.Domain;
 
 public sealed record PlayerSnapshot
 (
+    long Version,
     string? MatchUuid,
     int RoundNumber,
     DateTime RoundStartUtc,
@@ -27,10 +28,10 @@ public sealed record PlayerSnapshot
     int Score,
     int RoundsPlayed,
     int RoundsWon,
-    
+
     int CtRounds,
     int TRounds,
-    
+
     int BombPlants,
     int BombDefuses,
     int BombPlantAttempts,
@@ -62,11 +63,11 @@ public sealed record PlayerSnapshot
     int UtilityDamageTaken,
     int BombKills,
     int BombDeaths,
-    
+
     int Jumps,
     int TotalSpawns,
     int PlaytimeSeconds,
-    
+
     int MoneySpent,
     int EquipmentValue,
     int ItemsPurchased,
@@ -75,7 +76,7 @@ public sealed record PlayerSnapshot
     int RoundEndMoney,
     int EquipmentValueStart,
     int EquipmentValueEnd,
-    
+
     int EnemiesFlashed,
     int TeammatesFlashed,
     int EffectiveFlashes,
@@ -108,13 +109,13 @@ public sealed record PlayerSnapshot
     int MvpsEliminations,
     int MvpsBomb,
     int MvpsHostage,
-    
+
     int HeadshotsHit,
     int ChestHits,
     int StomachHits,
     int ArmHits,
     int LegHits,
-    
+
     int CurrentRoundKills,
     int CurrentRoundDeaths,
     int CurrentRoundShotsFired,
@@ -128,10 +129,7 @@ public sealed record PlayerSnapshot
     int Pings,
     int Footsteps,
 
-    decimal WeightedKills,
     decimal RoundSwing,
-    int TeamFlashDuration,
-    int FlashAssistDuration,
 
     IReadOnlyDictionary<string, int> WeaponKills,
     IReadOnlyDictionary<string, int> WeaponShots,

@@ -1,4 +1,3 @@
-using System;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
 using Microsoft.Extensions.Logging;
@@ -9,11 +8,7 @@ using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public interface ICommunicationEventProcessor : IEventProcessor
-{
-}
-
-public sealed class CommunicationEventProcessor : ICommunicationEventProcessor
+public sealed class CommunicationEventProcessor : IEventProcessor
 {
     private readonly IPlayerSessionService _playerSessions;
     private readonly ILogger<CommunicationEventProcessor> _logger;

@@ -1,7 +1,4 @@
 using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Diagnostics.Metrics;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using Microsoft.Extensions.Logging;
@@ -10,30 +7,8 @@ using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public interface IEconomyEventProcessor : IEventProcessor
+public sealed class EconomyEventProcessor : IEventProcessor
 {
-}
-
-public sealed class EconomyEventProcessor : IEconomyEventProcessor
-{
-    private static readonly Dictionary<string, int> WeaponCostMap = new(StringComparer.OrdinalIgnoreCase)
-    {
-        // Pistols
-        ["glock"] = 200, ["usp_silencer"] = 200, ["hkp2000"] = 200, ["p250"] = 300, ["fiveseven"] = 500, ["tec9"] = 500, ["cz75a"] = 500, ["deagle"] = 700, ["revolver"] = 700,
-        // SMGs
-        ["mac10"] = 1250, ["mp9"] = 1250, ["mp7"] = 1500, ["mp5sd"] = 1500, ["ump45"] = 1200, ["p90"] = 2350, ["bizon"] = 1400,
-        // Rifles
-        ["famas"] = 2250, ["galilar"] = 2250, ["m4a4"] = 2700, ["m4a1_silencer"] = 2700, ["ak47"] = 2700, ["aug"] = 3300, ["sg556"] = 3300,
-        // Sniper Rifles
-        ["ssg08"] = 1700, ["awp"] = 4750, ["scar20"] = 5000, ["g3sg1"] = 5000,
-        // Heavy
-        ["nova"] = 1050, ["xm1014"] = 2000, ["sawedoff"] = 1300, ["mag7"] = 1300, ["m249"] = 5200, ["negev"] = 1700,
-        // Equipment
-        ["vest"] = 650, ["vesthelm"] = 1000, ["defuser"] = 400, ["taser"] = 200,
-        // Grenades
-        ["flashbang"] = 200, ["hegrenade"] = 300, ["smokegrenade"] = 300, ["molotov"] = 400, ["incgrenade"] = 400, ["decoy"] = 50
-    };
-
     private readonly IPlayerSessionService _playerSessions;
     private readonly ILogger<EconomyEventProcessor> _logger;
 
@@ -49,7 +24,6 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
     {
         dispatcher.Subscribe<EventItemPurchase>((e, i) => { HandleItemPurchase(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventItemPickup>((e, i) => { HandleItemPickup(e); return HookResult.Continue; });
-        dispatcher.Subscribe<EventItemEquip>((e, i) => { HandleItemEquip(e); return HookResult.Continue; });
     }
 
     private void HandleItemPurchase(EventItemPurchase @event)
@@ -64,19 +38,12 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
             if (!playerState.IsValid || playerState.IsBot) return;
 
             var weapon = @event.GetStringValue("weapon", string.Empty) ?? string.Empty;
-            var cost = GetItemValue(weapon);
-
             activity?.SetTag("player.steamid", playerState.SteamId);
             activity?.SetTag("weapon", weapon);
-            activity?.SetTag("cost", cost);
 
-            _playerSessions.MutatePlayer(playerState.SteamId, stats =>
-            {
-                stats.Economy.ItemsPurchased++;
-                stats.Economy.MoneySpent += cost;
-            });
+            _playerSessions.MutatePlayer(playerState.SteamId, stats => stats.Economy.ItemsPurchased++);
 
-            _logger.LogTrace("Player {SteamId} purchased {Weapon} for ${Cost}", playerState.SteamId, weapon, cost);
+            _logger.LogTrace("Player {SteamId} purchased {Weapon}", playerState.SteamId, weapon);
         }
         catch (Exception ex) { _logger.LogError(ex, "Error processing item purchase event"); }
     }
@@ -87,9 +54,9 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
         {
             var player = @event.GetPlayerOrDefault("userid");
             var playerState = PlayerControllerState.From(player);
-            
+
             if (!playerState.IsValid || playerState.IsBot) return;
-            
+
             var item = @event.GetStringValue("item", string.Empty);
             _playerSessions.MutatePlayer(playerState.SteamId, stats =>
             {
@@ -100,28 +67,4 @@ public sealed class EconomyEventProcessor : IEconomyEventProcessor
         catch (Exception ex) { _logger.LogError(ex, "Error processing item pickup event"); }
     }
 
-    private void HandleItemEquip(EventItemEquip @event)
-    {
-        try
-        {
-            var player = @event.GetPlayerOrDefault("userid");
-            var playerState = PlayerControllerState.From(player);
-            
-            if (!playerState.IsValid || playerState.IsBot) return;
-            
-            var item = @event.GetStringValue("item", string.Empty) ?? string.Empty;
-            var hasHelmet = @event.GetBoolValue("hashelmet", false);
-            var hasDefuser = @event.GetBoolValue("hasdefuser", false);
-            _playerSessions.MutatePlayer(playerState.SteamId, stats =>
-            {
-                var value = GetItemValue(item);
-                if (hasHelmet) value += 350;
-                if (hasDefuser) value += 400;
-                stats.Economy.EquipmentValue = value;
-            });
-        }
-        catch (Exception ex) { _logger.LogError(ex, "Error processing item equip event"); }
-    }
-
-    private int GetItemValue(string item) => WeaponCostMap.TryGetValue(item, out var value) ? value : 0;
 }

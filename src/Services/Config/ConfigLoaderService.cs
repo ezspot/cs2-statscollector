@@ -17,23 +17,28 @@ public class ConfigLoaderService : IConfigLoaderService
     private readonly PluginConfig _config;
     private readonly IGameScheduler _scheduler;
     private readonly HashSet<ulong> _whitelistedSteamIds = new();
-    private readonly string _gameDir;
+    private readonly string _configDirectory;
 
     public ConfigLoaderService(
-        ILogger<ConfigLoaderService> logger, 
+        ILogger<ConfigLoaderService> logger,
         IOptions<PluginConfig> config,
         IGameScheduler scheduler)
     {
         _logger = logger;
         _config = config.Value;
         _scheduler = scheduler;
-        _gameDir = Server.GameDirectory;
+        _whitelistedSteamIds.UnionWith(_config.Scrim.WhitelistedSteamIds);
+        _configDirectory = Path.GetFullPath(Path.Combine(Server.GameDirectory, "csgo", _config.Scrim.ScrimConfigPath));
     }
 
     public async Task LoadAndExecuteConfigAsync(string fileName)
     {
-        var configPath = Path.Combine(_gameDir, "csgo", _config.Scrim.ScrimConfigPath, fileName);
-        
+        var configPath = Path.GetFullPath(Path.Combine(_configDirectory, fileName));
+        if (!configPath.StartsWith(_configDirectory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Scrim config path resolves outside the configured directory.");
+        }
+
         if (!File.Exists(configPath))
         {
             _logger.LogWarning("Config file not found: {Path}", configPath);
@@ -52,7 +57,7 @@ public class ConfigLoaderService : IConfigLoaderService
             foreach (var line in lines)
             {
                 var trimmedLine = line.Trim();
-                if (string.IsNullOrWhiteSpace(trimmedLine) || trimmedLine.StartsWith("//") || trimmedLine.StartsWith("#"))
+                if (string.IsNullOrWhiteSpace(trimmedLine) || trimmedLine.StartsWith("//") || trimmedLine.StartsWith('#'))
                     continue;
 
                 Server.ExecuteCommand(trimmedLine);

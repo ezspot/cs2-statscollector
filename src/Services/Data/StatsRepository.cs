@@ -4,8 +4,6 @@ using System.Data;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Diagnostics;
-using System.Diagnostics.Metrics;
 using Dapper;
 using Microsoft.Extensions.Logging;
 using MySqlConnector;
@@ -24,7 +22,7 @@ public interface IStatsRepository
     Task UpsertMatchSummariesAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken);
     Task UpsertMatchWeaponStatsAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken);
     Task UpsertPlayerAnalyticsAsync(IEnumerable<PlayerAnalyticsSnapshot> snapshots, CancellationToken cancellationToken);
-    
+
     // Match Lifecycle
     Task StartMatchAsync(string mapName, string? matchUuid, string? seriesUuid, CancellationToken ct);
     Task EndMatchAsync(string matchUuid, CancellationToken ct);
@@ -61,7 +59,7 @@ public sealed class StatsRepository : IStatsRepository
         var snapshotList = snapshots.ToList();
         if (snapshotList.Count == 0) return;
 
-        await _resiliencePipeline.ExecuteAsync(async ct => 
+        await _resiliencePipeline.ExecuteAsync(async ct =>
         {
             using var activity = Instrumentation.ActivitySource.StartActivity("UpsertPlayersAsync");
 
@@ -96,12 +94,12 @@ public sealed class StatsRepository : IStatsRepository
         var snapshotList = snapshots.Where(s => !string.IsNullOrEmpty(s.MatchUuid)).ToList();
         if (snapshotList.Count == 0) return;
 
-        await _resiliencePipeline.ExecuteAsync(async ct => 
+        await _resiliencePipeline.ExecuteAsync(async ct =>
         {
             using var activity = Instrumentation.ActivitySource.StartActivity("UpsertMatchSummariesAsync");
 
             await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-            
+
             var dataTable = new DataTable();
             dataTable.Columns.Add("match_uuid", typeof(string)); // Using UUID for intermediate step
             dataTable.Columns.Add("steam_id", typeof(ulong));
@@ -127,8 +125,8 @@ public sealed class StatsRepository : IStatsRepository
             foreach (var s in snapshotList)
             {
                 dataTable.Rows.Add(
-                    s.MatchUuid, s.SteamId, s.Kills, s.Deaths, s.Assists, s.Headshots, 
-                    s.DamageDealt, s.Mvps, s.Score, s.HLTVRating, 
+                    s.MatchUuid, s.SteamId, s.Kills, s.Deaths, s.Assists, s.Headshots,
+                    s.DamageDealt, s.Mvps, s.Score, s.HLTVRating,
                     s.AverageDamagePerRound, s.KASTPercentage,
                     s.EntryKills, s.EntryDeaths, s.EntryKillAttempts, s.EntryKillAttemptWins,
                     $"{s.MatchUuid}_{s.RoundNumber}_{s.SteamId}_Summary",
@@ -136,18 +134,18 @@ public sealed class StatsRepository : IStatsRepository
                 );
             }
 
-            await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_match_player_stats_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, kills INT, deaths INT, assists INT, headshots INT, damage_dealt INT, mvps INT, score INT, rating2 DECIMAL(5,3), adr DECIMAL(10,2), kast DECIMAL(5,2), entry_kills INT, entry_deaths INT, entry_kill_attempts INT, entry_kill_attempt_wins INT, idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);").ConfigureAwait(false);
-            
+            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_match_player_stats_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, kills INT, deaths INT, assists INT, headshots INT, damage_dealt INT, mvps INT, score INT, rating2 DECIMAL(5,3), adr DECIMAL(10,2), kast DECIMAL(5,2), entry_kills INT, entry_deaths INT, entry_kill_attempts INT, entry_kill_attempt_wins INT, idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);", ct).ConfigureAwait(false);
+
             var bulkCopy = new MySqlBulkCopy(connection)
             {
                 DestinationTableName = "temp_match_player_stats_uuid"
             };
             AddColumnMappingsByName(bulkCopy, dataTable);
 
-            await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false);
+            EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
 
-            await connection.ExecuteAsync(
-                "INSERT IGNORE INTO players (steam_id) SELECT DISTINCT steam_id FROM temp_match_player_stats_uuid;").ConfigureAwait(false);
+            await ExecuteAsync(connection,
+                "INSERT IGNORE INTO players (steam_id) SELECT DISTINCT steam_id FROM temp_match_player_stats_uuid;", ct).ConfigureAwait(false);
 
             const string mergeSql = """
                 INSERT INTO match_player_stats
@@ -165,9 +163,8 @@ public sealed class StatsRepository : IStatsRepository
                     retry_count = match_player_stats.retry_count + 1;
                 """;
 
-            await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);
-            await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_match_player_stats_uuid;").ConfigureAwait(false);
-            
+            await ExecuteAsync(connection, mergeSql, ct).ConfigureAwait(false);
+
             _logger.LogInformation("Bulk upserted {Count} match summaries using MatchUuid resolution", snapshotList.Count);
         }, cancellationToken);
     }
@@ -177,25 +174,26 @@ public sealed class StatsRepository : IStatsRepository
         var snapshotList = snapshots.Where(s => !string.IsNullOrEmpty(s.MatchUuid)).ToList();
         if (snapshotList.Count == 0) return;
 
-        var weaponData = snapshotList.SelectMany(s => s.WeaponKills.Select(kvp => new
-        {
-            s.MatchUuid,
-            s.SteamId,
-            Weapon = kvp.Key,
-            Kills = kvp.Value,
-            Shots = s.WeaponShots.GetValueOrDefault(kvp.Key, 0),
-            Hits = s.WeaponHits.GetValueOrDefault(kvp.Key, 0),
-            IdempotencyKey = $"{s.MatchUuid}_{s.RoundNumber}_{s.SteamId}_Weapon_{kvp.Key}"
-        })).ToList();
+        var weaponData = snapshotList.SelectMany(s =>
+            s.WeaponKills.Keys.Concat(s.WeaponShots.Keys).Concat(s.WeaponHits.Keys).Distinct().Select(weapon => new
+            {
+                s.MatchUuid,
+                s.SteamId,
+                Weapon = weapon,
+                Kills = s.WeaponKills.GetValueOrDefault(weapon, 0),
+                Shots = s.WeaponShots.GetValueOrDefault(weapon, 0),
+                Hits = s.WeaponHits.GetValueOrDefault(weapon, 0),
+                IdempotencyKey = $"{s.MatchUuid}_{s.RoundNumber}_{s.SteamId}_Weapon_{weapon}"
+            })).ToList();
 
         if (weaponData.Count == 0) return;
 
-        await _resiliencePipeline.ExecuteAsync(async ct => 
+        await _resiliencePipeline.ExecuteAsync(async ct =>
         {
             using var activity = Instrumentation.ActivitySource.StartActivity("UpsertMatchWeaponStatsAsync");
 
             await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-            
+
             var dataTable = new DataTable();
             dataTable.Columns.Add("match_uuid", typeof(string));
             dataTable.Columns.Add("steam_id", typeof(ulong));
@@ -213,18 +211,18 @@ public sealed class StatsRepository : IStatsRepository
                 dataTable.Rows.Add(w.MatchUuid, w.SteamId, w.Weapon, w.Kills, w.Shots, w.Hits, w.IdempotencyKey, now, 0);
             }
 
-            await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_match_weapon_stats_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, weapon_name VARCHAR(64), kills INT, shots INT, hits INT, idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);").ConfigureAwait(false);
-            
+            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_match_weapon_stats_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, weapon_name VARCHAR(64), kills INT, shots INT, hits INT, idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);", ct).ConfigureAwait(false);
+
             var bulkCopy = new MySqlBulkCopy(connection)
             {
                 DestinationTableName = "temp_match_weapon_stats_uuid"
             };
             AddColumnMappingsByName(bulkCopy, dataTable);
 
-            await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false);
+            EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
 
-            await connection.ExecuteAsync(
-                "INSERT IGNORE INTO players (steam_id) SELECT DISTINCT steam_id FROM temp_match_weapon_stats_uuid;").ConfigureAwait(false);
+            await ExecuteAsync(connection,
+                "INSERT IGNORE INTO players (steam_id) SELECT DISTINCT steam_id FROM temp_match_weapon_stats_uuid;", ct).ConfigureAwait(false);
 
             const string mergeSql = """
                 INSERT INTO match_weapon_stats
@@ -237,9 +235,8 @@ public sealed class StatsRepository : IStatsRepository
                     retry_count = match_weapon_stats.retry_count + 1;
                 """;
 
-            await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);
-            await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_match_weapon_stats_uuid;").ConfigureAwait(false);
-            
+            await ExecuteAsync(connection, mergeSql, ct).ConfigureAwait(false);
+
             _logger.LogInformation("Bulk upserted {Count} weapon records using MatchUuid resolution", weaponData.Count);
         }, cancellationToken);
     }
@@ -306,7 +303,7 @@ public sealed class StatsRepository : IStatsRepository
         const string sql = """
             INSERT INTO rounds (match_id, round_number) 
             SELECT id, @RoundNumber FROM matches WHERE match_uuid = @MatchUuid
-            ON DUPLICATE KEY UPDATE start_time = CURRENT_TIMESTAMP;
+            ON DUPLICATE KEY UPDATE round_number = rounds.round_number;
             """;
         await connection.ExecuteAsync(new CommandDefinition(sql, new { MatchUuid = matchUuid, RoundNumber = roundNumber }, cancellationToken: ct)).ConfigureAwait(false);
     }
@@ -317,7 +314,7 @@ public sealed class StatsRepository : IStatsRepository
         const string sql = """
             UPDATE rounds r
             JOIN matches m ON r.match_id = m.id
-            SET r.end_time = CURRENT_TIMESTAMP, r.winner_team = @Winner, r.win_type = @WinType 
+            SET r.end_time = COALESCE(r.end_time, CURRENT_TIMESTAMP), r.winner_team = @Winner, r.win_type = @WinType
             WHERE m.match_uuid = @MatchUuid AND r.round_number = @RoundNumber;
             """;
         await connection.ExecuteAsync(new CommandDefinition(sql, new { MatchUuid = matchUuid, RoundNumber = roundNumber, Winner = winnerTeam, WinType = winReason }, cancellationToken: ct)).ConfigureAwait(false);
@@ -339,16 +336,16 @@ public sealed class StatsRepository : IStatsRepository
         using var activity = Instrumentation.ActivitySource.StartActivity("UpsertPlayersCoreAsync");
         var snapshotList = snapshots.ToList();
         activity?.SetTag("db.snapshot_count", snapshotList.Count);
-        
+
         if (snapshotList.Count == 0) return;
 
         await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(cancellationToken).ConfigureAwait(false);
-        
+
         // High-performance pattern for player stats (many columns):
         // 1. Create a DataTable matching the full schema
         // 2. Bulk copy to a temporary table
         // 3. Perform a server-side merge into the main tables
-        
+
         var dataTable = new DataTable();
         // Add all columns
         dataTable.Columns.Add("steam_id", typeof(ulong));
@@ -486,7 +483,7 @@ public sealed class StatsRepository : IStatsRepository
             );
         }
 
-        await connection.ExecuteAsync("CREATE TEMPORARY TABLE temp_player_stats LIKE player_stats;").ConfigureAwait(false);
+        await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_player_stats LIKE player_stats;", cancellationToken).ConfigureAwait(false);
 
         var bulkCopy = new MySqlBulkCopy(connection)
         {
@@ -495,12 +492,12 @@ public sealed class StatsRepository : IStatsRepository
         // Map by destination column name so DataTable column order can never silently misalign the copy.
         AddColumnMappingsByName(bulkCopy, dataTable);
 
-        await bulkCopy.WriteToServerAsync(dataTable, cancellationToken).ConfigureAwait(false);
+        EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, cancellationToken).ConfigureAwait(false));
 
         // Parent rows must exist before the FK-constrained merge into player_stats.
-        await connection.ExecuteAsync(
+        await ExecuteAsync(connection,
             "INSERT INTO players (steam_id, name) SELECT steam_id, name FROM temp_player_stats AS src " +
-            "ON DUPLICATE KEY UPDATE name = src.name, last_seen = CURRENT_TIMESTAMP;").ConfigureAwait(false);
+            "ON DUPLICATE KEY UPDATE name = src.name, last_seen = CURRENT_TIMESTAMP;", cancellationToken).ConfigureAwait(false);
 
         const string mergeSql = """
             INSERT INTO player_stats
@@ -557,9 +554,19 @@ public sealed class StatsRepository : IStatsRepository
                 round_swing = src.round_swing;
             """;
 
-        await connection.ExecuteAsync(mergeSql).ConfigureAwait(false);
-        await connection.ExecuteAsync("DROP TEMPORARY TABLE temp_player_stats;").ConfigureAwait(false);
+        await ExecuteAsync(connection, mergeSql, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Successfully completed high-performance bulk update for {Count} players using MySqlBulkCopy", snapshotList.Count);
+    }
+
+    private static Task<int> ExecuteAsync(MySqlConnection connection, string sql, CancellationToken cancellationToken) =>
+        connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: cancellationToken));
+
+    private static void EnsureBulkCopySucceeded(MySqlBulkCopyResult result)
+    {
+        if (result.Warnings.Count > 0)
+        {
+            throw new InvalidOperationException(string.Join("; ", result.Warnings.Select(warning => warning.Message)));
+        }
     }
 }

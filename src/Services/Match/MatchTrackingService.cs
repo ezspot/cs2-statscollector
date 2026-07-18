@@ -1,6 +1,4 @@
 using System;
-using System.Threading;
-using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
 namespace statsCollector.Services;
@@ -15,7 +13,6 @@ public interface IMatchTrackingService
     void EndRound(int roundNumber, int winnerTeam, int winType);
     float GetRoundWinProbability(int ctAlive, int tAlive);
     MatchContext? CurrentMatch { get; }
-    int? CurrentRoundNumber { get; }
 }
 
 public sealed class MatchTrackingService : IMatchTrackingService
@@ -24,16 +21,10 @@ public sealed class MatchTrackingService : IMatchTrackingService
     private readonly IPersistenceChannel _persistenceChannel;
     private readonly object _lock = new();
     private MatchContext? _currentMatch;
-    private int? _currentRoundNumber;
 
-    public MatchContext? CurrentMatch 
-    { 
-        get { lock (_lock) return _currentMatch; } 
-    }
-    
-    public int? CurrentRoundNumber 
-    { 
-        get { lock (_lock) return _currentRoundNumber; } 
+    public MatchContext? CurrentMatch
+    {
+        get { lock (_lock) return _currentMatch; }
     }
 
     public MatchTrackingService(
@@ -49,13 +40,18 @@ public sealed class MatchTrackingService : IMatchTrackingService
         var uuid = Guid.NewGuid().ToString();
         _logger.LogInformation("Starting new match tracking: {Uuid} (Series: {Series}) on {Map}", uuid, seriesUuid ?? "None", mapName);
 
+        string? previousUuid;
         lock (_lock)
         {
+            previousUuid = _currentMatch?.MatchUuid;
             _currentMatch = new MatchContext(uuid, mapName, seriesUuid);
-            _currentRoundNumber = null;
         }
 
-        _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.MatchStart, (mapName, uuid, seriesUuid)));
+        if (previousUuid is not null)
+        {
+            _persistenceChannel.TryWrite(new MatchEndUpdate(previousUuid));
+        }
+        _persistenceChannel.TryWrite(new MatchStartUpdate(mapName, uuid, seriesUuid));
     }
 
     public void EndMatch()
@@ -70,7 +66,7 @@ public sealed class MatchTrackingService : IMatchTrackingService
         if (uuid != null)
         {
             _logger.LogInformation("Ending match tracking: {Uuid}", uuid);
-            _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.MatchEnd, uuid));
+            _persistenceChannel.TryWrite(new MatchEndUpdate(uuid));
         }
     }
 
@@ -80,12 +76,11 @@ public sealed class MatchTrackingService : IMatchTrackingService
         lock (_lock)
         {
             uuid = _currentMatch?.MatchUuid;
-            _currentRoundNumber = roundNumber;
         }
 
         if (uuid != null)
         {
-            _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.RoundStart, (uuid, roundNumber)));
+            _persistenceChannel.TryWrite(new RoundStartUpdate(uuid, roundNumber));
         }
     }
 
@@ -99,7 +94,7 @@ public sealed class MatchTrackingService : IMatchTrackingService
 
         if (uuid != null)
         {
-            _persistenceChannel.TryWrite(new StatsUpdate(UpdateType.RoundEnd, (uuid, roundNumber, winnerTeam, winType)));
+            _persistenceChannel.TryWrite(new RoundEndUpdate(uuid, roundNumber, winnerTeam, winType));
         }
     }
 

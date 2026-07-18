@@ -2,7 +2,6 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Diagnostics.Metrics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Channels;
@@ -122,10 +121,9 @@ public sealed class UtilityPositionEvent : PositionEvent
 public interface IPositionPersistenceService : IAsyncDisposable
 {
     Task StartAsync(CancellationToken cancellationToken);
-    Task EnqueueAsync(PositionEvent @event, CancellationToken cancellationToken);
+    bool TryEnqueue(PositionEvent @event);
     Task StopAsync(TimeSpan timeout, CancellationToken cancellationToken);
 
-    // Pooling methods
     KillPositionEvent GetKillEvent();
     DeathPositionEvent GetDeathEvent();
     UtilityPositionEvent GetUtilityEvent();
@@ -136,10 +134,10 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
     private readonly IPositionTrackingService _repository;
     private readonly ILogger<PositionPersistenceService> _logger;
     private readonly Channel<PositionEvent> _channel;
-    
+
     private readonly ConcurrentQueue<PositionEvent> _retryQueue = new();
     private readonly ActivitySource _activitySource = Instrumentation.ActivitySource;
-    
+
     private Task? _processingTask;
     private CancellationTokenSource? _linkedCts;
     private volatile bool _started;
@@ -155,7 +153,7 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
     {
         _repository = repository;
         _logger = logger;
-        
+
         var policy = new DefaultObjectPoolProvider();
         _killPool = policy.Create(new PositionEventPooledObjectPolicy<KillPositionEvent>());
         _deathPool = policy.Create(new PositionEventPooledObjectPolicy<DeathPositionEvent>());
@@ -165,7 +163,7 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         _channel = Channel.CreateBounded<PositionEvent>(new BoundedChannelOptions(capacity)
         {
             AllowSynchronousContinuations = false,
-            FullMode = BoundedChannelFullMode.DropWrite,
+            FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
             SingleWriter = false
         });
@@ -183,21 +181,22 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
     public Task StartAsync(CancellationToken cancellationToken)
     {
         if (_started) return Task.CompletedTask;
+        cancellationToken.ThrowIfCancellationRequested();
         _started = true;
-
-        _linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _linkedCts = new CancellationTokenSource();
         _processingTask = Task.Run(() => ProcessLoopAsync(_linkedCts.Token), _linkedCts.Token);
-        
+
         _logger.LogInformation("PositionPersistenceService started");
         return Task.CompletedTask;
     }
 
-    public Task EnqueueAsync(PositionEvent @event, CancellationToken cancellationToken)
+    public bool TryEnqueue(PositionEvent @event)
     {
         if (!_started)
         {
             _logger.LogWarning("Attempted to enqueue position event but service is not started");
-            return Task.CompletedTask;
+            ReturnToPool(@event);
+            return false;
         }
 
         using var activity = _activitySource.StartActivity("PositionPersistence.Enqueue", ActivityKind.Producer);
@@ -205,21 +204,19 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
 
         if (_channel.Writer.TryWrite(@event))
         {
-            return Task.CompletedTask;
+            return true;
         }
-        else
-        {
-            _logger.LogWarning("Position event dropped: channel full. Type: {Type}", @event.GetType().Name);
-            activity?.SetStatus(ActivityStatusCode.Error, "Channel full");
-            ReturnToPool(@event);
-        }
-        return Task.CompletedTask;
+
+        _logger.LogWarning("Position event dropped: channel full. Type: {Type}", @event.GetType().Name);
+        activity?.SetStatus(ActivityStatusCode.Error, "Channel full");
+        ReturnToPool(@event);
+        return false;
     }
 
     public async Task StopAsync(TimeSpan timeout, CancellationToken cancellationToken)
     {
         if (!_started) return;
-        
+
         _logger.LogInformation("Stopping PositionPersistenceService...");
         _channel.Writer.Complete();
 
@@ -234,7 +231,11 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         }
         catch (OperationCanceledException)
         {
-            _logger.LogWarning("Position persistence stop timed out. {Pending} items lost.", _channel.Reader.Count);
+            _logger.LogWarning("Position persistence stop was canceled. {Pending} queued items may be unflushed.", _channel.Reader.Count);
+            if (_linkedCts is not null)
+            {
+                await _linkedCts.CancelAsync().ConfigureAwait(false);
+            }
         }
         finally
         {
@@ -250,17 +251,17 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
 
         try
         {
-            while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+            while (!cancellationToken.IsCancellationRequested)
             {
+                if (_retryQueue.IsEmpty && !await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false)) break;
+
                 var batch = new List<PositionEvent>();
 
-                // 1. Drain retry queue first
                 while (_retryQueue.TryDequeue(out var retryEvent) && batch.Count < 100)
                 {
                     batch.Add(retryEvent);
                 }
 
-                // 2. Fill rest from channel
                 while (batch.Count < 100 && reader.TryRead(out var @event))
                 {
                     batch.Add(@event);
@@ -273,35 +274,50 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
 
                 try
                 {
-                    await ProcessBatchInternalAsync(batch, cancellationToken).ConfigureAwait(false);
-                    
-                    // Return events to pool after successful processing
-                    foreach (var @event in batch)
+                    var failed = await ProcessBatchInternalAsync(batch, cancellationToken).ConfigureAwait(false);
+                    var failedSet = failed.ToHashSet();
+                    foreach (var @event in batch.Where(@event => !failedSet.Contains(@event)))
                     {
                         ReturnToPool(@event);
                     }
 
-                    // Reset delay on success
-                    retryDelay = TimeSpan.FromSeconds(5);
-                    _logger.LogDebug("Successfully persisted position batch of {Count} items", batch.Count);
+                    if (failed.Count == 0)
+                    {
+                        retryDelay = TimeSpan.FromSeconds(5);
+                        _logger.LogDebug("Successfully persisted position batch of {Count} items", batch.Count);
+                        continue;
+                    }
+
+                    activity?.SetStatus(ActivityStatusCode.Error, "One or more position groups failed");
+                    foreach (var item in failed)
+                    {
+                        if (_retryQueue.Count < 5000)
+                        {
+                            _retryQueue.Enqueue(item);
+                        }
+                        else
+                        {
+                            ReturnToPool(item);
+                            _logger.LogCritical("Position retry buffer full. Dropped {Type}.", item.GetType().Name);
+                        }
+                    }
+
+                    await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+                    retryDelay = TimeSpan.FromTicks(Math.Min(retryDelay.Ticks * 2, maxRetryDelay.Ticks));
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch (Exception ex)
                 {
                     activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
-                    _logger.LogError(ex, "Failed to persist position batch. Buffering {Count} items for retry.", batch.Count);
-
-                    // Re-queue for retry
+                    _logger.LogCritical(ex, "Unexpected position persistence failure");
                     foreach (var item in batch)
                     {
-                        if (_retryQueue.Count < 5000) // Safety cap for in-memory buffer
-                        {
-                            _retryQueue.Enqueue(item);
-                        }
+                        if (_retryQueue.Count < 5000) _retryQueue.Enqueue(item);
+                        else ReturnToPool(item);
                     }
-
-                    // Exponential backoff
-                    await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
-                    retryDelay = TimeSpan.FromTicks(Math.Min(retryDelay.Ticks * 2, maxRetryDelay.Ticks));
                 }
             }
         }
@@ -322,25 +338,35 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         }
     }
 
-    private async Task ProcessBatchInternalAsync(List<PositionEvent> batch, CancellationToken ct)
+    private async Task<List<PositionEvent>> ProcessBatchInternalAsync(List<PositionEvent> batch, CancellationToken ct)
     {
         var killBatch = batch.OfType<KillPositionEvent>().ToList();
         var deathBatch = batch.OfType<DeathPositionEvent>().ToList();
         var utilityBatch = batch.OfType<UtilityPositionEvent>().ToList();
+        var failed = new List<PositionEvent>();
 
-        if (killBatch.Count > 0)
+        await PersistGroupAsync(killBatch, _repository.BulkTrackKillPositionsAsync, failed, ct).ConfigureAwait(false);
+        await PersistGroupAsync(deathBatch, _repository.BulkTrackDeathPositionsAsync, failed, ct).ConfigureAwait(false);
+        await PersistGroupAsync(utilityBatch, _repository.BulkTrackUtilityPositionsAsync, failed, ct).ConfigureAwait(false);
+        return failed;
+    }
+
+    private async Task PersistGroupAsync<T>(
+        List<T> events,
+        Func<IEnumerable<T>, CancellationToken, Task> persist,
+        List<PositionEvent> failed,
+        CancellationToken cancellationToken) where T : PositionEvent
+    {
+        if (events.Count == 0) return;
+
+        try
         {
-            await _repository.BulkTrackKillPositionsAsync(killBatch, ct).ConfigureAwait(false);
+            await persist(events, cancellationToken).ConfigureAwait(false);
         }
-
-        if (deathBatch.Count > 0)
+        catch (Exception ex)
         {
-            await _repository.BulkTrackDeathPositionsAsync(deathBatch, ct).ConfigureAwait(false);
-        }
-
-        if (utilityBatch.Count > 0)
-        {
-            await _repository.BulkTrackUtilityPositionsAsync(utilityBatch, ct).ConfigureAwait(false);
+            _logger.LogError(ex, "Failed to persist {PositionType} batch. Buffering {Count} items.", typeof(T).Name, events.Count);
+            failed.AddRange(events);
         }
     }
 
@@ -349,7 +375,9 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         if (_linkedCts != null) await _linkedCts.CancelAsync().ConfigureAwait(false);
         if (_processingTask != null)
         {
-            try { await _processingTask.ConfigureAwait(false); } catch (OperationCanceledException) { }
+            try { await _processingTask.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+            catch (TimeoutException) { _logger.LogCritical("Position persistence worker did not stop during disposal."); }
         }
         _linkedCts?.Dispose();
     }

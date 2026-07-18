@@ -1,11 +1,6 @@
-using System;
-using System.Collections.Generic;
-using System.Threading;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
-using CounterStrikeSharp.API.Modules.Utils;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Domain;
@@ -13,23 +8,16 @@ using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public interface IMovementEventProcessor : IEventProcessor
-{
-}
-
-public sealed class MovementEventProcessor : IMovementEventProcessor
+public sealed class MovementEventProcessor : IEventProcessor
 {
     private readonly IPlayerSessionService _playerSessions;
-    private readonly ILogger<MovementEventProcessor> _logger;
     private readonly IOptionsMonitor<PluginConfig> _config;
 
     public MovementEventProcessor(
         IPlayerSessionService playerSessions,
-        ILogger<MovementEventProcessor> logger,
         IOptionsMonitor<PluginConfig> config)
     {
         _playerSessions = playerSessions;
-        _logger = logger;
         _config = config;
     }
 

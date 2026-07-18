@@ -3,16 +3,16 @@ services:
     image: mysql:9.6
     container_name: statscollector-mysql
     restart: unless-stopped
-    # Essential tuning for production MySQL 9.6
     command:
       - "mysqld"
       - "--pid-file=/var/lib/mysql/mysql.pid"
       - "--innodb-buffer-pool-size=1G"
       - "--innodb-redo-log-capacity=512M"
-      - "--max-connections=100"
+      - "--max-connections=${MYSQL_MAX_CONNECTIONS:-100}"
       - "--character-set-server=utf8mb4"
       - "--collation-server=utf8mb4_unicode_ci"
       - "--container-aware=ON"
+      - "--local-infile=ON"
     environment:
       MYSQL_DATABASE: cs2_statscollector
       MYSQL_USER: cs2_statscollector
@@ -22,8 +22,8 @@ services:
     secrets:
       - mysql_root_password
       - mysql_user_password
-    ports: 
-      - "3306:3306" # Exposure required for external plugin connection
+    ports:
+      - "${MYSQL_BIND_ADDRESS:-127.0.0.1}:${MYSQL_PORT:-3306}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
       - ../database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -52,6 +52,7 @@ services:
     image: phpmyadmin:5.2.3
     container_name: statscollector-phpmyadmin
     restart: unless-stopped
+    profiles: ["tools"]
     environment:
       PMA_HOST: mysql
       PMA_PORT: 3306
@@ -60,7 +61,7 @@ services:
     secrets:
       - mysql_user_password
     ports:
-      - "8080:80"
+      - "127.0.0.1:${PHPMYADMIN_PORT:-8080}:80"
     depends_on:
       mysql:
         condition: service_healthy

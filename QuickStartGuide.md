@@ -3,15 +3,18 @@
 Get up and running fast. For full details, see [README.md](README.md).
 
 ## Prerequisites
-- CounterStrikeSharp v1.0.369+ (.NET 10)
+- CounterStrikeSharp v1.0.371+ (.NET 10)
 - .NET 10 SDK to build, .NET 10 runtime to run
-- MySQL 8.0+ / 9.x or MariaDB 10.6+ (required for `POINT` and spatial indexes)
+- MySQL 8.0+ / 9.x (required for `POINT` and spatial indexes)
 - CS2 server with admin access
 
 ## Database (Docker)
 A MySQL 9.6 + phpMyAdmin stack is included:
 ```bash
 cd MySQL-docker
+cp secrets/mysql_root_password.example secrets/mysql_root_password.txt
+cp secrets/mysql_user_password.example secrets/mysql_user_password.txt
+# Replace both copied values before starting MySQL.
 docker compose up -d
 ```
 This applies `database/init.sql` automatically on first start. To use an existing
@@ -35,6 +38,7 @@ MySQL server instead, run `database/init.sql` against it manually.
 ```
    To have the plugin create the schema for you, set `"AutoCreateSchema": true` instead of running
    `init.sql` manually (the DB user needs `CREATE` privileges).
+   For a remote database, use `DatabaseSslMode: "VerifyFull"` and configure `DatabaseSslCa`.
 4. Start the server and verify with `css_plugins list`.
 
 ## Verify

@@ -9,6 +9,5 @@ public enum ScrimState
     Picking,
     KnifeRound,
     Live,
-    Practice,
-    Veto
+    Practice
 }

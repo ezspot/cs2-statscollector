@@ -26,24 +26,13 @@ public sealed class AnalyticsService : IAnalyticsService
 {
     public decimal CalculateHLTVRating(PlayerStats stats)
     {
-        using var activity = Instrumentation.ActivitySource.StartActivity("AnalyticsService.CalculateHLTVRating");
-        if (stats.Round.RoundsPlayed == 0) return 0m;
-
-        // Rating 3.0 (2025) logic: Eco-adjusted kills, Round Swing, and Team Flash Penalty
-        var killsRating = (stats.Combat.WeightedKills / stats.Round.RoundsPlayed) * 0.6m;
-        var deathsRating = (0.7m - (stats.Combat.Deaths / (decimal)stats.Round.RoundsPlayed) * 0.5m);
-        var impactRating = CalculateImpactRating(stats) * 0.3m;
-        var kastRating = CalculateKASTPercentage(stats) / 100m * 0.2m;
-        var survivalRating = stats.Round.RoundsPlayed > 0 ? ((decimal)(stats.Round.RoundsPlayed - stats.Combat.Deaths) / stats.Round.RoundsPlayed) * 0.154m : 0m;
-        
-        // Add Round Swing Impact (simplified)
-        var roundSwingRating = (stats.Combat.EntryKills * 0.05m) + (stats.Combat.ClutchesWon * 0.1m);
-        
-        // Team Flash Penalty: subtract 0.1 per team flash that caused >2s blind
-        // Note: We track TeamFlashDuration in ms. 
-        var teamFlashPenalty = (stats.Utility.TeamFlashDuration / 2000m) * 0.1m;
-        
-        return Math.Max(0m, killsRating + deathsRating + impactRating + kastRating + survivalRating + roundSwingRating - teamFlashPenalty);
+        return CalculateHltv2Rating(
+            stats.Combat.Kills,
+            stats.Combat.Assists,
+            stats.Combat.Deaths,
+            stats.Round.RoundsPlayed,
+            CalculateKASTPercentage(stats),
+            CalculateADR(stats));
     }
 
     public decimal CalculateImpactRating(PlayerStats stats)
@@ -56,7 +45,7 @@ public sealed class AnalyticsService : IAnalyticsService
         var openingImpact = stats.Combat.EntryKills * 0.25m + (stats.Combat.EntryKillAttemptWins * 0.1m); // Enhanced entry impact
         var mvpImpact = stats.Combat.MVPs * 0.05m;
 
-        return Math.Min(2.0m, multiKillImpact + clutchImpact + openingImpact + mvpImpact);
+        return Math.Min(2.0m, (multiKillImpact + clutchImpact + openingImpact + mvpImpact) / stats.Round.RoundsPlayed);
     }
 
     public decimal CalculateKASTPercentage(PlayerStats stats)
@@ -81,7 +70,7 @@ public sealed class AnalyticsService : IAnalyticsService
 
     public decimal CalculateAccuracyPercentage(PlayerStats stats)
     {
-        return stats.Combat.ShotsFired > 0 ? (decimal)stats.Combat.ShotsHit / stats.Combat.ShotsFired * 100m : 0m;
+        return stats.Combat.ShotsFired > 0 ? Math.Min(100m, (decimal)stats.Combat.ShotsHit / stats.Combat.ShotsFired * 100m) : 0m;
     }
 
     public decimal CalculateUtilityScore(PlayerStats stats)
@@ -110,8 +99,7 @@ public sealed class AnalyticsService : IAnalyticsService
         return kdScore + adrScore + kastScore + mvpScore + impactScoreValue;
     }
 
-    // Standard HLTV 2.0 rating formula, computed from a single match's totals. Used for
-    // per-match summaries where the inputs are match-scoped deltas rather than session totals.
+    // Community Rating 2.0 approximation; HLTV's exact formula is not public.
     public decimal CalculateHltv2Rating(int kills, int assists, int deaths, int rounds, decimal kastPercent, decimal adr)
     {
         if (rounds <= 0) return 0m;
@@ -157,31 +145,33 @@ public sealed class AnalyticsService : IAnalyticsService
         var utilityScore = CalculateUtilityScore(stats);
         var rank = GetPlayerRank(perfScore);
 
-        var clutchSuccessRate = (stats.Combat.ClutchesWon + stats.Combat.ClutchesLost) > 0 
+        var clutchSuccessRate = (stats.Combat.ClutchesWon + stats.Combat.ClutchesLost) > 0
             ? (decimal)stats.Combat.ClutchesWon / (stats.Combat.ClutchesWon + stats.Combat.ClutchesLost) * 100m
             : 0m;
-        
-        var tradeKillRatio = (stats.Combat.TradeKills + stats.Combat.TradedDeaths) > 0 
-            ? (decimal)stats.Combat.TradeKills / (stats.Combat.TradeKills + stats.Combat.TradedDeaths) 
+
+        var tradeKillRatio = (stats.Combat.TradeKills + stats.Combat.TradedDeaths) > 0
+            ? (decimal)stats.Combat.TradeKills / (stats.Combat.TradeKills + stats.Combat.TradedDeaths)
             : 0m;
 
-        var openingKillRatio = (stats.Combat.FirstKills + stats.Combat.FirstDeaths) > 0 
-            ? (decimal)stats.Combat.FirstKills / (stats.Combat.FirstKills + stats.Combat.FirstDeaths) 
+        var openingKillRatio = (stats.Combat.FirstKills + stats.Combat.FirstDeaths) > 0
+            ? (decimal)stats.Combat.FirstKills / (stats.Combat.FirstKills + stats.Combat.FirstDeaths)
             : 0m;
 
         var totalGrenadesThrown = stats.Utility.FlashbangsThrown + stats.Utility.SmokesThrown + stats.Utility.HeGrenadesThrown + stats.Utility.MolotovsThrown + stats.Utility.DecoysThrown;
-        var grenadeEffectivenessRate = totalGrenadesThrown > 0 
-            ? (decimal)(stats.Utility.UtilitySuccessCount) / totalGrenadesThrown * 100m 
+        var effectiveGrenades = stats.Utility.EffectiveFlashes + stats.Utility.EffectiveHEGrenades + stats.Utility.EffectiveMolotovs;
+        var grenadeEffectivenessRate = totalGrenadesThrown > 0
+            ? (decimal)effectiveGrenades / totalGrenadesThrown * 100m
             : 0m;
 
-        var flashEffectivenessRate = stats.Utility.FlashbangsThrown > 0 ? (decimal)stats.Utility.EnemiesBlinded / stats.Utility.FlashbangsThrown : 0m;
+        var flashEffectivenessRate = stats.Utility.FlashbangsThrown > 0 ? (decimal)stats.Utility.EffectiveFlashes / stats.Utility.FlashbangsThrown * 100m : 0m;
         var utilityUsagePerRound = stats.Round.RoundsPlayed > 0 ? (decimal)totalGrenadesThrown / stats.Round.RoundsPlayed : 0m;
         var averageMoneySpentPerRound = stats.Round.RoundsPlayed > 0 ? (decimal)stats.Economy.MoneySpent / stats.Round.RoundsPlayed : 0m;
-        var survivalRating = stats.Round.RoundsPlayed > 0 ? ((decimal)(stats.Round.RoundsPlayed - stats.Combat.Deaths) / stats.Round.RoundsPlayed) * 0.154m : 0m;
+        var survivalRating = stats.Round.RoundsPlayed > 0 ? Math.Max(0m, (decimal)(stats.Round.RoundsPlayed - stats.Combat.Deaths) / stats.Round.RoundsPlayed) * 0.154m : 0m;
         var utilityImpactScore = stats.Round.RoundsPlayed > 0 ? (decimal)stats.Utility.UtilityDamage / stats.Round.RoundsPlayed : 0m;
         var topWeapon = stats.Weapon.KillsByWeapon.OrderByDescending(x => x.Value).FirstOrDefault().Key ?? "None";
 
         return new PlayerSnapshot(
+            stats.Version,
             matchUuid,
             stats.Round.RoundNumber,
             stats.Round.RoundStartUtc,
@@ -228,8 +218,8 @@ public sealed class AnalyticsService : IAnalyticsService
             stats.Utility.EnemiesBlinded,
             stats.Utility.TimesBlinded,
             stats.Utility.FlashAssists,
-            (int)stats.Utility.TotalBlindTime,
-            (int)stats.Utility.TotalBlindTimeInflicted,
+            stats.Utility.TotalBlindTime,
+            stats.Utility.TotalBlindTimeInflicted,
             stats.Utility.UtilityDamage,
             stats.Utility.UtilityDamageTaken,
             stats.Bomb.BombKills,
@@ -295,10 +285,7 @@ public sealed class AnalyticsService : IAnalyticsService
             stats.Round.Pings,
             stats.Round.Footsteps,
 
-            stats.Combat.WeightedKills,
             stats.Combat.RoundSwing,
-            stats.Utility.TeamFlashDuration,
-            stats.Utility.FlashAssistDuration,
 
             new Dictionary<string, int>(stats.Weapon.KillsByWeapon),
             new Dictionary<string, int>(stats.Weapon.ShotsByWeapon),

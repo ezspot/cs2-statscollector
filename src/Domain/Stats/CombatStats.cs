@@ -5,18 +5,16 @@ namespace statsCollector.Domain.Stats;
 public sealed class CombatStats
 {
     private readonly Action _markDirty;
-    
+
     private int _kills;
     private int _deaths;
     private int _assists;
     private int _headshots;
-    private int _headshotKills;
     private int _damageDealt;
     private int _damageTaken;
     private int _shotsHit;
     private int _shotsFired;
     private int _mvps;
-    private int _enemiesFlashed;
     private int _wallbangKills;
     private int _noscopes;
     private int _throughSmokeKills;
@@ -58,8 +56,6 @@ public sealed class CombatStats
     private int _nadeKills;
     private int _highImpactKills;
 
-    private decimal _weightedKills;
-
     // Round Swing: sum of win-probability deltas from this player's enemy kills, credited only on
     // rounds their team won. _currentRoundSwing accumulates within a round; CommitRoundSwing folds it
     // into the cumulative _roundSwing at round end (winners only).
@@ -71,8 +67,6 @@ public sealed class CombatStats
         _markDirty = markDirty;
     }
 
-    public decimal WeightedKills { get => _weightedKills; set { _weightedKills = value; _markDirty(); } }
-
     public decimal RoundSwing { get => _roundSwing; set { _roundSwing = value; _markDirty(); } }
     public decimal CurrentRoundSwing { get => _currentRoundSwing; set { _currentRoundSwing = value; _markDirty(); } }
     public void CommitRoundSwing() { _roundSwing += _currentRoundSwing; _markDirty(); }
@@ -82,7 +76,6 @@ public sealed class CombatStats
     public int Deaths { get => _deaths; set { _deaths = value; _markDirty(); } }
     public int Assists { get => _assists; set { _assists = value; _markDirty(); } }
     public int Headshots { get => _headshots; set { _headshots = value; _markDirty(); } }
-    public int HeadshotKills { get => _headshotKills; set { _headshotKills = value; _markDirty(); } }
     public int DamageDealt { get => _damageDealt; set { _damageDealt = value; _markDirty(); } }
     public int DamageTaken { get => _damageTaken; set { _damageTaken = value; _markDirty(); } }
     public int DamageArmor { get => _damageArmor; set { _damageArmor = value; _markDirty(); } }
@@ -90,7 +83,6 @@ public sealed class CombatStats
     public int ShotsHit { get => _shotsHit; set { _shotsHit = value; _markDirty(); } }
     public int ShotsFired { get => _shotsFired; set { _shotsFired = value; _markDirty(); } }
     public int MVPs { get => _mvps; set { _mvps = value; _markDirty(); } }
-    public int EnemiesFlashed { get => _enemiesFlashed; set { _enemiesFlashed = value; _markDirty(); } }
     public int WallbangKills { get => _wallbangKills; set { _wallbangKills = value; _markDirty(); } }
     public int Noscopes { get => _noscopes; set { _noscopes = value; _markDirty(); } }
     public int ThroughSmokeKills { get => _throughSmokeKills; set { _throughSmokeKills = value; _markDirty(); } }
@@ -132,11 +124,10 @@ public sealed class CombatStats
 
     public void Reset()
     {
-        _kills = _deaths = _assists = _headshots = _headshotKills = 0;
+        _kills = _deaths = _assists = _headshots = 0;
         _damageDealt = _damageTaken = _shotsHit = _shotsFired = 0;
         _damageArmor = _score = 0;
         _mvps = 0;
-        _enemiesFlashed = 0;
         _wallbangKills = _noscopes = 0;
         _throughSmokeKills = _blindKills = 0;
         _firstKills = _firstDeaths = _tradeKills = _tradedDeaths = 0;
@@ -150,7 +141,6 @@ public sealed class CombatStats
         _lowImpactKills = 0;
         _currentRoundKills = _currentRoundDeaths = _currentRoundShotsFired = 0;
         _multiKillNades = _nadeKills = _highImpactKills = 0;
-        _weightedKills = 0;
         _roundSwing = _currentRoundSwing = 0;
         _markDirty();
     }

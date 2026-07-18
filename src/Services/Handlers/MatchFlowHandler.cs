@@ -55,6 +55,7 @@ public sealed class MatchFlowHandler : IGameHandler
 
     public void Register(BasePlugin plugin)
     {
+        _roundBackup.Initialize();
         plugin.RegisterEventHandler<EventRoundStart>(OnRoundStart);
         plugin.RegisterEventHandler<EventRoundFreezeEnd>(OnRoundFreezeEnd);
         plugin.RegisterEventHandler<EventRoundEnd>(OnRoundEnd);
@@ -65,18 +66,25 @@ public sealed class MatchFlowHandler : IGameHandler
     private HookResult OnMatchEnd(EventCsWinPanelMatch @event, GameEventInfo info)
     {
         if (_config.DeathmatchMode) return HookResult.Continue;
+        if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live) return HookResult.Continue;
 
-        // Persist per-match summaries (delta vs. the start-of-match baseline), then close the match.
         _matchStats.FinalizeMatch();
         _matchTracker.EndMatch();
+        if (_config.EnableScrim) _scrimManager.HandleMatchEnd();
         _logger.LogInformation("Match ended; per-match statistics finalized.");
         return HookResult.Continue;
     }
 
     private HookResult OnRoundAnnounceMatchStart(EventRoundAnnounceMatchStart @event, GameEventInfo info)
     {
-        // The match row is created by MatchTrackingService.StartMatch on map start; this event only
-        // marks the live phase. (A direct MatchStart write here used the wrong tuple shape and was ignored.)
+        if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live) return HookResult.Continue;
+
+        if (_config.EnableScrim || _matchTracker.CurrentMatch is null)
+        {
+            _matchTracker.StartMatch(Server.MapName);
+        }
+        _roundBackup.Reset();
+        _pauseService.Reset();
         _logger.LogInformation("Match start announced. Live tracking enabled.");
         _currentRoundNumber = 1;
         _matchStats.CaptureBaseline();
@@ -86,15 +94,22 @@ public sealed class MatchFlowHandler : IGameHandler
     private HookResult OnRoundStart(EventRoundStart @event, GameEventInfo info)
     {
         if (_config.DeathmatchMode) return HookResult.Continue;
-        
-        // We only initialize round-specific resets here
+        if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live) return HookResult.Continue;
+
         _damageReport.ResetRound();
-        _currentRoundNumber = @event.GetIntValue("round_number", 0);
-        
-        _playerSessions.ForEachPlayer(stats =>
+        _currentRoundNumber = GetCurrentRoundNumber();
+
+        foreach (var steamId in _playerSessions.GetActiveSteamIds())
         {
-            stats.ResetRoundStats();
-        });
+            var player = Utilities.GetPlayerFromSteamId(steamId);
+            var state = PlayerControllerState.From(player);
+            _playerSessions.MutatePlayer(steamId, stats =>
+            {
+                stats.ResetRoundStats();
+                stats.CurrentTeam = state.Team;
+                stats.Economy.RoundStartMoney = state.Money;
+            });
+        }
 
         _roundBackup.CreateSnapshot(_currentRoundNumber);
         _matchTracker.StartRound(_currentRoundNumber);
@@ -105,8 +120,6 @@ public sealed class MatchFlowHandler : IGameHandler
     private HookResult OnRoundFreezeEnd(EventRoundFreezeEnd @event, GameEventInfo info)
     {
         if (_config.DeathmatchMode) return HookResult.Continue;
-        // When the scrim system is enabled, round processing only runs once a scrim is Live.
-        // With scrim disabled this is a plain stats server, so every round is processed.
         if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live)
         {
             _logger.LogDebug("Skipping RoundFreezeEnd logic: scrim enabled but not Live.");
@@ -117,7 +130,6 @@ public sealed class MatchFlowHandler : IGameHandler
         var ctAlive = 0;
         var tAlive = 0;
 
-        // Capture player states on the game thread
         var playerStates = new List<PlayerControllerState>();
         foreach (var steamId in _playerSessions.GetActiveSteamIds())
         {
@@ -139,12 +151,16 @@ public sealed class MatchFlowHandler : IGameHandler
 
         foreach (var state in playerStates)
         {
-            _playerSessions.MutatePlayer(state.SteamId, stats => 
+            _playerSessions.MutatePlayer(state.SteamId, stats =>
             {
+                stats.Round.SurvivedThisRound = true;
+                stats.Round.RoundNumber = _currentRoundNumber;
+                stats.Round.RoundStartUtc = roundStartUtc;
                 stats.Round.AliveOnTeamAtRoundStart = state.Team == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
                 stats.Round.AliveEnemyAtRoundStart = state.Team == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
-                stats.Economy.RoundStartMoney = state.Money;
-                stats.Economy.EquipmentValueStart = stats.Economy.EquipmentValue;
+                stats.Economy.MoneySpent += Math.Max(0, stats.Economy.RoundStartMoney - state.Money);
+                stats.Economy.EquipmentValue = state.EquipmentValue;
+                stats.Economy.EquipmentValueStart = state.EquipmentValue;
             });
         }
 
@@ -161,9 +177,11 @@ public sealed class MatchFlowHandler : IGameHandler
 
         if (_scrimManager.CurrentState == ScrimState.KnifeRound)
         {
-            _scrimManager.HandleKnifeRoundEnd(winningTeamInt);
+            _ = _scrimManager.HandleKnifeRoundEnd(winningTeamInt);
             return HookResult.Continue;
         }
+
+        if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live) return HookResult.Continue;
 
         _pauseService.OnRoundEnd();
         var winReason = @event.GetIntValue("reason", 0);
@@ -179,23 +197,25 @@ public sealed class MatchFlowHandler : IGameHandler
         {
             stats.Round.RoundsPlayed++;
             if (winningTeam != PlayerTeam.Spectator && stats.CurrentTeam == winningTeam) stats.Round.RoundsWon++;
-            if (stats.Round.HadKillThisRound || stats.Round.HadAssistThisRound || stats.Round.SurvivedThisRound || stats.Round.DidTradeThisRound) stats.Round.KASTRounds++;
-            
+            if (stats.CurrentTeam == PlayerTeam.CounterTerrorist) stats.Round.CtRounds++;
+            else if (stats.CurrentTeam == PlayerTeam.Terrorist) stats.Round.TRounds++;
+            if (stats.Round.HadKillThisRound || stats.Round.HadAssistThisRound || stats.Round.SurvivedThisRound || stats.Round.WasTradedThisRound) stats.Round.KASTRounds++;
+
             var player = Utilities.GetPlayerFromSteamId(stats.SteamId);
             if (player is { IsValid: true })
             {
-                // Sync the in-game scoreboard score; nothing else writes Combat.Score, so the
-                // persisted `score` column was previously always 0.
                 stats.Combat.Score = player.Score;
 
                 if (player.InGameMoneyServices is not null)
                 {
+                    var equipmentValue = player.PlayerPawn.Value?.CurrentEquipmentValue ?? 0;
                     stats.Economy.RoundEndMoney = player.InGameMoneyServices.Account;
-                    stats.Economy.EquipmentValueEnd = stats.Economy.EquipmentValue;
+                    stats.Economy.EquipmentValue = equipmentValue;
+                    stats.Economy.EquipmentValueEnd = equipmentValue;
                 }
             }
         });
-        
+
         _matchTracker.EndRound(_currentRoundNumber, winningTeamInt, winReason);
 
         SaveStatsAtRoundEnd();
@@ -206,15 +226,20 @@ public sealed class MatchFlowHandler : IGameHandler
     {
         var match = _matchTracker.CurrentMatch;
         var snapshots = _playerSessions.CaptureSnapshots(true, match?.MatchUuid);
-        
+
         foreach (var snapshot in snapshots)
         {
-            _persistenceChannel.TryWrite(new StatsUpdate(
-                UpdateType.PlayerStats, 
-                snapshot, 
-                match?.MatchUuid ?? "none", 
-                snapshot.RoundNumber, 
-                snapshot.SteamId));
+            if (_persistenceChannel.TryWrite(new PlayerStatsUpdate(snapshot)))
+            {
+                _playerSessions.MarkPersisted(snapshot.SteamId, snapshot.Version);
+            }
         }
+    }
+
+    private static int GetCurrentRoundNumber()
+    {
+        var gameRules = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules")
+            .FirstOrDefault()?.GameRules;
+        return Math.Max(1, (gameRules?.TotalRoundsPlayed ?? 0) + 1);
     }
 }

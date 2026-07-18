@@ -1,5 +1,4 @@
 using System;
-using System.Threading.Tasks;
 using CounterStrikeSharp.API.Core;
 
 namespace statsCollector.Services;
@@ -14,7 +13,8 @@ public enum PauseType
 
 public interface IPauseService
 {
-    Task RequestPauseAsync(CCSPlayerController? player, PauseType type);
-    Task RequestUnpauseAsync(CCSPlayerController? player);
+    void RequestPause(CCSPlayerController? player, PauseType type);
+    void RequestUnpause(CCSPlayerController? player);
     void OnRoundEnd();
+    void Reset();
 }

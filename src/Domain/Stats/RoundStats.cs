@@ -5,7 +5,7 @@ namespace statsCollector.Domain.Stats;
 public sealed class RoundStats
 {
     private readonly Action _markDirty;
-    
+
     private int _roundsPlayed;
     private int _roundsWon;
     private int _kastRounds;
@@ -18,7 +18,6 @@ public sealed class RoundStats
 
     private int _jumps;
     private int _totalSpawns;
-    private int _playtimeSeconds;
     private int _roundNumber;
     private DateTime _roundStartUtc;
     private int _ctRounds;
@@ -44,7 +43,6 @@ public sealed class RoundStats
     public bool DidTradeThisRound { get => _didTradeThisRound; set { _didTradeThisRound = value; _markDirty(); } }
     public int Jumps { get => _jumps; set { _jumps = value; _markDirty(); } }
     public int TotalSpawns { get => _totalSpawns; set { _totalSpawns = value; _markDirty(); } }
-    public int PlaytimeSeconds { get => _playtimeSeconds; set { _playtimeSeconds = value; _markDirty(); } }
     public int RoundNumber { get => _roundNumber; set { _roundNumber = value; _markDirty(); } }
     public DateTime RoundStartUtc { get => _roundStartUtc; set { _roundStartUtc = value; _markDirty(); } }
     public int CtRounds { get => _ctRounds; set { _ctRounds = value; _markDirty(); } }
@@ -62,8 +60,6 @@ public sealed class RoundStats
         _didTradeThisRound = false;
         _wasTradedThisRound = false;
         _wasFlashedForKill = false;
-        _pings = 0;
-        _footsteps = 0;
         _markDirty();
     }
 
@@ -71,7 +67,7 @@ public sealed class RoundStats
     {
         _roundsPlayed = _roundsWon = _kastRounds = 0;
         _aliveOnTeamAtRoundStart = _aliveEnemyAtRoundStart = 0;
-        _jumps = _totalSpawns = _playtimeSeconds = 0;
+        _jumps = _totalSpawns = 0;
         _roundNumber = _ctRounds = _tRounds = 0;
         ResetRoundFlags();
     }

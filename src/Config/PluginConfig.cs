@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel.DataAnnotations;
+using System.IO;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 
@@ -36,6 +37,9 @@ public sealed class PluginConfig : BasePluginConfig
     [JsonPropertyName("DatabaseSslMode")]
     [RegularExpression("None|Preferred|Required|VerifyCA|VerifyFull", ErrorMessage = "DatabaseSslMode must be one of: None, Preferred, Required, VerifyCA, VerifyFull.")]
     public string DatabaseSslMode { get; set; } = "Required";
+
+    [JsonPropertyName("DatabaseSslCa")]
+    public string? DatabaseSslCa { get; set; }
 
     [JsonPropertyName("PersistenceChannelCapacity")]
     [Range(50, 5000)]
@@ -92,6 +96,8 @@ public sealed class PluginConfig : BasePluginConfig
             MaximumPoolSize = 50,
             ConnectionReset = true,
             ConnectionIdleTimeout = 300,
+            AllowLoadLocalInfile = true,
+            SslCa = DatabaseSslCa ?? string.Empty,
             SslMode = Enum.TryParse<MySqlSslMode>(DatabaseSslMode, out var sslMode) ? sslMode : MySqlSslMode.Preferred
         };
 
@@ -112,13 +118,23 @@ public sealed class PluginConfig : BasePluginConfig
 
     public void Validate()
     {
-        // Basic validation - can be expanded as needed
-        if (string.IsNullOrWhiteSpace(DatabaseHost))
-            throw new ArgumentException("DatabaseHost is required");
-        if (string.IsNullOrWhiteSpace(DatabaseName))
-            throw new ArgumentException("DatabaseName is required");
-        if (string.IsNullOrWhiteSpace(DatabaseUsername))
-            throw new ArgumentException("DatabaseUsername is required");
+        Validator.ValidateObject(this, new ValidationContext(this), validateAllProperties: true);
+        ArgumentNullException.ThrowIfNull(Scrim);
+        ArgumentNullException.ThrowIfNull(ClutchSettings);
+        if (Path.IsPathRooted(Scrim.ScrimConfigPath))
+            throw new ArgumentException("ScrimConfigPath must be relative to the CS2 game directory");
+        if (Scrim.PlayersPerTeam is < 1 or > 32)
+            throw new ArgumentException("PlayersPerTeam must be between 1 and 32");
+        if (Scrim.MinReadyPlayers is < 2 or > 64 || Scrim.MinReadyPlayers > Scrim.PlayersPerTeam * 2)
+            throw new ArgumentException("MinReadyPlayers must fit within the configured player slots");
+        if (Scrim.MapPool.Count == 0 || Scrim.MapPool.Any(map => string.IsNullOrWhiteSpace(map) || map.Any(character => !char.IsLetterOrDigit(character) && character is not ('_' or '-'))))
+            throw new ArgumentException("MapPool must contain safe CS2 map names");
+        if (Scrim.WhitelistEnabled && Scrim.WhitelistedSteamIds.Count == 0)
+            throw new ArgumentException("WhitelistedSteamIds must contain at least one Steam ID when the whitelist is enabled");
+        if (string.IsNullOrWhiteSpace(Scrim.LiveConfigPath) || string.IsNullOrWhiteSpace(Scrim.KnifeConfigPath))
+            throw new ArgumentException("LiveConfigPath and KnifeConfigPath are required");
+        if (ClutchSettings.BaseMultiplier < 0 || ClutchSettings.DifficultyWeight < 0)
+            throw new ArgumentException("Clutch settings cannot be negative");
     }
 }
 

@@ -1,7 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
 using System.Diagnostics;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
@@ -24,14 +22,15 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 {
     private static readonly HashSet<string> GrenadeWeaponNames =
     [
-        "weapon_flashbang",
-        "weapon_hegrenade",
-        "weapon_smokegrenade",
-        "weapon_molotov",
-        "weapon_incgrenade",
-        "weapon_decoy",
-        "weapon_tagrenade",
-        "weapon_frag_grenade"
+        "flashbang",
+        "hegrenade",
+        "smokegrenade",
+        "molotov",
+        "incgrenade",
+        "inferno",
+        "decoy",
+        "tagrenade",
+        "frag_grenade"
     ];
 
     // player_hurt reports these (no "weapon_" prefix) for grenade/fire damage. Used to attribute
@@ -56,8 +55,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
     private int _currentRoundNumber;
     private DateTime _currentRoundStartUtc;
-    private int _ctAliveAtStart;
-    private int _tAliveAtStart;
 
     // EntityIndex-based state arrays for performance
     private readonly bool[] _isPlayerAlive = new bool[MaxPlayers];
@@ -66,8 +63,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     // player session still existing (the lifecycle handler may have already removed it).
     private readonly PlayerTeam[] _playerTeams = new PlayerTeam[MaxPlayers];
     private readonly int[] _playerRoundKills = new int[MaxPlayers];
-    private readonly DateTime[] _playerLastDeathTime = new DateTime[MaxPlayers];
-    private readonly DateTime[] _playerFirstKillTime = new DateTime[MaxPlayers];
+    private readonly int[] _playerRoundNadeKills = new int[MaxPlayers];
 
     // Entry Kill Attempt tracking
     private bool _firstEngagementHappened;
@@ -82,6 +78,12 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         [PlayerTeam.Terrorist] = DateTime.MinValue,
         [PlayerTeam.CounterTerrorist] = DateTime.MinValue
     };
+    private readonly Dictionary<PlayerTeam, ulong> _lastTeamDeathVictim = new()
+    {
+        [PlayerTeam.Terrorist] = 0,
+        [PlayerTeam.CounterTerrorist] = 0
+    };
+    private readonly Dictionary<PlayerTeam, (ulong SteamId, int Opponents)> _clutchCandidates = [];
 
     private int _ctAliveCount;
     private int _tAliveCount;
@@ -106,7 +108,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
     public (int CtAlive, int TAlive) GetAliveCounts() => (_ctAliveCount, _tAliveCount);
 
-        public void RegisterEvents(IEventDispatcher dispatcher)
+    public void RegisterEvents(IEventDispatcher dispatcher)
     {
         dispatcher.Subscribe<EventPlayerDeath>((e, i) => { HandlePlayerDeath(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventPlayerHurt>((e, i) => { HandlePlayerHurt(e); return HookResult.Continue; });
@@ -121,9 +123,24 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     {
         _currentRoundNumber = context.RoundNumber;
         _currentRoundStartUtc = context.RoundStartUtc;
-        _ctAliveAtStart = context.CtAliveAtStart;
-        _tAliveAtStart = context.TAliveAtStart;
         ResetRoundStats();
+
+        foreach (var steamId in _playerSessions.GetActiveSteamIds())
+        {
+            var player = Utilities.GetPlayerFromSteamId(steamId);
+            var state = PlayerControllerState.From(player);
+            if (!state.IsValid || state.IsBot || player is null) continue;
+
+            var index = (int)player.Index;
+            if (index < 0 || index >= MaxPlayers) continue;
+
+            _isPlayerAlive[index] = state.Health > 0;
+            _playerSteamIds[index] = state.SteamId;
+            _playerTeams[index] = state.Team;
+            if (!_isPlayerAlive[index]) continue;
+            if (state.Team == PlayerTeam.CounterTerrorist) _ctAliveCount++;
+            else if (state.Team == PlayerTeam.Terrorist) _tAliveCount++;
+        }
     }
 
     private void ResetRoundStats()
@@ -131,9 +148,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         Array.Clear(_isPlayerAlive);
         Array.Clear(_playerTeams);
         Array.Clear(_playerRoundKills);
-        Array.Clear(_playerFirstKillTime);
-        Array.Clear(_playerLastDeathTime);
-        
+        Array.Clear(_playerRoundNadeKills);
+
         _ctAliveCount = 0;
         _tAliveCount = 0;
 
@@ -144,6 +160,9 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
         _lastTeamDeathTime[PlayerTeam.Terrorist] = DateTime.MinValue;
         _lastTeamDeathTime[PlayerTeam.CounterTerrorist] = DateTime.MinValue;
+        _lastTeamDeathVictim[PlayerTeam.Terrorist] = 0;
+        _lastTeamDeathVictim[PlayerTeam.CounterTerrorist] = 0;
+        _clutchCandidates.Clear();
     }
 
     private void HandlePlayerDeath(EventPlayerDeath @event)
@@ -157,6 +176,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
             if (victim == null) return;
             var victimIndex = (int)victim.Index;
+            if (victimIndex < 0 || victimIndex >= MaxPlayers) return;
 
             // Snapshot state on game thread
             var victimState = PlayerControllerState.From(victim);
@@ -171,11 +191,10 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 _firstEngagementVictimIndex = victimIndex;
                 _playerSessions.MutatePlayer(attackerState.SteamId, stats => stats.Combat.EntryKillAttempts++);
             }
-            
+
             var weaponName = @event.GetStringValue("weapon", "unknown") ?? "unknown";
             var isHeadshot = @event.GetBoolValue("headshot", false);
-            var damage = @event.GetIntValue("dmg_health", 0);
-            
+
             var noscope = @event.GetBoolValue("noscope", false);
             // CS2 player_death keys are "thrusmoke"/"attackerblind" (no underscore); the underscored
             // forms silently returned false, leaving ThroughSmokeKills/BlindKills always 0.
@@ -193,16 +212,18 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             activity?.SetTag("weapon", weaponName);
             activity?.SetTag("headshot", isHeadshot);
 
-            bool isGrenadeKill = GrenadeWeaponNames.Contains(weaponName);
-            bool isFlashAssist = flashAssisted;
+            bool isGrenadeKill = GrenadeWeaponNames.Contains(NormalizeWeaponName(weaponName));
+            bool isFirstKillOfRound = !_firstKillHappened &&
+                attackerState.IsValid && !attackerState.IsBot &&
+                attackerState.SteamId != victimState.SteamId && attackerState.Team != victimTeam;
 
             if (victimState.IsValid && !victimState.IsBot)
             {
                 _playerTeams[victimIndex] = victimTeam;
 
-                if (victimState.PawnHandle != 0 && _config.CurrentValue.EnablePositionTracking)
+                var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
+                if (victimState.PawnHandle != 0 && _config.CurrentValue.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
                 {
-                    var matchUuid = _matchTracker?.CurrentMatch?.MatchUuid;
                     var posEvent = _positionPersistence.GetDeathEvent();
 
                     posEvent.MatchUuid = matchUuid;
@@ -216,8 +237,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     posEvent.MapName = Server.MapName;
                     posEvent.RoundNumber = _currentRoundNumber;
                     posEvent.RoundTime = (int)(now - _currentRoundStartUtc).TotalSeconds;
-                    
-                    _ = _positionPersistence.EnqueueAsync(posEvent, CancellationToken.None);
+
+                    _positionPersistence.TryEnqueue(posEvent);
                 }
 
                 _playerSessions.MutatePlayer(victimState.SteamId, stats =>
@@ -234,41 +255,37 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     }
                 });
 
-                _isPlayerAlive[victimIndex] = false;
-                if (victimTeam == PlayerTeam.CounterTerrorist) _ctAliveCount--;
-                else if (victimTeam == PlayerTeam.Terrorist) _tAliveCount--;
-
-                _lastTeamDeathTime[victimTeam] = now;
-                _playerLastDeathTime[victimIndex] = now;
+                if (_isPlayerAlive[victimIndex])
+                {
+                    _isPlayerAlive[victimIndex] = false;
+                    if (victimTeam == PlayerTeam.CounterTerrorist) _ctAliveCount--;
+                    else if (victimTeam == PlayerTeam.Terrorist) _tAliveCount--;
+                    CaptureClutchCandidate();
+                }
             }
 
-            if (attackerState.IsValid && !attackerState.IsBot && attackerState.SteamId != victimState.SteamId)
+            if (attackerState.IsValid && !attackerState.IsBot && attackerState.SteamId != victimState.SteamId &&
+                attackerState.Team != victimTeam && attackerState.Team is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist)
             {
                 var attackerIndex = (int)attacker!.Index;
+                if (attackerIndex < 0 || attackerIndex >= MaxPlayers) return;
                 var attackerTeam = attackerState.Team;
                 _playerTeams[attackerIndex] = attackerTeam;
                 var (ctAlive, tAlive) = GetAliveCounts();
                 var enemyAlive = attackerTeam == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
                 var teammatesAlive = attackerTeam == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
 
-                // No reliable per-kill victim equipment value is available, so kills carry an equal base
-                // weight; the bonuses below reward the round's first kill and clutch/low-man situations.
-                decimal killWeight = 1.0m;
-
-                bool isFirstKillOfRound = !_firstKillHappened;
                 if (isFirstKillOfRound)
                 {
                     _firstKillHappened = true;
-                    killWeight += 0.15m;
                 }
 
                 bool isClutchKill = teammatesAlive == 1 && enemyAlive >= 1;
-                if (isClutchKill) killWeight += 0.1m;
 
-                if (attackerState.PawnHandle != 0 && victimState.PawnHandle != 0 && _config.CurrentValue.EnablePositionTracking)
+                var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
+                if (attackerState.PawnHandle != 0 && victimState.PawnHandle != 0 && _config.CurrentValue.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
                 {
-                    var killDistance = CalculateDistance(attackerState.Position, victimState.Position);
-                    var matchUuid = _matchTracker?.CurrentMatch?.MatchUuid;
+                    var killDistance = @event.GetFloatValue("distance", 0f);
                     var posEvent = _positionPersistence.GetKillEvent();
 
                     posEvent.MatchUuid = matchUuid;
@@ -290,7 +307,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     posEvent.RoundNumber = _currentRoundNumber;
                     posEvent.RoundTime = (int)(now - _currentRoundStartUtc).TotalSeconds;
 
-                    _ = _positionPersistence.EnqueueAsync(posEvent, CancellationToken.None);
+                    _positionPersistence.TryEnqueue(posEvent);
                 }
 
                 // Round Swing: how much this enemy kill shifted the attacker team's win probability,
@@ -313,7 +330,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 {
                     stats.Round.HadKillThisRound = true;
                     stats.Combat.Kills++;
-                    stats.Combat.WeightedKills += killWeight;
                     if (swingDelta != 0m) stats.Combat.CurrentRoundSwing += swingDelta;
                     stats.Combat.Headshots += isHeadshot ? 1 : 0;
                     stats.Weapon.RecordKill(weaponName);
@@ -321,24 +337,20 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
                     if (isClutchKill) stats.Combat.ClutchKills++;
 
-                    if (_playerFirstKillTime[attackerIndex] == DateTime.MinValue)
-                    { 
-                        _playerFirstKillTime[attackerIndex] = now; 
-                        stats.Combat.FirstKills++; 
-                    }
+                    if (isFirstKillOfRound) stats.Combat.FirstKills++;
 
                     // Entry Kill tracking
-                    if (_firstEngagementAttackerIndex == attackerIndex)
+                    if (_firstEngagementAttackerIndex == attackerIndex && _firstEngagementVictimIndex == victimIndex)
                     {
                         stats.Combat.EntryKills++;
                         stats.Combat.EntryKillAttemptWins++;
                     }
-                    
+
                     _playerRoundKills[attackerIndex]++;
                     var killsThisRound = _playerRoundKills[attackerIndex];
                     stats.Combat.CurrentRoundKills = killsThisRound;
-                    
-                    switch(killsThisRound)
+
+                    switch (killsThisRound)
                     {
                         case 2: stats.Combat.MultiKill2++; break;
                         case 3: stats.Combat.MultiKill3++; break;
@@ -349,23 +361,13 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     if (noscope) stats.Combat.Noscopes++;
                     if (thruSmoke) stats.Combat.ThroughSmokeKills++;
                     if (attackerBlind) stats.Combat.BlindKills++;
-                    if (isFlashAssist) 
-                    {
-                        stats.Utility.FlashAssists++;
-                        // Capture victim's blind duration at time of death for Flash Assist Duration
-                        // Use IGameScheduler to safely read from the entity if needed, 
-                        // but since we are on the game thread in HandlePlayerDeath, we can access it.
-                        if (victim.PlayerPawn.Value != null)
-                        {
-                            stats.Utility.FlashAssistDuration += (int)(victim.PlayerPawn.Value.FlashDuration * 1000);
-                        }
-                    }
                     if (penetrated) stats.Combat.WallbangKills++;
 
                     if (isGrenadeKill)
                     {
                         stats.Combat.NadeKills++;
-                        if (killsThisRound >= 2) stats.Combat.MultiKillNades++;
+                        _playerRoundNadeKills[attackerIndex]++;
+                        if (_playerRoundNadeKills[attackerIndex] == 2) stats.Combat.MultiKillNades++;
                     }
 
                     bool highImpact = killsThisRound >= 3 || (teammatesAlive == 1 && enemyAlive >= 1) || isFirstKillOfRound;
@@ -373,11 +375,24 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     else if (teammatesAlive >= enemyAlive + 3) stats.Combat.LowImpactKills++;
                 });
 
-                if (victimTeam != PlayerTeam.Spectator && _lastTeamDeathTime.TryGetValue(victimTeam, out var lastDeath) && lastDeath > DateTime.MinValue && lastDeath != now && (now - lastDeath).TotalSeconds <= tradeWindowSeconds)
+                var lastDeath = _lastTeamDeathTime[attackerTeam];
+                var tradedSteamId = _lastTeamDeathVictim[attackerTeam];
+                if (tradedSteamId != 0 && (now - lastDeath).TotalSeconds <= tradeWindowSeconds)
                 {
                     _playerSessions.MutatePlayer(attackerState.SteamId, stats => { stats.Combat.TradeKills++; stats.Round.DidTradeThisRound = true; });
-                    if (victimState.IsValid && !victimState.IsBot) _playerSessions.MutatePlayer(victimState.SteamId, stats => { stats.Combat.TradedDeaths++; stats.Round.WasTradedThisRound = true; });
+                    _playerSessions.MutatePlayer(tradedSteamId, stats => { stats.Combat.TradedDeaths++; stats.Round.WasTradedThisRound = true; });
+                    _lastTeamDeathVictim[attackerTeam] = 0;
                 }
+            }
+
+            if (victimState.IsValid && !victimState.IsBot && victimTeam is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist)
+            {
+                if (isFirstKillOfRound)
+                {
+                    _playerSessions.MutatePlayer(victimState.SteamId, stats => stats.Combat.FirstDeaths++);
+                }
+                _lastTeamDeathTime[victimTeam] = now;
+                _lastTeamDeathVictim[victimTeam] = victimState.SteamId;
             }
 
             if (assisterState.IsValid && !assisterState.IsBot && assisterState.SteamId != victimState.SteamId && assisterState.SteamId != attackerState.SteamId)
@@ -387,7 +402,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     stats.Round.HadAssistThisRound = true;
                     stats.Combat.Assists++;
                     stats.CurrentTeam = assisterState.Team;
-                    if (flashAssisted) 
+                    if (flashAssisted)
                     {
                         stats.Utility.FlashAssists++;
                         stats.Round.WasFlashedForKill = true;
@@ -407,13 +422,13 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         {
             var victim = @event.GetPlayerOrDefault("userid");
             var attacker = @event.GetPlayerOrDefault("attacker");
-            
+
             if (victim == null) return;
             var victimIndex = (int)victim.Index;
 
             var victimState = PlayerControllerState.From(victim);
             var attackerState = PlayerControllerState.From(attacker);
-            
+
             var weapon = (@event.GetStringValue("weapon", "unknown") ?? "unknown").ToLowerInvariant();
             var damage = @event.GetIntValue("dmg_health", 0);
             var damageArmor = @event.GetIntValue("dmg_armor", 0);
@@ -428,10 +443,16 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 _firstEngagementVictimIndex = victimIndex;
 
                 _playerSessions.MutatePlayer(attackerState.SteamId, stats => stats.Combat.EntryKillAttempts++);
-                _logger.LogInformation("First engagement of round {Round}: {Attacker} vs {Victim}", _currentRoundNumber, attackerState.PlayerName, victimState.PlayerName);
+                _logger.LogDebug("First engagement of round {Round}: {Attacker} vs {Victim}", _currentRoundNumber, attackerState.PlayerName, victimState.PlayerName);
             }
 
-            if (victimState.IsValid && !victimState.IsBot)
+            var isEnemyDamage = attackerState.IsValid && !attackerState.IsBot &&
+                victimState.IsValid && !victimState.IsBot &&
+                attackerState.SteamId != victimState.SteamId && attackerState.Team != victimState.Team &&
+                attackerState.Team is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist &&
+                victimState.Team is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist;
+
+            if (isEnemyDamage)
             {
                 _playerSessions.MutatePlayer(victimState.SteamId, stats =>
                 {
@@ -440,7 +461,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 });
             }
 
-            if (attackerState.IsValid && !attackerState.IsBot && attackerState.SteamId != victimState.SteamId)
+            if (isEnemyDamage)
             {
                 _damageReport.RecordDamage(attackerState.SteamId, victimState.SteamId, damage);
                 _playerSessions.MutatePlayer(attackerState.SteamId, stats =>
@@ -486,14 +507,14 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
             var weapon = @event.GetStringValue("weapon", "unknown") ?? "unknown";
             var weaponLower = weapon.ToLowerInvariant();
-            
+
             _playerSessions.MutatePlayer(playerState.SteamId, stats =>
             {
                 // Grenade throws are not gun shots; counting them would inflate accuracy (ShotsFired
                 // is the denominator for hit-rate, and a grenade can never register a ShotsHit). The
                 // per-type thrown counts come from the dedicated grenade_thrown event
                 // (UtilityEventProcessor); here we only exclude grenades from the gun-accuracy math.
-                if (GrenadeWeaponNames.Contains(weaponLower))
+                if (GrenadeWeaponNames.Contains(NormalizeWeaponName(weaponLower)))
                     return;
 
                 stats.Combat.ShotsFired++;
@@ -510,7 +531,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         {
             var player = @event.GetPlayerOrDefault("userid");
             if (player == null) return;
-            
+
             var playerState = PlayerControllerState.From(player);
             if (!playerState.IsValid || playerState.IsBot) return;
 
@@ -518,11 +539,11 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             _playerSessions.MutatePlayer(playerState.SteamId, stats =>
             {
                 stats.Combat.MVPs++;
-                switch (mvpReason) 
-                { 
-                    case 0: stats.Combat.MvpsEliminations++; break; 
-                    case 1: stats.Combat.MvpsBomb++; break; 
-                    case 2: stats.Combat.MvpsHostage++; break; 
+                switch (mvpReason)
+                {
+                    case 0: stats.Combat.MvpsEliminations++; break;
+                    case 1: stats.Combat.MvpsBomb++; break;
+                    case 2: stats.Combat.MvpsHostage++; break;
                 }
             });
         }
@@ -533,9 +554,9 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     {
         try
         {
-            var avenger = @event.GetPlayerOrDefault("avenger_userid");
+            var avenger = @event.AvengerId;
             var avengerState = PlayerControllerState.From(avenger);
-            if (avengerState.IsValid && !avengerState.IsBot) 
+            if (avengerState.IsValid && !avengerState.IsBot)
                 _playerSessions.MutatePlayer(avengerState.SteamId, stats => stats.Combat.Revenges++);
         }
         catch (Exception ex) { _logger.LogError(ex, "Error handling player avenged teammate event"); }
@@ -548,6 +569,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             var player = @event.GetPlayerOrDefault("userid");
             if (player == null) return;
             var playerIndex = (int)player.Index;
+            if (playerIndex < 0 || playerIndex >= MaxPlayers) return;
 
             var playerState = PlayerControllerState.From(player);
             if (playerState.IsValid && !playerState.IsBot)
@@ -567,7 +589,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         catch (Exception ex) { _logger.LogError(ex, "Error handling player spawned event"); }
     }
 
-        private void HandlePlayerDisconnected(EventPlayerDisconnect @event)
+    private void HandlePlayerDisconnected(EventPlayerDisconnect @event)
     {
         try
         {
@@ -587,6 +609,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 _playerSteamIds[playerIndex] = 0;
                 _playerTeams[playerIndex] = PlayerTeam.Spectator;
                 _playerRoundKills[playerIndex] = 0;
+                _playerRoundNadeKills[playerIndex] = 0;
             }
         }
         catch (Exception ex) { _logger.LogError(ex, "Error handling player disconnected event"); }
@@ -612,40 +635,55 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     {
         try
         {
-            var (ctAlive, tAlive) = GetAliveCounts();
-            for (int i = 0; i < MaxPlayers; i++)
+            foreach (var (team, candidate) in _clutchCandidates)
             {
-                if (_isPlayerAlive[i])
+                _playerSessions.MutatePlayer(candidate.SteamId, stats =>
                 {
-                    var steamId = _playerSteamIds[i];
-                    if (steamId == 0) continue;
-
-                    _playerSessions.MutatePlayer(steamId, stats =>
+                    if (team == winningTeam && IsPlayerAlive(candidate.SteamId))
                     {
-                        var team = stats.CurrentTeam;
-                        var teamAlive = team == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
-                        var enemyAlive = team == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
-                        if (teamAlive == 1 && enemyAlive >= 1)
-                        {
-                            if (team == winningTeam)
-                            {
-                                var settings = _config.CurrentValue.ClutchSettings;
-                                var clutchImpact = settings.BaseMultiplier + (enemyAlive * settings.DifficultyWeight);
-                                stats.Combat.ClutchesWon++; 
-                                stats.Combat.ClutchPoints += clutchImpact;
-                            }
-                            else stats.Combat.ClutchesLost++;
-                        }
-                    });
-                }
+                        var settings = _config.CurrentValue.ClutchSettings;
+                        stats.Combat.ClutchesWon++;
+                        stats.Combat.ClutchPoints += settings.BaseMultiplier + (candidate.Opponents * settings.DifficultyWeight);
+                    }
+                    else if (team != winningTeam)
+                    {
+                        stats.Combat.ClutchesLost++;
+                    }
+                });
             }
         }
         catch (Exception ex) { _logger.LogError(ex, "Error updating clutch statistics"); }
     }
 
-    private static float CalculateDistance(Vector pos1, Vector pos2)
+    private void CaptureClutchCandidate()
     {
-        var dx = pos2.X - pos1.X; var dy = pos2.Y - pos1.Y; var dz = pos2.Z - pos1.Z;
-        return (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
+        CaptureClutchCandidate(PlayerTeam.CounterTerrorist, _ctAliveCount, _tAliveCount);
+        CaptureClutchCandidate(PlayerTeam.Terrorist, _tAliveCount, _ctAliveCount);
     }
+
+    private void CaptureClutchCandidate(PlayerTeam team, int alliesAlive, int opponentsAlive)
+    {
+        if (alliesAlive != 1 || opponentsAlive < 1 || _clutchCandidates.ContainsKey(team)) return;
+
+        for (var i = 0; i < MaxPlayers; i++)
+        {
+            if (_isPlayerAlive[i] && _playerTeams[i] == team && _playerSteamIds[i] != 0)
+            {
+                _clutchCandidates[team] = (_playerSteamIds[i], opponentsAlive);
+                return;
+            }
+        }
+    }
+
+    private bool IsPlayerAlive(ulong steamId)
+    {
+        for (var i = 0; i < MaxPlayers; i++)
+        {
+            if (_playerSteamIds[i] == steamId) return _isPlayerAlive[i];
+        }
+        return false;
+    }
+
+    private static string NormalizeWeaponName(string weapon) =>
+        weapon.StartsWith("weapon_", StringComparison.OrdinalIgnoreCase) ? weapon[7..] : weapon;
 }

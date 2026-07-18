@@ -1,4 +1,3 @@
-using System.Numerics;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Utils;
 using Vector = CounterStrikeSharp.API.Modules.Utils.Vector;
@@ -14,18 +13,11 @@ public sealed record PlayerControllerState
     public required ulong SteamId { get; init; }
     public required string PlayerName { get; init; }
     public required int Health { get; init; }
-    public required int Armor { get; init; }
-    public required bool HasHelmet { get; init; }
     public required PlayerTeam Team { get; init; }
     public required Vector Position { get; init; }
-    public required QAngle EyeAngles { get; init; }
-    public required Vector Velocity { get; init; }
+    public required Vector GrenadeThrowPosition { get; init; }
     public required int Money { get; init; }
-    public required int Score { get; init; }
-    public required int Kills { get; init; }
-    public required int Deaths { get; init; }
-    public required int Assists { get; init; }
-    public required int Mvps { get; init; }
+    public required int EquipmentValue { get; init; }
     public required bool IsValid { get; init; }
     public required bool IsBot { get; init; }
     public required uint PawnHandle { get; init; }
@@ -39,18 +31,11 @@ public sealed record PlayerControllerState
                 SteamId = 0,
                 PlayerName = "Unknown",
                 Health = 0,
-                Armor = 0,
-                HasHelmet = false,
                 Team = PlayerTeam.Spectator,
                 Position = new Vector(0, 0, 0),
-                EyeAngles = new QAngle(0, 0, 0),
-                Velocity = new Vector(0, 0, 0),
+                GrenadeThrowPosition = new Vector(0, 0, 0),
                 Money = 0,
-                Score = 0,
-                Kills = 0,
-                Deaths = 0,
-                Assists = 0,
-                Mvps = 0,
+                EquipmentValue = 0,
                 IsValid = false,
                 IsBot = false,
                 PawnHandle = 0
@@ -63,18 +48,11 @@ public sealed record PlayerControllerState
             SteamId = player.SteamID,
             PlayerName = player.PlayerName,
             Health = player.Health,
-            Armor = player.PlayerPawn.Value?.ArmorValue ?? 0,
-            HasHelmet = false, // Placeholder until correct ItemServices property is found
             Team = (PlayerTeam)player.TeamNum,
             Position = pawn?.AbsOrigin ?? new Vector(0, 0, 0),
-            EyeAngles = pawn?.EyeAngles ?? new QAngle(0, 0, 0),
-            Velocity = pawn?.AbsVelocity ?? new Vector(0, 0, 0),
+            GrenadeThrowPosition = pawn?.StashedGrenadeThrowPosition ?? pawn?.AbsOrigin ?? new Vector(0, 0, 0),
             Money = player.InGameMoneyServices?.Account ?? 0,
-            Score = player.Score,
-            Kills = player.ActionTrackingServices?.MatchStats.Kills ?? 0,
-            Deaths = player.ActionTrackingServices?.MatchStats.Deaths ?? 0,
-            Assists = player.ActionTrackingServices?.MatchStats.Assists ?? 0,
-            Mvps = 0, // CSMatchStats_t missing Mvps prop in this version
+            EquipmentValue = pawn?.CurrentEquipmentValue ?? 0,
             IsValid = true,
             IsBot = player.IsBot,
             PawnHandle = (uint)(pawn?.Handle ?? 0)

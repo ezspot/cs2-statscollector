@@ -21,95 +21,83 @@ public interface IGameEventHandlerService
     void RegisterEvents(BasePlugin plugin);
 }
 
-    public sealed class GameEventHandlerService : IGameEventHandlerService
+public sealed class GameEventHandlerService : IGameEventHandlerService
+{
+    private readonly ILogger<GameEventHandlerService> _logger;
+    private readonly IPlayerSessionService _playerSessions;
+    private readonly IScrimManager _scrimManager;
+    private readonly IPauseService _pauseService;
+    private readonly IRoundBackupService _roundBackup;
+    private readonly IOptionsMonitor<PluginConfig> _configMonitor;
+    private readonly IAnalyticsService _analytics;
+    private readonly IEnumerable<IGameHandler> _handlers;
+    private readonly IEnumerable<IEventProcessor> _processors;
+    private readonly IEventDispatcher _dispatcher;
+
+    private PluginConfig _config => _configMonitor.CurrentValue;
+
+    public GameEventHandlerService(
+        ILogger<GameEventHandlerService> logger,
+        IPlayerSessionService playerSessions,
+        IScrimManager scrimManager,
+        IPauseService pauseService,
+        IRoundBackupService roundBackup,
+        IOptionsMonitor<PluginConfig> configMonitor,
+        IAnalyticsService analytics,
+        IEnumerable<IGameHandler> handlers,
+        IEnumerable<IEventProcessor> processors,
+        IEventDispatcher dispatcher)
     {
-        private readonly ILogger<GameEventHandlerService> _logger;
-        private readonly IPlayerSessionService _playerSessions;
-        private readonly IScrimManager _scrimManager;
-        private readonly IPauseService _pauseService;
-        private readonly IRoundBackupService _roundBackup;
-        private readonly IOptionsMonitor<PluginConfig> _configMonitor;
-        private readonly IAnalyticsService _analytics;
-        private readonly IMatchReadyService _matchReady;
-        private readonly IEnumerable<IGameHandler> _handlers;
-        private readonly IEnumerable<IEventProcessor> _processors;
-        private readonly IEventDispatcher _dispatcher;
-        private readonly IGameScheduler _scheduler;
+        _logger = logger;
+        _playerSessions = playerSessions;
+        _scrimManager = scrimManager;
+        _pauseService = pauseService;
+        _roundBackup = roundBackup;
+        _configMonitor = configMonitor;
+        _analytics = analytics;
+        _handlers = handlers;
+        _processors = processors;
+        _dispatcher = dispatcher;
+    }
 
-        private PluginConfig _config => _configMonitor.CurrentValue;
-
-        public GameEventHandlerService(
-            ILogger<GameEventHandlerService> logger,
-            IPlayerSessionService playerSessions,
-            IScrimManager scrimManager,
-            IPauseService pauseService,
-            IRoundBackupService roundBackup,
-            IOptionsMonitor<PluginConfig> configMonitor,
-            IAnalyticsService analytics,
-            IMatchReadyService matchReady,
-            IEnumerable<IGameHandler> handlers,
-            IEnumerable<IEventProcessor> processors,
-            IEventDispatcher dispatcher,
-            IGameScheduler scheduler)
+    public void RegisterEvents(BasePlugin plugin)
+    {
+        foreach (var handler in _handlers)
         {
-            _logger = logger;
-            _playerSessions = playerSessions;
-            _scrimManager = scrimManager;
-            _pauseService = pauseService;
-            _roundBackup = roundBackup;
-            _configMonitor = configMonitor;
-            _analytics = analytics;
-            _matchReady = matchReady;
-            _handlers = handlers;
-            _processors = processors;
-            _dispatcher = dispatcher;
-            _scheduler = scheduler;
+            handler.Register(plugin);
         }
 
-        public void RegisterEvents(BasePlugin plugin)
+        _dispatcher.Initialize(plugin);
+        foreach (var processor in _processors)
         {
-            // Register all modular handlers (direct game-event hooks for round/match/player lifecycle).
-            foreach (var handler in _handlers)
-            {
-                handler.Register(plugin);
-            }
-
-            // Wire the event-processor pipeline: each processor subscribes to the dispatcher, which
-            // auto-hooks the underlying game event on first subscription. Runs on the game thread.
-            _dispatcher.Initialize(plugin);
-            foreach (var processor in _processors)
-            {
-                processor.RegisterEvents(_dispatcher);
-            }
-
-            // Always available.
-            plugin.AddCommand("css_stats", "Show current stats", (player, info) => { if (ValidatePlayer(player)) OnStatsCommand(player!, info); });
-
-            // Scrim / match-management commands are only registered when the scrim system is enabled.
-            if (!_config.EnableScrim) return;
-
-            plugin.AddCommand("css_scrim", "Scrim system admin command", (player, info) => { if (ValidatePlayer(player)) OnScrimCommand(player!, info); });
-            plugin.AddCommand("css_ready", "Player ready command", (player, info) => { if (ValidatePlayer(player)) OnReadyCommand(player!, info); });
-            plugin.AddCommand("css_unready", "Player unready command", (player, info) => { if (ValidatePlayer(player)) OnUnreadyCommand(player!, info); });
-            plugin.AddCommand("css_vote", "Player vote command", (player, info) => { if (ValidatePlayer(player)) OnVoteCommand(player!, info); });
-            plugin.AddCommand("css_pick", "Captain pick command", (player, info) => { if (ValidatePlayer(player)) OnPickCommand(player!, info); });
-            plugin.AddCommand("css_ct", "Select CT side after knife round", (player, info) => { if (ValidatePlayer(player)) OnCtCommand(player!, info); });
-            plugin.AddCommand("css_pause", "Pause the match", (player, info) => { if (ValidatePlayer(player)) OnPauseCommand(player, info); });
-            plugin.AddCommand("css_unpause", "Unpause the match", (player, info) => { if (ValidatePlayer(player)) OnUnpauseCommand(player, info); });
-            plugin.AddCommand("css_restore", "Restore a previous round", (player, info) => { if (ValidatePlayer(player)) OnRestoreCommand(player!, info); });
-            plugin.AddCommand("css_t", "Select T side", (player, info) => { if (ValidatePlayer(player)) OnTCommand(player!, info); });
+            processor.RegisterEvents(_dispatcher);
         }
 
-        private bool ValidatePlayer(CCSPlayerController? player)
-        {
-            if (player == null) return true; // Console is allowed
-            if (!player.IsValid) return false;
-            // In CS2, a valid SteamID is required for persistent stats. 0 usually indicates a bot or unauthenticated player.
-            if (player.SteamID == 0) return false;
-            return true;
-        }
+        plugin.AddCommand("css_stats", "Show current stats", (player, info) => { if (ValidatePlayer(player)) OnStatsCommand(player!, info); });
 
-        #region Command Handlers
+        if (!_config.EnableScrim) return;
+
+        plugin.AddCommand("css_scrim", "Scrim system admin command", (player, info) => { if (ValidatePlayer(player)) OnScrimCommand(player!, info); });
+        plugin.AddCommand("css_ready", "Player ready command", (player, info) => { if (ValidatePlayer(player)) OnReadyCommand(player!, info); });
+        plugin.AddCommand("css_unready", "Player unready command", (player, info) => { if (ValidatePlayer(player)) OnUnreadyCommand(player!, info); });
+        plugin.AddCommand("css_vote", "Player vote command", (player, info) => { if (ValidatePlayer(player)) OnVoteCommand(player!, info); });
+        plugin.AddCommand("css_pick", "Captain pick command", (player, info) => { if (ValidatePlayer(player)) OnPickCommand(player!, info); });
+        plugin.AddCommand("css_ct", "Select CT side after knife round", (player, info) => { if (ValidatePlayer(player)) OnCtCommand(player!, info); });
+        plugin.AddCommand("css_pause", "Pause the match", (player, info) => { if (ValidatePlayer(player)) OnPauseCommand(player, info); });
+        plugin.AddCommand("css_unpause", "Unpause the match", (player, info) => { if (ValidatePlayer(player)) OnUnpauseCommand(player, info); });
+        plugin.AddCommand("css_restore", "Restore a previous round", (player, info) => { if (ValidatePlayer(player)) OnRestoreCommand(player, info); });
+        plugin.AddCommand("css_t", "Select T side", (player, info) => { if (ValidatePlayer(player)) OnTCommand(player!, info); });
+    }
+
+    private static bool ValidatePlayer(CCSPlayerController? player)
+    {
+        if (player == null) return true;
+        if (!player.IsValid) return false;
+        if (player.SteamID == 0) return false;
+        return true;
+    }
+
+    #region Command Handlers
     private void OnStatsCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null)
@@ -118,23 +106,23 @@ public interface IGameEventHandlerService
             return;
         }
 
-        if (_playerSessions.TryGetPlayer(player.SteamID, out var stats))
+        var message = _playerSessions.WithPlayer(player.SteamID, stats =>
         {
             var adr = _analytics.CalculateADR(stats);
             var rating = _analytics.CalculateHLTVRating(stats);
             var perfScore = _analytics.CalculatePerformanceScore(stats);
             var rank = _analytics.GetPlayerRank(perfScore);
-            
-            player.PrintToChat($" [statsCollector] K:{stats.Combat.Kills} D:{stats.Combat.Deaths} A:{stats.Combat.Assists} ADR:{adr:F0} Rating:{rating:F2} Rank:{rank}");
-        }
+
+            return $" [statsCollector] K:{stats.Combat.Kills} D:{stats.Combat.Deaths} A:{stats.Combat.Assists} ADR:{adr:F0} Rating:{rating:F2} Rank:{rank}";
+        }, string.Empty);
+        if (message.Length > 0) player.PrintToChat(message);
     }
 
 
     private void OnScrimCommand(CCSPlayerController? player, CommandInfo command)
     {
-        var subCommand = command.GetArg(1).ToLower();
-        // Admin commands
-        if (subCommand is "start" or "stop" or "setcaptain" or "set" or "recover" or "practice" or "veto")
+        var subCommand = command.GetArg(1).ToLowerInvariant();
+        if (subCommand is "start" or "stop" or "setcaptain" or "set" or "recover" or "practice")
         {
             if (player != null && !AdminUtils.HasPermission(player, "@css/root", "@css/admin", "@css/scrimadmin"))
             {
@@ -144,22 +132,20 @@ public interface IGameEventHandlerService
 
             switch (subCommand)
             {
-                case "start": _ = _scrimManager.StartScrimAsync(); break;
-                case "stop": _ = _scrimManager.StopScrimAsync(); break;
-                case "recover": _ = _scrimManager.RecoverAsync(); break;
+                case "start": RunCommand(_scrimManager.StartScrimAsync(), "start scrim"); break;
+                case "stop": RunCommand(_scrimManager.StopScrimAsync(), "stop scrim"); break;
+                case "recover": RunCommand(_scrimManager.RecoverAsync(), "recover scrim"); break;
                 case "practice":
                     if (command.ArgCount < 3) return;
-                    var enable = command.GetArg(2).ToLower() == "on";
-                    _ = _scrimManager.SetPracticeModeAsync(enable);
-                    break;
-                case "veto":
-                    _ = _scrimManager.StartVetoAsync();
+                    var enable = string.Equals(command.GetArg(2), "on", StringComparison.OrdinalIgnoreCase);
+                    RunCommand(_scrimManager.SetPracticeModeAsync(enable), "set practice mode");
                     break;
                 case "setcaptain":
                     if (command.ArgCount < 4) return;
-                    var team = int.Parse(command.GetArg(2));
-                    var target = Utilities.GetPlayerFromSteamId(ulong.Parse(command.GetArg(3)));
-                    if (target != null) _ = _scrimManager.SetCaptainAsync(team, target.SteamID);
+                    if (!int.TryParse(command.GetArg(2), out var team) ||
+                        !ulong.TryParse(command.GetArg(3), out var targetSteamId)) return;
+                    var target = Utilities.GetPlayerFromSteamId(targetSteamId);
+                    if (target != null) RunCommand(_scrimManager.SetCaptainAsync(team, target.SteamID), "set captain");
                     break;
                 case "set":
                     if (command.ArgCount < 4) return;
@@ -173,62 +159,59 @@ public interface IGameEventHandlerService
 
         switch (subCommand)
         {
-            case "ready": _ = _scrimManager.SetReadyAsync(player.SteamID, true); break;
-            case "unready": _ = _scrimManager.SetReadyAsync(player.SteamID, false); break;
+            case "ready": RunCommand(_scrimManager.SetReadyAsync(player.SteamID, true), "ready player"); break;
+            case "unready": RunCommand(_scrimManager.SetReadyAsync(player.SteamID, false), "unready player"); break;
             case "vote":
                 if (command.ArgCount < 3) return;
-                _ = _scrimManager.VoteMapAsync(player.SteamID, command.GetArg(2));
+                RunCommand(_scrimManager.VoteMapAsync(player.SteamID, command.GetArg(2)), "vote map");
                 break;
             case "pick":
                 if (command.ArgCount < 3) return;
-                var pickTarget = Utilities.GetPlayerFromSteamId(ulong.Parse(command.GetArg(2)));
-                if (pickTarget != null) _ = _scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID);
+                if (!ulong.TryParse(command.GetArg(2), out var pickTargetSteamId)) return;
+                var pickTarget = Utilities.GetPlayerFromSteamId(pickTargetSteamId);
+                if (pickTarget != null) RunCommand(_scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID), "pick player");
                 break;
-            case "ct": _ = _scrimManager.SelectSideAsync(player.SteamID, "ct"); break;
-            case "t": _ = _scrimManager.SelectSideAsync(player.SteamID, "t"); break;
+            case "ct": RunCommand(_scrimManager.SelectSideAsync(player.SteamID, "ct"), "select CT side"); break;
+            case "t": RunCommand(_scrimManager.SelectSideAsync(player.SteamID, "t"), "select T side"); break;
         }
     }
 
     private void OnReadyCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null) return;
-        _matchReady.SetReady(player.SteamID, true);
-        if (_matchReady.AreAllReady())
-        {
-            Server.PrintToChatAll($" {ChatColors.Green}[Ready]{ChatColors.Default} All players are ready! Match starting...");
-            _ = _scrimManager.StartScrimAsync();
-        }
+        RunCommand(_scrimManager.SetReadyAsync(player.SteamID, true), "ready player");
     }
 
     private void OnUnreadyCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null) return;
-        _matchReady.SetReady(player.SteamID, false);
+        RunCommand(_scrimManager.SetReadyAsync(player.SteamID, false), "unready player");
     }
 
     private void OnVoteCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null || command.ArgCount < 2) return;
-        _ = _scrimManager.VoteMapAsync(player.SteamID, command.GetArg(1));
+        RunCommand(_scrimManager.VoteMapAsync(player.SteamID, command.GetArg(1)), "vote map");
     }
 
     private void OnPickCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null || command.ArgCount < 2) return;
-        var pickTarget = Utilities.GetPlayerFromSteamId(ulong.Parse(command.GetArg(1)));
-        if (pickTarget != null) _ = _scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID);
+        if (!ulong.TryParse(command.GetArg(1), out var targetSteamId)) return;
+        var pickTarget = Utilities.GetPlayerFromSteamId(targetSteamId);
+        if (pickTarget != null) RunCommand(_scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID), "pick player");
     }
 
     private void OnCtCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null) return;
-        _ = _scrimManager.SelectSideAsync(player.SteamID, "ct");
+        RunCommand(_scrimManager.SelectSideAsync(player.SteamID, "ct"), "select CT side");
     }
 
     private void OnTCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null) return;
-        _ = _scrimManager.SelectSideAsync(player.SteamID, "t");
+        RunCommand(_scrimManager.SelectSideAsync(player.SteamID, "t"), "select T side");
     }
 
     private void OnPauseCommand(CCSPlayerController? player, CommandInfo command)
@@ -236,7 +219,7 @@ public interface IGameEventHandlerService
         var type = PauseType.Tactical;
         if (command.ArgCount > 1)
         {
-            var arg = command.GetArg(1).ToLower();
+            var arg = command.GetArg(1).ToLowerInvariant();
             type = arg switch
             {
                 "tech" or "technical" => PauseType.Technical,
@@ -245,32 +228,34 @@ public interface IGameEventHandlerService
             };
         }
 
+        if (player is null && type == PauseType.Tactical) type = PauseType.Admin;
+
         if (type == PauseType.Admin && player != null && !AdminUtils.HasPermission(player, "@css/root", "@css/admin"))
         {
             player.PrintToChat(" [Scrim] You do not have permission for admin pauses.");
             return;
         }
 
-        _ = _pauseService.RequestPauseAsync(player, type);
+        _pauseService.RequestPause(player, type);
     }
 
     private void OnUnpauseCommand(CCSPlayerController? player, CommandInfo command)
     {
-        _ = _pauseService.RequestUnpauseAsync(player);
+        _pauseService.RequestUnpause(player);
     }
 
-    private void OnRestoreCommand(CCSPlayerController player, CommandInfo command)
+    private void OnRestoreCommand(CCSPlayerController? player, CommandInfo command)
     {
-        if (!AdminUtils.HasPermission(player, "@css/root", "@css/admin"))
+        if (player is not null && !AdminUtils.HasPermission(player, "@css/root", "@css/admin"))
         {
-            player.PrintToChat(" [statsCollector] You do not have permission to restore rounds.");
+            command.ReplyToCommand(" [statsCollector] You do not have permission to restore rounds.");
             return;
         }
 
         if (command.ArgCount < 2)
         {
             var rounds = string.Join(", ", _roundBackup.GetAvailableRounds());
-            player.PrintToChat($" [statsCollector] Usage: .restore <round>. Available rounds: {rounds}");
+            command.ReplyToCommand($" [statsCollector] Usage: .restore <round>. Available rounds: {rounds}");
             return;
         }
 
@@ -278,12 +263,26 @@ public interface IGameEventHandlerService
         {
             if (_roundBackup.RestoreRound(roundNumber))
             {
-                player.PrintToChat($" [statsCollector] Round {roundNumber} restore initiated.");
+                command.ReplyToCommand($" [statsCollector] Round {roundNumber} restore initiated.");
             }
             else
             {
-                player.PrintToChat($" [statsCollector] Failed to restore round {roundNumber}.");
+                command.ReplyToCommand($" [statsCollector] Failed to restore round {roundNumber}.");
             }
+        }
+    }
+
+    private void RunCommand(Task command, string operation) => _ = ObserveCommandAsync(command, operation);
+
+    private async Task ObserveCommandAsync(Task command, string operation)
+    {
+        try
+        {
+            await command.ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to {Operation}", operation);
         }
     }
     #endregion

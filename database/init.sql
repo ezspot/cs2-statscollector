@@ -1,21 +1,10 @@
--- statsCollector Database Schema
--- Creator: Anders Giske Hagen
--- GitHub: https://github.com/ezspot/cs2-statscollector
-
-CREATE DATABASE IF NOT EXISTS `cs2_statscollector`
-    CHARACTER SET utf8mb4
-    COLLATE utf8mb4_unicode_ci;
-
-USE `cs2_statscollector`;
-
 -- 1. Base Tables (No dependencies)
 CREATE TABLE IF NOT EXISTS players (
     id INT AUTO_INCREMENT PRIMARY KEY,
     steam_id BIGINT UNIQUE NOT NULL,
     name VARCHAR(255),
     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_players_steam_id (steam_id)
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS matches (
@@ -120,7 +109,7 @@ CREATE TABLE IF NOT EXISTS player_stats (
     footsteps INT DEFAULT 0,
     clutches_won INT DEFAULT 0,
     clutches_lost INT DEFAULT 0,
-    clutch_points DECIMAL(5,3) DEFAULT 0,
+    clutch_points DECIMAL(10,3) DEFAULT 0,
     mvps_eliminations INT DEFAULT 0,
     mvps_bomb INT DEFAULT 0,
     mvps_hostage INT DEFAULT 0,
@@ -140,11 +129,10 @@ CREATE TABLE IF NOT EXISTS player_stats (
     utility_score DECIMAL(5,3) DEFAULT 0,
     round_swing DECIMAL(7,3) DEFAULT 0,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_player_stats_updated_at (updated_at),
+    INDEX idx_player_stats_hltv_rating (hltv_rating DESC),
     FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
-
-CREATE INDEX idx_player_stats_updated_at ON player_stats (updated_at);
-CREATE INDEX idx_player_stats_hltv_rating ON player_stats (hltv_rating DESC);
 
 CREATE TABLE IF NOT EXISTS rounds (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -234,14 +222,14 @@ CREATE TABLE IF NOT EXISTS player_advanced_analytics (
     top_weapon_by_kills VARCHAR(100) NOT NULL,
     survival_rating DECIMAL(5,3) NOT NULL,
     utility_score DECIMAL(5,3) NOT NULL,
-    clutch_points DECIMAL(5,3) NOT NULL,
+    clutch_points DECIMAL(10,3) NOT NULL,
     flash_assisted_kills INT DEFAULT 0,
     wallbang_kills INT DEFAULT 0,
     idempotency_key VARCHAR(100) UNIQUE NULL,
+    FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
     FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
     UNIQUE KEY uq_player_analytics_steam_calculated (steam_id, calculated_at),
-    INDEX idx_player_advanced_analytics_calculated_at (calculated_at),
-    INDEX idx_player_advanced_analytics_idempotency (idempotency_key)
+    INDEX idx_player_advanced_analytics_calculated_at (calculated_at)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS kill_positions (
@@ -263,6 +251,7 @@ CREATE TABLE IF NOT EXISTS kill_positions (
     round_number INT NOT NULL,
     round_time_seconds INT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
     FOREIGN KEY (killer_steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
     FOREIGN KEY (victim_steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
     SPATIAL INDEX idx_kill_pos_killer (killer_pos),
@@ -283,6 +272,7 @@ CREATE TABLE IF NOT EXISTS death_positions (
     round_number INT NOT NULL,
     round_time_seconds INT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
     FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
     SPATIAL INDEX idx_death_pos_spatial (pos),
     INDEX idx_death_pos_map (map_name)
@@ -304,6 +294,7 @@ CREATE TABLE IF NOT EXISTS utility_positions (
     round_number INT NOT NULL,
     round_time_seconds INT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
     FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
     SPATIAL INDEX idx_utility_pos_throw (throw_pos),
     SPATIAL INDEX idx_utility_pos_land (land_pos),
