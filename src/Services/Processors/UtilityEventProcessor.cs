@@ -12,6 +12,9 @@ namespace statsCollector.Services;
 
 public sealed class UtilityEventProcessor : IEventProcessor
 {
+    private const float InfernoAssociationRadiusSquared = 256f * 256f;
+    private static readonly TimeSpan InfernoAssociationWindow = TimeSpan.FromSeconds(3);
+
     private readonly IPlayerSessionService _playerSessions;
     private readonly ILogger<UtilityEventProcessor> _logger;
     private readonly IPositionPersistenceService _positionPersistence;
@@ -48,6 +51,10 @@ public sealed class UtilityEventProcessor : IEventProcessor
         dispatcher.Subscribe<EventFlashbangDetonate>((e, i) => { TrackDetonation(e, UtilityType.Flash); return HookResult.Continue; });
         dispatcher.Subscribe<EventSmokegrenadeDetonate>((e, i) => { TrackDetonation(e, UtilityType.Smoke); return HookResult.Continue; });
         dispatcher.Subscribe<EventMolotovDetonate>((e, i) => { TrackDetonation(e, UtilityType.Molotov); return HookResult.Continue; });
+        dispatcher.Subscribe<EventSmokegrenadeExpired>((e, i) => { HandleSmokeExpired(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventInfernoStartburn>((e, i) => { HandleInfernoStarted(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventInfernoExpire>((e, i) => { HandleInfernoEnded(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventInfernoExtinguish>((e, i) => { HandleInfernoEnded(e); return HookResult.Continue; });
     }
 
     public void OnRoundStart(RoundContext context)
@@ -61,8 +68,7 @@ public sealed class UtilityEventProcessor : IEventProcessor
     {
         foreach (var pending in _pendingGrenades.Where(grenade => grenade.Detonated))
         {
-            UpdateEffectiveness(pending);
-            PersistPosition(pending);
+            FinalizePending(pending);
         }
         _pendingGrenades.Clear();
     }
@@ -193,16 +199,98 @@ public sealed class UtilityEventProcessor : IEventProcessor
         }
     }
 
+    private void HandleSmokeExpired(EventSmokegrenadeExpired @event)
+    {
+        try
+        {
+            var owner = PlayerControllerState.From(@event.Userid);
+            var pending = FindPending(owner.SteamId, UtilityType.Smoke, @event.Entityid);
+            if (pending is null) return;
+
+            pending.LandPosition = new Vector(@event.X, @event.Y, @event.Z);
+            FinalizePending(pending);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling smoke grenade expiration");
+        }
+    }
+
+    private void HandleInfernoStarted(EventInfernoStartburn @event)
+    {
+        try
+        {
+            if (@event.Entityid == 0) return;
+
+            var position = new Vector(@event.X, @event.Y, @event.Z);
+            var cutoff = _timeProvider.GetUtcNow().UtcDateTime - InfernoAssociationWindow;
+            var pending = _pendingGrenades
+                .Where(grenade => grenade.Type == UtilityType.Molotov && grenade.Detonated &&
+                                  !grenade.Finalized && grenade.EntityId == 0 && grenade.DetonatedAt >= cutoff)
+                .OrderBy(grenade => DistanceSquared(grenade.LandPosition, position))
+                .FirstOrDefault();
+            if (pending is null || DistanceSquared(pending.LandPosition, position) > InfernoAssociationRadiusSquared) return;
+
+            pending.EntityId = @event.Entityid;
+            pending.LandPosition = position;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling inferno start");
+        }
+    }
+
+    private void HandleInfernoEnded(GameEvent @event)
+    {
+        try
+        {
+            var entityId = @event.GetIntValue("entityid");
+            if (entityId == 0) return;
+
+            var pending = _pendingGrenades.LastOrDefault(grenade =>
+                grenade.Type == UtilityType.Molotov && grenade.EntityId == entityId && !grenade.Finalized);
+            if (pending is null) return;
+
+            pending.LandPosition = new Vector(
+                @event.GetFloatValue("x"),
+                @event.GetFloatValue("y"),
+                @event.GetFloatValue("z"));
+            FinalizePending(pending);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling inferno end");
+        }
+    }
+
     private PendingGrenade? FindPending(ulong ownerSteamId, UtilityType type, int entityId)
     {
         if (entityId != 0)
         {
-            var exact = _pendingGrenades.LastOrDefault(grenade => grenade.EntityId == entityId);
+            var exact = _pendingGrenades.LastOrDefault(grenade =>
+                grenade.EntityId == entityId && grenade.Type == type && !grenade.Finalized);
             if (exact is not null) return exact;
         }
 
         return _pendingGrenades.LastOrDefault(grenade =>
-            grenade.OwnerSteamId == ownerSteamId && grenade.Type == type && grenade.Detonated);
+            grenade.OwnerSteamId == ownerSteamId && grenade.Type == type && grenade.Detonated && !grenade.Finalized);
+    }
+
+    private void FinalizePending(PendingGrenade pending)
+    {
+        if (pending.Finalized) return;
+
+        pending.Finalized = true;
+        UpdateEffectiveness(pending);
+        PersistPosition(pending);
+    }
+
+    private static float DistanceSquared(Vector left, Vector right)
+    {
+        var x = left.X - right.X;
+        var y = left.Y - right.Y;
+        var z = left.Z - right.Z;
+        return x * x + y * y + z * z;
     }
 
     private void UpdateEffectiveness(PendingGrenade pending)
@@ -284,6 +372,7 @@ public sealed class UtilityEventProcessor : IEventProcessor
         public int Damage { get; set; }
         public DateTime DetonatedAt { get; set; }
         public bool Detonated { get; set; }
+        public bool Finalized { get; set; }
         public int OpponentsAffected => _opponentsAffected.Count;
         public int TeammatesAffected => _teammatesAffected.Count;
 

@@ -59,6 +59,7 @@ public sealed class MatchFlowHandler : IGameHandler
         plugin.RegisterEventHandler<EventRoundStart>(OnRoundStart);
         plugin.RegisterEventHandler<EventRoundFreezeEnd>(OnRoundFreezeEnd);
         plugin.RegisterEventHandler<EventRoundEnd>(OnRoundEnd);
+        plugin.RegisterEventHandler<EventRoundOfficiallyEnded>(OnRoundOfficiallyEnded);
         plugin.RegisterEventHandler<EventRoundAnnounceMatchStart>(OnRoundAnnounceMatchStart);
         plugin.RegisterEventHandler<EventCsWinPanelMatch>(OnMatchEnd);
     }
@@ -217,6 +218,15 @@ public sealed class MatchFlowHandler : IGameHandler
         });
 
         _matchTracker.EndRound(_currentRoundNumber, winningTeamInt, winReason);
+
+        SaveStatsAtRoundEnd();
+        return HookResult.Continue;
+    }
+
+    private HookResult OnRoundOfficiallyEnded(EventRoundOfficiallyEnded @event, GameEventInfo info)
+    {
+        if (_config.DeathmatchMode) return HookResult.Continue;
+        if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live) return HookResult.Continue;
 
         SaveStatsAtRoundEnd();
         return HookResult.Continue;
