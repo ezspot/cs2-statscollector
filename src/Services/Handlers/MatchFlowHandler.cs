@@ -228,6 +228,9 @@ public sealed class MatchFlowHandler : IGameHandler
         if (_config.DeathmatchMode) return HookResult.Continue;
         if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live) return HookResult.Continue;
 
+        var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
+        if (!string.IsNullOrWhiteSpace(matchUuid))
+            _persistenceChannel.TryWrite(new RoundOfficialEndUpdate(matchUuid, _currentRoundNumber));
         SaveStatsAtRoundEnd();
         return HookResult.Continue;
     }

@@ -49,6 +49,18 @@ public sealed class SchemaInitializer(
             await connection.ExecuteAsync(new CommandDefinition(createDatabase, cancellationToken: cancellationToken)).ConfigureAwait(false);
             await connection.ChangeDatabaseAsync(databaseName, cancellationToken).ConfigureAwait(false);
             await connection.ExecuteAsync(new CommandDefinition(script, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            var migratedColumns = 0;
+            migratedColumns += await EnsureColumnsAsync(connection, databaseName, "rounds",
+                [("official_end_time", "TIMESTAMP NULL AFTER `end_time`")], cancellationToken).ConfigureAwait(false);
+            migratedColumns += await EnsureColumnsAsync(connection, databaseName, "utility_positions",
+                [
+                    ("entity_id", "INT NOT NULL DEFAULT 0 AFTER `utility_type`"),
+                    ("lifecycle_start_event", "VARCHAR(32) NOT NULL DEFAULT 'legacy' AFTER `entity_id`"),
+                    ("lifecycle_end_event", "VARCHAR(32) NOT NULL DEFAULT 'legacy' AFTER `lifecycle_start_event`"),
+                    ("lifecycle_duration_ms", "INT UNSIGNED NOT NULL DEFAULT 0 AFTER `lifecycle_end_event`")
+                ], cancellationToken).ConfigureAwait(false);
+            if (migratedColumns > 0)
+                _logger.LogInformation("Applied {Count} event persistence schema columns.", migratedColumns);
             _logger.LogInformation("Database schema ensured (AutoCreateSchema).");
         }
         catch (Exception ex)
@@ -69,5 +81,32 @@ public sealed class SchemaInitializer(
         if (stream == null) return null;
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd();
+    }
+
+    private static async Task<int> EnsureColumnsAsync(
+        MySqlConnection connection,
+        string databaseName,
+        string tableName,
+        IReadOnlyList<(string Name, string Definition)> columns,
+        CancellationToken cancellationToken)
+    {
+        const string query = """
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = @DatabaseName AND TABLE_NAME = @TableName;
+            """;
+        var existing = (await connection.QueryAsync<string>(new CommandDefinition(
+                query,
+                new { DatabaseName = databaseName, TableName = tableName },
+                cancellationToken: cancellationToken)).ConfigureAwait(false))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var missing = columns.Where(column => !existing.Contains(column.Name)).ToArray();
+        if (missing.Length == 0) return 0;
+
+        var clauses = string.Join(", ", missing.Select(column => $"ADD COLUMN `{column.Name}` {column.Definition}"));
+        await connection.ExecuteAsync(new CommandDefinition(
+            $"ALTER TABLE `{tableName}` {clauses};",
+            cancellationToken: cancellationToken)).ConfigureAwait(false);
+        return missing.Length;
     }
 }

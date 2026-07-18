@@ -53,6 +53,7 @@ Use `VerifyFull` and set `DatabaseSslCa` to your CA certificate when connecting 
 See `config.sample.json` for the full set of options (persistence, trade window, clutch weighting, scrim settings).
 
 For an existing database, treat `database/init.sql` as a bootstrap script rather than a migration.
+Apply `database/migrations/001_add_event_lifecycle_fields.sql` before deploying this release.
 This release widens `clutch_points`; apply the following before deployment:
 ```sql
 ALTER TABLE player_stats MODIFY clutch_points DECIMAL(10,3) DEFAULT 0;
@@ -65,7 +66,7 @@ Any option can be overridden by an environment variable prefixed with `STATSCOLL
 (e.g. `STATSCOLLECTOR_DatabasePassword`).
 
 ### Notable toggles
-- `AutoCreateSchema` (default `false`) — apply the embedded `init.sql` on startup if the schema is missing.
+- `AutoCreateSchema` (default `false`) — apply the embedded schema and compatible column migrations on startup.
 - `EnablePositionTracking` (default `true`) — records the X/Y/Z coordinates of every kill, death, and
   utility throw into `kill_positions` / `death_positions` / `utility_positions` (the data behind
   heatmaps and spatial queries). **Performance:** this is the heaviest write path — it generates the

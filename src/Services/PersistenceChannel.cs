@@ -22,6 +22,9 @@ public sealed record RoundStartUpdate(string MatchId, int Number)
 public sealed record RoundEndUpdate(string MatchId, int Number, int WinnerTeam, int WinReason)
     : StatsUpdate(MatchId, Number);
 
+public sealed record RoundOfficialEndUpdate(string MatchId, int Number)
+    : StatsUpdate(MatchId, Number);
+
 public sealed record MatchStartUpdate(string MapName, string MatchId, string? SeriesUuid)
     : StatsUpdate(MatchId);
 
@@ -230,6 +233,9 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                     break;
                 case RoundEndUpdate roundEnd:
                     await _repository.EndRoundAsync(roundEnd.MatchId, roundEnd.Number, roundEnd.WinnerTeam, roundEnd.WinReason, cancellationToken).ConfigureAwait(false);
+                    break;
+                case RoundOfficialEndUpdate officialEnd:
+                    await _repository.OfficiallyEndRoundAsync(officialEnd.MatchId, officialEnd.Number, cancellationToken).ConfigureAwait(false);
                     break;
                 case MatchStartUpdate matchStart:
                     await _repository.StartMatchAsync(matchStart.MapName, matchStart.MatchId, matchStart.SeriesUuid, cancellationToken).ConfigureAwait(false);

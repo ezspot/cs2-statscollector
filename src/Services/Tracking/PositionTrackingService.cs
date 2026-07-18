@@ -179,6 +179,10 @@ public sealed class PositionTrackingService : IPositionTrackingService
             dataTable.Columns.Add("land_y", typeof(float));
             dataTable.Columns.Add("land_z", typeof(float));
             dataTable.Columns.Add("utility_type", typeof(int));
+            dataTable.Columns.Add("entity_id", typeof(int));
+            dataTable.Columns.Add("lifecycle_start_event", typeof(string));
+            dataTable.Columns.Add("lifecycle_end_event", typeof(string));
+            dataTable.Columns.Add("lifecycle_duration_ms", typeof(int));
             dataTable.Columns.Add("opponents_affected", typeof(int));
             dataTable.Columns.Add("teammates_affected", typeof(int));
             dataTable.Columns.Add("damage", typeof(int));
@@ -192,12 +196,13 @@ public sealed class PositionTrackingService : IPositionTrackingService
                     e.MatchUuid, e.SteamId,
                     e.ThrowX, e.ThrowY, e.ThrowZ,
                     e.LandX, e.LandY, e.LandZ,
-                    e.UtilityType, e.OpponentsAffected, e.TeammatesAffected, e.Damage,
+                    e.UtilityType, e.EntityId, e.LifecycleStartEvent, e.LifecycleEndEvent, e.LifecycleDurationMs,
+                    e.OpponentsAffected, e.TeammatesAffected, e.Damage,
                     e.MapName, e.RoundNumber, e.RoundTime
                 );
             }
 
-            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_utility_positions_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, throw_x FLOAT, throw_y FLOAT, throw_z FLOAT, land_x FLOAT, land_y FLOAT, land_z FLOAT, utility_type INT, opponents_affected INT, teammates_affected INT, damage INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);", ct).ConfigureAwait(false);
+            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_utility_positions_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, throw_x FLOAT, throw_y FLOAT, throw_z FLOAT, land_x FLOAT, land_y FLOAT, land_z FLOAT, utility_type INT, entity_id INT, lifecycle_start_event VARCHAR(32), lifecycle_end_event VARCHAR(32), lifecycle_duration_ms INT UNSIGNED, opponents_affected INT, teammates_affected INT, damage INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);", ct).ConfigureAwait(false);
 
             var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_utility_positions_uuid" };
             EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
@@ -205,10 +210,12 @@ public sealed class PositionTrackingService : IPositionTrackingService
             const string mergeSql = """
                 INSERT INTO utility_positions
                 (match_id, steam_id, throw_pos, throw_z, land_pos, land_z,
-                 utility_type, opponents_affected, teammates_affected, damage,
+                 utility_type, entity_id, lifecycle_start_event, lifecycle_end_event, lifecycle_duration_ms,
+                 opponents_affected, teammates_affected, damage,
                  map_name, round_number, round_time_seconds)
                 SELECT m.id, t.steam_id, POINT(t.throw_x, t.throw_y), t.throw_z, POINT(t.land_x, t.land_y), t.land_z,
-                       t.utility_type, t.opponents_affected, t.teammates_affected, t.damage,
+                       t.utility_type, t.entity_id, t.lifecycle_start_event, t.lifecycle_end_event, t.lifecycle_duration_ms,
+                       t.opponents_affected, t.teammates_affected, t.damage,
                        t.map_name, t.round_number, t.round_time_seconds
                 FROM temp_utility_positions_uuid t
                 JOIN matches m ON t.match_uuid = m.match_uuid;

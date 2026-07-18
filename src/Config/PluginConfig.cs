@@ -59,7 +59,7 @@ public sealed class PluginConfig : BasePluginConfig
     [JsonPropertyName("DeathmatchMode")]
     public bool DeathmatchMode { get; set; } = false;
 
-    // Run database/init.sql automatically on startup if the schema is missing.
+    // Run database/init.sql and compatible column migrations automatically on startup.
     [JsonPropertyName("AutoCreateSchema")]
     public bool AutoCreateSchema { get; set; } = false;
 

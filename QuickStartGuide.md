@@ -37,13 +37,15 @@ MySQL server instead, run `database/init.sql` against it manually.
 }
 ```
    To have the plugin create the schema for you, set `"AutoCreateSchema": true` instead of running
-   `init.sql` manually (the DB user needs `CREATE` privileges).
+   `init.sql` manually (the DB user needs `CREATE` and `ALTER` privileges).
    For a remote database, use `DatabaseSslMode: "VerifyFull"` and configure `DatabaseSslCa`.
 4. Start the server and verify with `css_plugins list`.
 
 ## Verify
 - **Console / logs**: look for `statsCollector v3.1.0 loading...` and `Background persistence services started.` (logs under `logs/statscollector-*.log`).
 - **Matches**: `SELECT * FROM matches;`
+- **Round completion**: `SELECT round_number, end_time, official_end_time FROM rounds;`
+- **Utility lifecycle**: `SELECT utility_type, lifecycle_start_event, lifecycle_end_event, lifecycle_duration_ms FROM utility_positions;`
 - **Players**: `SELECT * FROM view_player_profile;`
 - **Leaderboard**: `SELECT * FROM view_global_leaderboard LIMIT 10;`
 - **Heatmaps**: `SELECT * FROM kill_positions LIMIT 10;`

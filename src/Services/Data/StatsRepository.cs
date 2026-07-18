@@ -28,6 +28,7 @@ public interface IStatsRepository
     Task EndMatchAsync(string matchUuid, CancellationToken ct);
     Task StartRoundAsync(string matchUuid, int roundNumber, CancellationToken ct);
     Task EndRoundAsync(string matchUuid, int roundNumber, int winnerTeam, int winReason, CancellationToken ct);
+    Task OfficiallyEndRoundAsync(string matchUuid, int roundNumber, CancellationToken ct);
 }
 
 public sealed class StatsRepository : IStatsRepository
@@ -318,6 +319,21 @@ public sealed class StatsRepository : IStatsRepository
             WHERE m.match_uuid = @MatchUuid AND r.round_number = @RoundNumber;
             """;
         await connection.ExecuteAsync(new CommandDefinition(sql, new { MatchUuid = matchUuid, RoundNumber = roundNumber, Winner = winnerTeam, WinType = winReason }, cancellationToken: ct)).ConfigureAwait(false);
+    }
+
+    public async Task OfficiallyEndRoundAsync(string matchUuid, int roundNumber, CancellationToken ct)
+    {
+        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+        const string sql = """
+            UPDATE rounds r
+            JOIN matches m ON r.match_id = m.id
+            SET r.official_end_time = COALESCE(r.official_end_time, CURRENT_TIMESTAMP)
+            WHERE m.match_uuid = @MatchUuid AND r.round_number = @RoundNumber;
+            """;
+        await connection.ExecuteAsync(new CommandDefinition(
+            sql,
+            new { MatchUuid = matchUuid, RoundNumber = roundNumber },
+            cancellationToken: ct)).ConfigureAwait(false);
     }
 
     // MySqlBulkCopy maps DataTable columns to the destination by ordinal unless told otherwise.

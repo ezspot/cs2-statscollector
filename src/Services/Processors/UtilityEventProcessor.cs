@@ -12,6 +12,7 @@ namespace statsCollector.Services;
 
 public sealed class UtilityEventProcessor : IEventProcessor
 {
+    private const string RoundEndEventName = "round_end";
     private const float InfernoAssociationRadiusSquared = 256f * 256f;
     private static readonly TimeSpan InfernoAssociationWindow = TimeSpan.FromSeconds(3);
 
@@ -68,7 +69,7 @@ public sealed class UtilityEventProcessor : IEventProcessor
     {
         foreach (var pending in _pendingGrenades.Where(grenade => grenade.Detonated))
         {
-            FinalizePending(pending);
+            FinalizePending(pending, RoundEndEventName);
         }
         _pendingGrenades.Clear();
     }
@@ -191,6 +192,8 @@ public sealed class UtilityEventProcessor : IEventProcessor
                 @event.GetFloatValue("y"),
                 @event.GetFloatValue("z"));
             pending.DetonatedAt = _timeProvider.GetUtcNow().UtcDateTime;
+            pending.LifecycleStartedAt = pending.DetonatedAt;
+            pending.LifecycleStartEvent = GetDetonationEventName(type);
             pending.Detonated = true;
         }
         catch (Exception ex)
@@ -208,7 +211,7 @@ public sealed class UtilityEventProcessor : IEventProcessor
             if (pending is null) return;
 
             pending.LandPosition = new Vector(@event.X, @event.Y, @event.Z);
-            FinalizePending(pending);
+            FinalizePending(pending, @event.EventName);
         }
         catch (Exception ex)
         {
@@ -233,6 +236,8 @@ public sealed class UtilityEventProcessor : IEventProcessor
 
             pending.EntityId = @event.Entityid;
             pending.LandPosition = position;
+            pending.LifecycleStartedAt = _timeProvider.GetUtcNow().UtcDateTime;
+            pending.LifecycleStartEvent = @event.EventName;
         }
         catch (Exception ex)
         {
@@ -255,7 +260,7 @@ public sealed class UtilityEventProcessor : IEventProcessor
                 @event.GetFloatValue("x"),
                 @event.GetFloatValue("y"),
                 @event.GetFloatValue("z"));
-            FinalizePending(pending);
+            FinalizePending(pending, @event.EventName);
         }
         catch (Exception ex)
         {
@@ -276,10 +281,15 @@ public sealed class UtilityEventProcessor : IEventProcessor
             grenade.OwnerSteamId == ownerSteamId && grenade.Type == type && grenade.Detonated && !grenade.Finalized);
     }
 
-    private void FinalizePending(PendingGrenade pending)
+    private void FinalizePending(PendingGrenade pending, string lifecycleEndEvent)
     {
         if (pending.Finalized) return;
 
+        var endedAt = _timeProvider.GetUtcNow().UtcDateTime;
+        var startedAt = pending.LifecycleStartedAt == default ? pending.DetonatedAt : pending.LifecycleStartedAt;
+        var durationMs = (long)Math.Max(0, (endedAt - startedAt).TotalMilliseconds);
+        pending.LifecycleEndEvent = lifecycleEndEvent;
+        pending.LifecycleDurationMs = (int)Math.Min(durationMs, int.MaxValue);
         pending.Finalized = true;
         UpdateEffectiveness(pending);
         PersistPosition(pending);
@@ -330,6 +340,10 @@ public sealed class UtilityEventProcessor : IEventProcessor
         @event.LandY = pending.LandPosition.Y;
         @event.LandZ = pending.LandPosition.Z;
         @event.UtilityType = (int)pending.Type;
+        @event.EntityId = pending.EntityId;
+        @event.LifecycleStartEvent = pending.LifecycleStartEvent;
+        @event.LifecycleEndEvent = pending.LifecycleEndEvent;
+        @event.LifecycleDurationMs = pending.LifecycleDurationMs;
         @event.OpponentsAffected = pending.OpponentsAffected;
         @event.TeammatesAffected = pending.TeammatesAffected;
         @event.Damage = pending.Damage;
@@ -354,6 +368,16 @@ public sealed class UtilityEventProcessor : IEventProcessor
         };
     }
 
+    private static string GetDetonationEventName(UtilityType type) => type switch
+    {
+        UtilityType.Flash => "flashbang_detonate",
+        UtilityType.Smoke => "smokegrenade_detonate",
+        UtilityType.Molotov => "molotov_detonate",
+        UtilityType.HeGrenade => "hegrenade_detonate",
+        UtilityType.Decoy => "decoy_detonate",
+        _ => "grenade_detonate"
+    };
+
     private sealed class PendingGrenade(
         ulong ownerSteamId,
         PlayerTeam ownerTeam,
@@ -371,6 +395,10 @@ public sealed class UtilityEventProcessor : IEventProcessor
         public int EntityId { get; set; }
         public int Damage { get; set; }
         public DateTime DetonatedAt { get; set; }
+        public DateTime LifecycleStartedAt { get; set; }
+        public string LifecycleStartEvent { get; set; } = string.Empty;
+        public string LifecycleEndEvent { get; set; } = string.Empty;
+        public int LifecycleDurationMs { get; set; }
         public bool Detonated { get; set; }
         public bool Finalized { get; set; }
         public int OpponentsAffected => _opponentsAffected.Count;

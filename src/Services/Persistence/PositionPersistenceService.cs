@@ -95,6 +95,10 @@ public sealed class UtilityPositionEvent : PositionEvent
     public float LandY { get; set; }
     public float LandZ { get; set; }
     public int UtilityType { get; set; }
+    public int EntityId { get; set; }
+    public string LifecycleStartEvent { get; set; } = string.Empty;
+    public string LifecycleEndEvent { get; set; } = string.Empty;
+    public int LifecycleDurationMs { get; set; }
     public int OpponentsAffected { get; set; }
     public int TeammatesAffected { get; set; }
     public int Damage { get; set; }
@@ -109,6 +113,10 @@ public sealed class UtilityPositionEvent : PositionEvent
         ThrowX = ThrowY = ThrowZ = 0;
         LandX = LandY = LandZ = 0;
         UtilityType = 0;
+        EntityId = 0;
+        LifecycleStartEvent = string.Empty;
+        LifecycleEndEvent = string.Empty;
+        LifecycleDurationMs = 0;
         OpponentsAffected = 0;
         TeammatesAffected = 0;
         Damage = 0;

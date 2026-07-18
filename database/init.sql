@@ -140,6 +140,7 @@ CREATE TABLE IF NOT EXISTS rounds (
     round_number INT NOT NULL,
     start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     end_time TIMESTAMP NULL,
+    official_end_time TIMESTAMP NULL,
     winner_team INT, -- 2: T, 3: CT
     win_type INT, -- Reason for win
     FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
@@ -287,6 +288,10 @@ CREATE TABLE IF NOT EXISTS utility_positions (
     land_pos POINT NOT NULL SRID 0,
     land_z FLOAT NOT NULL,
     utility_type INT NOT NULL,
+    entity_id INT NOT NULL DEFAULT 0,
+    lifecycle_start_event VARCHAR(32) NOT NULL DEFAULT 'legacy',
+    lifecycle_end_event VARCHAR(32) NOT NULL DEFAULT 'legacy',
+    lifecycle_duration_ms INT UNSIGNED NOT NULL DEFAULT 0,
     opponents_affected INT DEFAULT 0,
     teammates_affected INT DEFAULT 0,
     damage INT DEFAULT 0,
