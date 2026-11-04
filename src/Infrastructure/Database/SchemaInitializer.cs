@@ -89,7 +89,9 @@ public sealed class SchemaInitializer(
         var createDatabase = $"CREATE DATABASE IF NOT EXISTS `{databaseName}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;";
         await connection.ExecuteAsync(new CommandDefinition(createDatabase, cancellationToken: cancellationToken)).ConfigureAwait(false);
         await connection.ChangeDatabaseAsync(databaseName, cancellationToken).ConfigureAwait(false);
-        await connection.ExecuteAsync(new CommandDefinition(script, cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+        // Existing tables are upgraded before the script runs: its views use the newer columns, and the first view
+        // that fails stops the script. New databases have no tables yet, so the script creates them complete.
         var migratedColumns = 0;
         migratedColumns += await EnsureColumnsAsync(connection, databaseName, "rounds",
             [("official_end_time", "TIMESTAMP NULL AFTER `end_time`")], cancellationToken).ConfigureAwait(false);
@@ -102,6 +104,7 @@ public sealed class SchemaInitializer(
             ], cancellationToken).ConfigureAwait(false);
         migratedColumns += await EnsureColumnsAsync(connection, databaseName, "player_stats",
             [
+                ("round_swing", "DECIMAL(10,3) DEFAULT 0 AFTER `utility_score`"),
                 ("kast_rounds", "INT NOT NULL DEFAULT 0 AFTER `rounds_won`"),
                 ("bomb_explosions", "INT NOT NULL DEFAULT 0 AFTER `bomb_defuses`"),
                 ("multi_kill_2", "INT NOT NULL DEFAULT 0 AFTER `multi_kills`"),
@@ -110,8 +113,31 @@ public sealed class SchemaInitializer(
                 ("multi_kill_5", "INT NOT NULL DEFAULT 0 AFTER `multi_kill_4`"),
                 ("clutch_kills", "INT NOT NULL DEFAULT 0 AFTER `clutches_lost`")
             ], cancellationToken).ConfigureAwait(false);
+        // v3.0.0 (2026-01-01) match tables, which every match-end write needs.
+        foreach (var (table, after) in new[] { ("match_player_stats", "entry_kill_attempt_wins"), ("match_weapon_stats", "hits") })
+        {
+            migratedColumns += await EnsureColumnsAsync(connection, databaseName, table,
+                [
+                    ("idempotency_key", $"VARCHAR(255) NULL AFTER `{after}`"),
+                    ("created_at", "DATETIME NULL AFTER `idempotency_key`"),
+                    ("retry_count", "INT DEFAULT 0 AFTER `created_at`")
+                ], cancellationToken).ConfigureAwait(false);
+        }
+        // Migration 003: lifetime totals that a narrower column would silently cap (MySQL clamps out-of-range values).
+        migratedColumns += await WidenDecimalsAsync(connection, databaseName, "player_stats",
+            [("clutch_points", "DECIMAL(10,3) DEFAULT 0"), ("round_swing", "DECIMAL(10,3) DEFAULT 0")], cancellationToken).ConfigureAwait(false);
+        migratedColumns += await WidenDecimalsAsync(connection, databaseName, "player_advanced_analytics",
+            [("clutch_points", "DECIMAL(10,3) NOT NULL")], cancellationToken).ConfigureAwait(false);
+        // Migration 004: before 2026-07-18 the position tables had no match_id foreign key, and so no index for removing
+        // a restored round's rows; without it that delete scans and locks the whole table.
+        foreach (var table in new[] { "kill_positions", "death_positions", "utility_positions" })
+        {
+            migratedColumns += await EnsureMatchIndexAsync(connection, databaseName, table, cancellationToken).ConfigureAwait(false);
+        }
         if (migratedColumns > 0)
-            _logger.LogInformation("Applied {Count} event persistence schema columns.", migratedColumns);
+            _logger.LogInformation("Applied {Count} schema upgrades.", migratedColumns);
+
+        await connection.ExecuteAsync(new CommandDefinition(script, cancellationToken: cancellationToken)).ConfigureAwait(false);
         _logger.LogInformation("Database schema ensured (AutoCreateSchema).");
     }
 
@@ -145,6 +171,8 @@ public sealed class SchemaInitializer(
                 new { DatabaseName = databaseName, TableName = tableName },
                 cancellationToken: cancellationToken)).ConfigureAwait(false))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (existing.Count == 0) return 0; // no such table yet; the script creates it
+
         var missing = columns.Where(column => !existing.Contains(column.Name)).ToArray();
         if (missing.Length == 0) return 0;
 
@@ -153,5 +181,58 @@ public sealed class SchemaInitializer(
             $"ALTER TABLE `{tableName}` {clauses};",
             cancellationToken: cancellationToken)).ConfigureAwait(false);
         return missing.Length;
+    }
+
+    private static async Task<int> EnsureMatchIndexAsync(
+        MySqlConnection connection,
+        string databaseName,
+        string tableName,
+        CancellationToken cancellationToken)
+    {
+        const string query = """
+            SELECT
+                (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = @DatabaseName AND TABLE_NAME = @TableName),
+                (SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+                 WHERE TABLE_SCHEMA = @DatabaseName AND TABLE_NAME = @TableName AND COLUMN_NAME = 'match_id' AND SEQ_IN_INDEX = 1);
+            """;
+        var (tables, indexes) = await connection.QuerySingleAsync<(long Tables, long Indexes)>(new CommandDefinition(
+            query,
+            new { DatabaseName = databaseName, TableName = tableName },
+            cancellationToken: cancellationToken)).ConfigureAwait(false);
+        if (tables == 0 || indexes > 0) return 0;
+
+        // Named as the index a fresh database gets from its foreign key.
+        await connection.ExecuteAsync(new CommandDefinition(
+            $"ALTER TABLE `{tableName}` ADD INDEX `match_id` (`match_id`);",
+            cancellationToken: cancellationToken)).ConfigureAwait(false);
+        return 1;
+    }
+
+    private static async Task<int> WidenDecimalsAsync(
+        MySqlConnection connection,
+        string databaseName,
+        string tableName,
+        IReadOnlyList<(string Name, string Definition)> columns,
+        CancellationToken cancellationToken)
+    {
+        const string query = """
+            SELECT COLUMN_NAME, CAST(NUMERIC_PRECISION AS SIGNED)
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = @DatabaseName AND TABLE_NAME = @TableName;
+            """;
+        var precision = (await connection.QueryAsync<(string Name, long? Precision)>(new CommandDefinition(
+                query,
+                new { DatabaseName = databaseName, TableName = tableName },
+                cancellationToken: cancellationToken)).ConfigureAwait(false))
+            .ToDictionary(column => column.Name, column => column.Precision, StringComparer.OrdinalIgnoreCase);
+
+        var narrow = columns.Where(column => precision.GetValueOrDefault(column.Name) < 10).ToArray();
+        if (narrow.Length == 0) return 0;
+
+        var clauses = string.Join(", ", narrow.Select(column => $"MODIFY COLUMN `{column.Name}` {column.Definition}"));
+        await connection.ExecuteAsync(new CommandDefinition(
+            $"ALTER TABLE `{tableName}` {clauses};",
+            cancellationToken: cancellationToken)).ConfigureAwait(false);
+        return narrow.Length;
     }
 }

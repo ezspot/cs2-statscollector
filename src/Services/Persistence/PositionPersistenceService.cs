@@ -17,6 +17,8 @@ namespace statsCollector.Services;
 public abstract class PositionEvent
 {
     public string? MatchUuid { get; set; }
+    // Failed write attempts; reset when the event returns to its pool.
+    public int Attempts { get; set; }
     public abstract void Reset();
 }
 
@@ -139,6 +141,10 @@ public interface IPositionPersistenceService : IAsyncDisposable
 
 public sealed class PositionPersistenceService : IPositionPersistenceService
 {
+    // Failures that no retry can fix (a match row that never got written) before an event is dropped: with the 5 s
+    // doubling backoff, about 75 seconds. Outage failures do not count.
+    private const int MaxWriteAttempts = 5;
+
     private readonly IPositionTrackingService _repository;
     private readonly ILogger<PositionPersistenceService> _logger;
     private readonly Channel<PositionEvent> _channel;
@@ -184,7 +190,7 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
     private class PositionEventPooledObjectPolicy<T> : IPooledObjectPolicy<T> where T : PositionEvent, new()
     {
         public T Create() => new();
-        public bool Return(T obj) { obj.Reset(); return true; }
+        public bool Return(T obj) { obj.Reset(); obj.Attempts = 0; return true; }
     }
     public Task StartAsync(CancellationToken cancellationToken)
     {
@@ -198,15 +204,9 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         return Task.CompletedTask;
     }
 
+    // Events recorded before StartAsync (startup waits for the schema) are buffered in the channel, like stats updates.
     public bool TryEnqueue(PositionEvent @event)
     {
-        if (!_started)
-        {
-            _logger.LogWarning("Attempted to enqueue position event but service is not started");
-            ReturnToPool(@event);
-            return false;
-        }
-
         using var activity = _activitySource.StartActivity("PositionPersistence.Enqueue", ActivityKind.Producer);
         activity?.SetTag("event.type", @event.GetType().Name);
 
@@ -215,7 +215,7 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
             return true;
         }
 
-        _logger.LogWarning("Position event dropped: channel full. Type: {Type}", @event.GetType().Name);
+        _logger.LogWarning("Position event dropped: channel full or stopped. Type: {Type}", @event.GetType().Name);
         activity?.SetStatus(ActivityStatusCode.Error, "Channel full");
         ReturnToPool(@event);
         return false;
@@ -265,15 +265,16 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
 
                 var batch = new List<PositionEvent>();
 
-                // Count first: dequeuing when the batch is already full would drop that event.
-                while (batch.Count < 100 && _retryQueue.TryDequeue(out var retryEvent))
-                {
-                    batch.Add(retryEvent);
-                }
-
+                // Fresh events first, so retries that keep failing cannot crowd them out. Count first: dequeuing
+                // when the batch is already full would drop that event.
                 while (batch.Count < 100 && reader.TryRead(out var @event))
                 {
                     batch.Add(@event);
+                }
+
+                while (batch.Count < 100 && _retryQueue.TryDequeue(out var retryEvent))
+                {
+                    batch.Add(retryEvent);
                 }
 
                 if (batch.Count == 0) continue;
@@ -300,7 +301,13 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
                     activity?.SetStatus(ActivityStatusCode.Error, "One or more position groups failed");
                     foreach (var item in failed)
                     {
-                        if (_retryQueue.Count < 5000)
+                        // An event whose match row never got written fails every time; give up on it eventually.
+                        if (item.Attempts >= MaxWriteAttempts)
+                        {
+                            _logger.LogError("Dropped {Type} for match {Match} after {Attempts} failed writes.", item.GetType().Name, item.MatchUuid, item.Attempts);
+                            ReturnToPool(item);
+                        }
+                        else if (_retryQueue.Count < 5000)
                         {
                             _retryQueue.Enqueue(item);
                         }
@@ -378,6 +385,12 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to persist {PositionType} batch. Buffering {Count} items.", typeof(T).Name, events.Count);
+            // Only failures no retry can fix count toward giving up (a match row that never got written); an outage
+            // keeps its events buffered however long it lasts.
+            if (!ResiliencePolicies.IsRetryable(ex))
+            {
+                foreach (var @event in events) @event.Attempts++;
+            }
             failed.AddRange(events);
         }
     }

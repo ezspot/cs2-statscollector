@@ -35,6 +35,7 @@ public sealed class PluginConfig : BasePluginConfig
     public string DatabasePassword { get; set; } = string.Empty;
 
     [JsonPropertyName("DatabaseSslMode")]
+    [Required(AllowEmptyStrings = false)]
     [RegularExpression("None|Preferred|Required|VerifyCA|VerifyFull", ErrorMessage = "DatabaseSslMode must be one of: None, Preferred, Required, VerifyCA, VerifyFull.")]
     public string DatabaseSslMode { get; set; } = "Required";
 
@@ -101,7 +102,8 @@ public sealed class PluginConfig : BasePluginConfig
             ConnectionIdleTimeout = 300,
             AllowLoadLocalInfile = true,
             SslCa = DatabaseSslCa ?? string.Empty,
-            SslMode = Enum.TryParse<MySqlSslMode>(DatabaseSslMode, out var sslMode) ? sslMode : MySqlSslMode.Preferred
+            // An empty value passes validation; it must not fall back to Preferred, which accepts plaintext.
+            SslMode = Enum.TryParse<MySqlSslMode>(DatabaseSslMode, out var sslMode) ? sslMode : MySqlSslMode.Required
         };
 
         return builder.ConnectionString;

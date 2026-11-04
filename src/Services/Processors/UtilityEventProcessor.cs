@@ -22,6 +22,7 @@ public sealed class UtilityEventProcessor : IEventProcessor
     private readonly IMatchTrackingService _matchTracker;
     private readonly IOptionsMonitor<PluginConfig> _config;
     private readonly TimeProvider _timeProvider;
+    private readonly ICombatEventProcessor _combat;
     private readonly List<PendingGrenade> _pendingGrenades = [];
 
     private DateTime _roundStartUtc;
@@ -33,7 +34,8 @@ public sealed class UtilityEventProcessor : IEventProcessor
         IPositionPersistenceService positionPersistence,
         IMatchTrackingService matchTracker,
         IOptionsMonitor<PluginConfig> config,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        ICombatEventProcessor combat)
     {
         _playerSessions = playerSessions;
         _logger = logger;
@@ -41,6 +43,7 @@ public sealed class UtilityEventProcessor : IEventProcessor
         _matchTracker = matchTracker;
         _config = config;
         _timeProvider = timeProvider;
+        _combat = combat;
     }
 
     public void RegisterEvents(IEventDispatcher dispatcher)
@@ -112,6 +115,8 @@ public sealed class UtilityEventProcessor : IEventProcessor
             var victimState = PlayerControllerState.From(@event.GetPlayerOrDefault("userid"));
             var attackerState = PlayerControllerState.From(@event.GetPlayerOrDefault("attacker"));
             var blindDuration = @event.GetFloatValue("blind_duration", 0f);
+            // The engine blinds dead players and spectators in range too; that flashes nobody.
+            if (victimState.Health <= 0 || victimState.Team is not (PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist)) return;
 
             if (victimState.IsValid && !victimState.IsBot)
             {
@@ -151,8 +156,9 @@ public sealed class UtilityEventProcessor : IEventProcessor
     {
         try
         {
+            var victim = @event.GetPlayerOrDefault("userid");
             var attackerState = PlayerControllerState.From(@event.GetPlayerOrDefault("attacker"));
-            var victimState = PlayerControllerState.From(@event.GetPlayerOrDefault("userid"));
+            var victimState = PlayerControllerState.From(victim);
             if (!attackerState.IsValid || attackerState.IsBot || !victimState.IsValid) return;
 
             var type = ParseUtilityType(@event.GetStringValue("weapon", string.Empty));
@@ -163,7 +169,8 @@ public sealed class UtilityEventProcessor : IEventProcessor
             pending.RecordAffected(victimState);
             if (victimState.Team != pending.OwnerTeam)
             {
-                pending.Damage += @event.GetIntValue("dmg_health");
+                // Overkill is not damage: a lethal 98 on a 20 HP player removed 20, as ADR counts it.
+                pending.Damage += _combat.GetHealthRemoved((int)victim!.Index, @event.GetIntValue("dmg_health"));
             }
         }
         catch (Exception ex)
@@ -398,7 +405,8 @@ public sealed class UtilityEventProcessor : IEventProcessor
 
         public void RecordAffected(PlayerControllerState victim)
         {
-            if (!victim.IsValid || victim.IsBot) return;
+            // The thrower hurting themselves is not a teammate affected.
+            if (!victim.IsValid || victim.IsBot || victim.SteamId == OwnerSteamId) return;
             if (victim.Team == OwnerTeam) _teammatesAffected.Add(victim.SteamId);
             else _opponentsAffected.Add(victim.SteamId);
         }

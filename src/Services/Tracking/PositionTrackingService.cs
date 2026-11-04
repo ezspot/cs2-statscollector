@@ -76,13 +76,14 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 );
             }
 
-            // kill_positions stores POINT geometry, so the temp staging table holds raw x/y floats
-            // with an explicit schema (matching the DataTable column order) and the merge builds POINTs.
+            // kill_positions stores POINT geometry, so the temp staging table holds raw x/y floats and the merge
+            // builds POINTs. Staging tables have a surrogate key: sql_require_primary_key=ON rejects them without one.
             await ExecuteAsync(connection,
-                "CREATE TEMPORARY TABLE temp_kill_positions_uuid (match_uuid VARCHAR(64), killer_steam_id BIGINT UNSIGNED, victim_steam_id BIGINT UNSIGNED, killer_x FLOAT, killer_y FLOAT, killer_z FLOAT, victim_x FLOAT, victim_y FLOAT, victim_z FLOAT, weapon_used VARCHAR(100), is_headshot TINYINT(1), is_wallbang TINYINT(1), distance FLOAT, killer_team INT, victim_team INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);",
+                "CREATE TEMPORARY TABLE temp_kill_positions_uuid (row_id INT AUTO_INCREMENT PRIMARY KEY, match_uuid VARCHAR(64), killer_steam_id BIGINT UNSIGNED, victim_steam_id BIGINT UNSIGNED, killer_x FLOAT, killer_y FLOAT, killer_z FLOAT, victim_x FLOAT, victim_y FLOAT, victim_z FLOAT, weapon_used VARCHAR(100), is_headshot TINYINT(1), is_wallbang TINYINT(1), distance FLOAT, killer_team INT, victim_team INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);",
                 ct).ConfigureAwait(false);
 
             var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_kill_positions_uuid" };
+            StatsRepository.AddColumnMappingsByName(bulkCopy, dataTable);
             StatsRepository.EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
 
             const string mergeSql = """
@@ -142,9 +143,10 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 );
             }
 
-            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_death_positions_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, x FLOAT, y FLOAT, z FLOAT, cause_of_death VARCHAR(100), is_headshot TINYINT(1), team INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);", ct).ConfigureAwait(false);
+            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_death_positions_uuid (row_id INT AUTO_INCREMENT PRIMARY KEY, match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, x FLOAT, y FLOAT, z FLOAT, cause_of_death VARCHAR(100), is_headshot TINYINT(1), team INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);", ct).ConfigureAwait(false);
 
             var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_death_positions_uuid" };
+            StatsRepository.AddColumnMappingsByName(bulkCopy, dataTable);
             StatsRepository.EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
 
             const string mergeSql = """
@@ -206,9 +208,10 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 );
             }
 
-            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_utility_positions_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, throw_x FLOAT, throw_y FLOAT, throw_z FLOAT, land_x FLOAT, land_y FLOAT, land_z FLOAT, utility_type INT, entity_id INT, lifecycle_start_event VARCHAR(32), lifecycle_end_event VARCHAR(32), lifecycle_duration_ms INT UNSIGNED, opponents_affected INT, teammates_affected INT, damage INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);", ct).ConfigureAwait(false);
+            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_utility_positions_uuid (row_id INT AUTO_INCREMENT PRIMARY KEY, match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, throw_x FLOAT, throw_y FLOAT, throw_z FLOAT, land_x FLOAT, land_y FLOAT, land_z FLOAT, utility_type INT, entity_id INT, lifecycle_start_event VARCHAR(32), lifecycle_end_event VARCHAR(32), lifecycle_duration_ms INT UNSIGNED, opponents_affected INT, teammates_affected INT, damage INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);", ct).ConfigureAwait(false);
 
             var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_utility_positions_uuid" };
+            StatsRepository.AddColumnMappingsByName(bulkCopy, dataTable);
             StatsRepository.EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
 
             const string mergeSql = """

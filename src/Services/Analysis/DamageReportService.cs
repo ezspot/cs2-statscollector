@@ -40,12 +40,12 @@ public sealed class DamageReportService : IDamageReportService
     {
         foreach (var (attackerId, victims) in _damageDealt)
         {
-            var attacker = Utilities.GetPlayerFromSteamId(attackerId);
+            var attacker = Utilities.GetPlayerFromSteamId64(attackerId);
             if (attacker == null || !attacker.IsValid) continue;
 
             foreach (var victimEntry in victims)
             {
-                var victim = Utilities.GetPlayerFromSteamId(victimEntry.Key);
+                var victim = Utilities.GetPlayerFromSteamId64(victimEntry.Key);
                 if (victim == null || !victim.IsValid) continue;
 
                 var info = victimEntry.Value;

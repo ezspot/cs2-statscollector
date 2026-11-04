@@ -14,6 +14,9 @@ namespace statsCollector.Services;
 
 public sealed class ScrimManager : IScrimManager, IDisposable
 {
+    // After a map change the knife round or match waits in warmup until the picked players are back.
+    private const float PlayerLoadTimeoutSeconds = 180f;
+
     private readonly ILogger<ScrimManager> _logger;
     private readonly IOptionsMonitor<PluginConfig> _configMonitor;
     private readonly IConfigLoaderService _configLoader;
@@ -37,7 +40,11 @@ public sealed class ScrimManager : IScrimManager, IDisposable
     private int _pickTurn = 0;
 
     private int _knifeWinnerTeam;
+    // CounterStrikeSharp frees a one-shot timer after it fires; the fields are cleared then, because killing the
+    // stale pointer later could kill whichever timer was allocated at the same address.
     private CounterStrikeSharp.API.Modules.Timers.Timer? _sideSelectionTimer;
+    private CounterStrikeSharp.API.Modules.Timers.Timer? _playerLoadTimer;
+    private bool _waitingForPlayers;
 
     private volatile ScrimState _state = ScrimState.Idle;
 
@@ -62,6 +69,9 @@ public sealed class ScrimManager : IScrimManager, IDisposable
 
     private async Task TransitionToAsync(ScrimState target)
     {
+        // Every transition starts on the game thread, where the timers can be killed.
+        if (target is not (ScrimState.KnifeRound or ScrimState.Live)) ClearPhaseState();
+
         var from = _state;
         if (from == target) return;
 
@@ -128,6 +138,14 @@ public sealed class ScrimManager : IScrimManager, IDisposable
 
     public async Task RecoverAsync()
     {
+        // Recovery is for a scrim the server lost (crash, restart); it must not replace one that is running.
+        if (!_config.EnableScrim || _state != ScrimState.Idle)
+        {
+            _logger.LogWarning("Scrim recovery refused: scrims are disabled or one is already running ({State}).", _state);
+            _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Recovery is only possible while no scrim is running."));
+            return;
+        }
+
         var data = await _recovery.LoadScrimStateAsync<ScrimRecoveryData>();
         if (data == null)
         {
@@ -142,10 +160,17 @@ public sealed class ScrimManager : IScrimManager, IDisposable
             return;
         }
 
-        await RunOnGameThreadAsync(() => RestoreState(data));
+        await RunOnGameThreadAsync(() =>
+        {
+            RestoreState(data);
+            if (data.State is not (ScrimState.KnifeRound or ScrimState.Live)) return;
+            // After a crash the server is usually on its default map: change to the scrim's, where HandleMapStart waits
+            // for the players. Back on the scrim's map in warmup (a restart there), wait the same way. Otherwise the
+            // knife round or match is still being played (the plugin was reloaded): leave teams and settings alone.
+            if (!ScheduleSelectedMapChange() && GameRulesState.IsWarmup) HandleMapStart(Server.MapName);
+        });
         _logger.LogInformation("Recovered scrim to state: {State}", data.State);
         _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] Scrim successfully recovered to state: {data.State}."));
-        await ApplyCurrentStateAsync();
     }
 
     public void HandleMatchEnd()
@@ -153,9 +178,20 @@ public sealed class ScrimManager : IScrimManager, IDisposable
         if (_state != ScrimState.Live) return;
 
         _state = ScrimState.Idle;
+        ClearPhaseState();
+        RunTransition(_recovery.ClearScrimStateAsync(), "clear completed scrim recovery state");
+    }
+
+    // The wait after a map change and the side choice belong to the knife round and match. Game thread only: killing a
+    // CounterStrikeSharp timer is a native call. Fields are cleared because the engine frees a one-shot timer once it
+    // fires, and killing that stale pointer later could kill whichever timer was given the same address.
+    private void ClearPhaseState()
+    {
+        _waitingForPlayers = false;
+        _playerLoadTimer?.Kill();
+        _playerLoadTimer = null;
         _sideSelectionTimer?.Kill();
         _sideSelectionTimer = null;
-        RunTransition(_recovery.ClearScrimStateAsync(), "clear completed scrim recovery state");
     }
 
     private async Task OnLobbyEntry()
@@ -169,8 +205,6 @@ public sealed class ScrimManager : IScrimManager, IDisposable
         _playerVotes.Clear();
         _selectedMap = null;
         _knifeWinnerTeam = 0;
-        _sideSelectionTimer?.Kill();
-        _sideSelectionTimer = null;
         await _configLoader.LoadAndExecuteConfigAsync("warmup.cfg");
         _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Lobby started! Type .ready to prepare."));
     }
@@ -200,7 +234,7 @@ public sealed class ScrimManager : IScrimManager, IDisposable
 
         _scheduler.Schedule(() =>
         {
-            var captain1 = _captains.TryGetValue(1, out var cap1) ? Utilities.GetPlayerFromSteamId(cap1) : null;
+            var captain1 = _captains.TryGetValue(1, out var cap1) ? Utilities.GetPlayerFromSteamId64(cap1) : null;
             Server.PrintToChatAll($" [Scrim] Picking phase started! Captain {captain1?.PlayerName ?? "Team 1"} picks first.");
             NotifyPickTurn();
         });
@@ -213,10 +247,10 @@ public sealed class ScrimManager : IScrimManager, IDisposable
 
         _scheduler.Schedule(() =>
         {
-            var captain = Utilities.GetPlayerFromSteamId(captainSteamId);
+            var captain = Utilities.GetPlayerFromSteamId64(captainSteamId);
             captain?.PrintToChat(" [Scrim] It's YOUR turn to pick a player (.pick <SteamID64>).");
 
-            string pool = string.Join(", ", _pickPool.Select(id => Utilities.GetPlayerFromSteamId(id)?.PlayerName ?? id.ToString()));
+            string pool = string.Join(", ", _pickPool.Select(id => Utilities.GetPlayerFromSteamId64(id)?.PlayerName ?? id.ToString()));
             captain?.PrintToChat($" [Scrim] Available players: {pool}");
         });
     }
@@ -245,12 +279,12 @@ public sealed class ScrimManager : IScrimManager, IDisposable
         {
             foreach (var steamId in _team1)
             {
-                var player = Utilities.GetPlayerFromSteamId(steamId);
+                var player = Utilities.GetPlayerFromSteamId64(steamId);
                 player?.SwitchTeam(CsTeam.Terrorist);
             }
             foreach (var steamId in _team2)
             {
-                var player = Utilities.GetPlayerFromSteamId(steamId);
+                var player = Utilities.GetPlayerFromSteamId64(steamId);
                 player?.SwitchTeam(CsTeam.CounterTerrorist);
             }
         });
@@ -276,8 +310,6 @@ public sealed class ScrimManager : IScrimManager, IDisposable
 
     public async Task StopScrimAsync()
     {
-        _sideSelectionTimer?.Kill();
-        _sideSelectionTimer = null;
         await TransitionToAsync(ScrimState.Idle);
         await _recovery.ClearScrimStateAsync();
         // After the awaits this runs on a thread-pool thread; chat must be sent from the game thread.
@@ -292,7 +324,7 @@ public sealed class ScrimManager : IScrimManager, IDisposable
         {
             _scheduler.Schedule(() =>
             {
-                var player = Utilities.GetPlayerFromSteamId(steamId);
+                var player = Utilities.GetPlayerFromSteamId64(steamId);
                 player?.PrintToChat(" [Scrim] You are not whitelisted for this scrim.");
             });
             return;
@@ -301,7 +333,7 @@ public sealed class ScrimManager : IScrimManager, IDisposable
         if (ready && !_readyPlayers.GetValueOrDefault(steamId) &&
             _readyPlayers.Values.Count(value => value) >= _playersPerTeam * 2)
         {
-            _scheduler.Schedule(() => Utilities.GetPlayerFromSteamId(steamId)?
+            _scheduler.Schedule(() => Utilities.GetPlayerFromSteamId64(steamId)?
                 .PrintToChat(" [Scrim] The player slots are full."));
             return;
         }
@@ -329,7 +361,7 @@ public sealed class ScrimManager : IScrimManager, IDisposable
         _captains[team] = steamId;
         _scheduler.Schedule(() =>
         {
-            var player = Utilities.GetPlayerFromSteamId(steamId);
+            var player = Utilities.GetPlayerFromSteamId64(steamId);
             Server.PrintToChatAll($" [Scrim] {player?.PlayerName} appointed as Captain for Team {team}.");
         });
 
@@ -353,7 +385,7 @@ public sealed class ScrimManager : IScrimManager, IDisposable
         {
             _scheduler.Schedule(() =>
             {
-                var player = Utilities.GetPlayerFromSteamId(steamId);
+                var player = Utilities.GetPlayerFromSteamId64(steamId);
                 player?.PrintToChat($" [Scrim] Invalid map. Pool: {string.Join(", ", _config.Scrim.MapPool)}");
             });
             return;
@@ -394,7 +426,7 @@ public sealed class ScrimManager : IScrimManager, IDisposable
 
         _scheduler.Schedule(() =>
         {
-            var player = Utilities.GetPlayerFromSteamId(targetSteamId);
+            var player = Utilities.GetPlayerFromSteamId64(targetSteamId);
             Server.PrintToChatAll($" [Scrim] Captain {(pickedByTeam1 ? "1" : "2")} picked {player?.PlayerName}.");
         });
 
@@ -417,8 +449,10 @@ public sealed class ScrimManager : IScrimManager, IDisposable
 
     public Task HandleKnifeRoundEnd(int winnerTeam)
     {
-        if (_state != ScrimState.KnifeRound) return Task.CompletedTask;
+        if (_state != ScrimState.KnifeRound || _waitingForPlayers) return Task.CompletedTask;
         if (winnerTeam is not (2 or 3)) return Task.CompletedTask;
+        // knife.cfg keeps playing knife rounds while the winner chooses; a later one must not change the winner.
+        if (_knifeWinnerTeam is 2 or 3) return Task.CompletedTask;
 
         _knifeWinnerTeam = winnerTeam;
         RunTransition(SaveCurrentStateAsync(), "save knife-round result");
@@ -435,12 +469,13 @@ public sealed class ScrimManager : IScrimManager, IDisposable
                 return;
             }
 
-            var captain = Utilities.GetPlayerFromSteamId(winningCaptainId);
+            var captain = Utilities.GetPlayerFromSteamId64(winningCaptainId);
             captain?.PrintToChat(" [Scrim] You won! Type .ct or .t to choose your side. (30s timeout)");
 
             _sideSelectionTimer?.Kill();
             _sideSelectionTimer = new CounterStrikeSharp.API.Modules.Timers.Timer(30.0f, () =>
             {
+                _sideSelectionTimer = null;
                 _logger.LogInformation("Side selection timed out. Auto-assigning sides.");
                 _scheduler.Schedule(() =>
                 {
@@ -457,7 +492,8 @@ public sealed class ScrimManager : IScrimManager, IDisposable
 
     public Task SelectSideAsync(ulong steamId, string side)
     {
-        if (_state != ScrimState.KnifeRound) return Task.CompletedTask;
+        // During the wait after a map change the knife round is about to be played again.
+        if (_state != ScrimState.KnifeRound || _waitingForPlayers) return Task.CompletedTask;
         // Until the knife round has a winner there is no side choice (otherwise captain 2 could skip it).
         if (_knifeWinnerTeam is not (2 or 3)) return Task.CompletedTask;
 
@@ -469,6 +505,7 @@ public sealed class ScrimManager : IScrimManager, IDisposable
             // A second queued choice (or the timeout) must not swap again.
             if (_state != ScrimState.KnifeRound) return;
             _sideSelectionTimer?.Kill();
+            _sideSelectionTimer = null;
 
             bool stay = (string.Equals(side, "t", StringComparison.OrdinalIgnoreCase) && _knifeWinnerTeam == 2) ||
                 (string.Equals(side, "ct", StringComparison.OrdinalIgnoreCase) && _knifeWinnerTeam == 3);
@@ -539,10 +576,68 @@ public sealed class ScrimManager : IScrimManager, IDisposable
 
     public void HandleMapStart(string mapName)
     {
-        if (_state is ScrimState.KnifeRound or ScrimState.Live)
+        if (_state is not (ScrimState.KnifeRound or ScrimState.Live)) return;
+
+        // Nobody is connected yet when the map starts: applying the knife/live config now would start the round
+        // without the players and leave everyone on whatever team they pick. Hold warmup until they are back.
+        _waitingForPlayers = true;
+        RunTransition(_configLoader.LoadAndExecuteConfigAsync("warmup.cfg"), $"hold warmup on {mapName}");
+        _playerLoadTimer?.Kill();
+        _playerLoadTimer = new CounterStrikeSharp.API.Modules.Timers.Timer(PlayerLoadTimeoutSeconds, () =>
         {
-            RunTransition(ApplyCurrentStateAsync(), $"apply {_state} configuration on {mapName}");
+            _playerLoadTimer = null;
+            StartAfterMapChange("timed out waiting for players");
+        });
+        _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] Waiting for all players to load {mapName}..."));
+    }
+
+    public void HandlePlayerConnected(ulong steamId)
+    {
+        if (_state is not (ScrimState.KnifeRound or ScrimState.Live)) return;
+
+        if (_waitingForPlayers)
+        {
+            if (_team1.Concat(_team2).All(id => id == steamId || Utilities.GetPlayerFromSteamId64(id) is { IsValid: true }))
+                StartAfterMapChange("all players loaded");
+            return;
         }
+
+        _scheduler.Schedule(() => MoveToTeamSide(steamId));
+    }
+
+    // Picked players stay on their team during the knife round and the match (jointeam: 1 spectators, 2 T, 3 CT).
+    public bool CanJoinTeam(ulong steamId, int team) =>
+        _state is not (ScrimState.KnifeRound or ScrimState.Live) || _waitingForPlayers ||
+        RosterSide(steamId) is not { } side || side == team;
+
+    private void StartAfterMapChange(string reason)
+    {
+        if (!_waitingForPlayers) return;
+        _waitingForPlayers = false;
+        _playerLoadTimer?.Kill();
+        _playerLoadTimer = null;
+        _logger.LogInformation("Starting {State} after the map change: {Reason}.", _state, reason);
+        RunTransition(ApplyCurrentStateAsync(), $"apply {_state} configuration after the map change");
+    }
+
+    // A picked player who rejoins goes back to their team.
+    private void MoveToTeamSide(ulong steamId)
+    {
+        var player = Utilities.GetPlayerFromSteamId64(steamId);
+        if (RosterSide(steamId) is not { } side || player is not { IsValid: true } || player.TeamNum == side) return;
+
+        player.SwitchTeam((CsTeam)side);
+        _logger.LogInformation("Moved rejoining scrim player {SteamId} back to team {Team}.", steamId, side);
+    }
+
+    // The side a picked player's team is on now. Sides swap at halftime, so this follows a teammate who is in the game
+    // rather than the starting side; null when none is.
+    private byte? RosterSide(ulong steamId)
+    {
+        var team = _team1.Contains(steamId) ? _team1 : _team2.Contains(steamId) ? _team2 : null;
+        return team?.Where(id => id != steamId)
+            .Select(Utilities.GetPlayerFromSteamId64)
+            .FirstOrDefault(teammate => teammate is { IsValid: true, TeamNum: 2 or 3 })?.TeamNum;
     }
 
     private async Task ApplyCurrentStateAsync()
@@ -552,6 +647,10 @@ public sealed class ScrimManager : IScrimManager, IDisposable
         MovePlayersToTeams();
         if (_state == ScrimState.KnifeRound)
         {
+            // The knife round is played again, so it decides the side choice again (an old timeout must not end it).
+            _knifeWinnerTeam = 0;
+            _sideSelectionTimer?.Kill();
+            _sideSelectionTimer = null;
             await _configLoader.LoadAndExecuteConfigAsync(_config.Scrim.KnifeConfigPath);
         }
         else if (_state == ScrimState.Live)
@@ -615,5 +714,6 @@ public sealed class ScrimManager : IScrimManager, IDisposable
         return completion.Task;
     }
 
-    public void Dispose() => _sideSelectionTimer?.Kill();
+    // Plugin.Unload calls this on the game thread; the container's later call on a pool thread then finds nothing to kill.
+    public void Dispose() => ClearPhaseState();
 }

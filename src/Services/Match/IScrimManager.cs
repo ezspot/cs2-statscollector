@@ -19,5 +19,7 @@ public interface IScrimManager
     void SetOverride(string key, string value);
     void HandleDisconnect(ulong steamId);
     void HandleMapStart(string mapName);
+    void HandlePlayerConnected(ulong steamId);
+    bool CanJoinTeam(ulong steamId, int team);
     void HandleMatchEnd();
 }

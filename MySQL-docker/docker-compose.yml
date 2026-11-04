@@ -19,6 +19,8 @@ services:
       MYSQL_DATABASE: cs2_statscollector
       MYSQL_USER: cs2_statscollector
       MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql_root_password
+      # Root logs in from inside the container only (the image's default is root@'%').
+      MYSQL_ROOT_HOST: localhost
       MYSQL_PASSWORD_FILE: /run/secrets/mysql_user_password
       TZ: UTC
     secrets:
@@ -55,13 +57,10 @@ services:
     container_name: statscollector-phpmyadmin
     restart: unless-stopped
     profiles: ["tools"]
+    # Shows a login form: with PMA_USER set it would log anyone who reaches the port in automatically.
     environment:
       PMA_HOST: mysql
       PMA_PORT: 3306
-      PMA_USER: cs2_statscollector
-      PMA_PASSWORD_FILE: /run/secrets/mysql_user_password
-    secrets:
-      - mysql_user_password
     ports:
       - "127.0.0.1:${PHPMYADMIN_PORT:-8080}:80"
     depends_on:

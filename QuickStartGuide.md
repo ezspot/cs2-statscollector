@@ -3,7 +3,7 @@
 Get up and running fast. For full details, see [README.md](README.md).
 
 ## Prerequisites
-- CounterStrikeSharp v1.0.378+ (.NET 10) with Metamod:Source 2.x build 1467+
+- CounterStrikeSharp v1.0.379+ (.NET 10) with Metamod:Source 2.x build 1467+
 - .NET 10 SDK to build
 - MySQL 8.4 LTS or 9.7 LTS with `local_infile=ON`
 - CS2 server with admin access, started with `-allow_round_backup_files` if you use `.restore`
@@ -18,8 +18,9 @@ cp secrets/mysql_user_password.example secrets/mysql_user_password.txt
 docker compose up -d
 ```
 This applies `database/init.sql` automatically on first start (empty volume only). To use an existing
-MySQL server instead, run `database/init.sql` against it manually and set it up as in the README's
-*Database prerequisites* (`local_infile=ON`, `CREATE TEMPORARY TABLES` grant).
+MySQL server instead, create the database and load the schema into it
+(`mysql -u <user> -p cs2_statscollector < database/init.sql`; the script does not select a database itself), and set
+it up as in the README's *Database prerequisites* (`local_infile=ON`, `DELETE` and `CREATE TEMPORARY TABLES` grants).
 
 ## Install
 1. Stop the CS2 server.
@@ -70,7 +71,8 @@ Copy the built plugin from `out/` to your server.
 - **DB connection failed**: confirm MySQL is reachable, credentials are correct, and `DatabaseSslMode` matches the server.
 - **Error 3948 / "Loading local data is disabled"**: enable `local_infile` on the MySQL server.
 - **No data**: `view_global_leaderboard` has a 10-round activity threshold; check the log for `Failed to process persistence batch`.
-- **Config overrides**: any option can be set via `STATSCOLLECTOR_`-prefixed environment variables.
+- **Config overrides**: any option can be set via `STATSCOLLECTOR_`-prefixed environment variables; nested options
+  use `__` (`STATSCOLLECTOR_Scrim__PlayersPerTeam`).
 - **"Too many connections" (multi-server)**: raise MySQL `max_connections` to at least `50 × number_of_servers`.
 
 ## Links

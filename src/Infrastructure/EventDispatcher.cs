@@ -56,10 +56,15 @@ public sealed class EventDispatcher(
 
     public HookResult Dispatch<T>(T @event, GameEventInfo info) where T : GameEvent
     {
-        if (_config.CurrentValue.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live)
+        var config = _config.CurrentValue;
+        if (config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live)
         {
             return HookResult.Continue;
         }
+
+        // Warmup is not part of a match. Deathmatch has no rounds: its kills, with no rounds to divide by, would
+        // distort the lifetime ratings that competitive servers share.
+        if (config.DeathmatchMode || GameRulesState.IsWarmup) return HookResult.Continue;
 
         using var activity = Instrumentation.ActivitySource.StartActivity(EventName<T>.DispatchName);
 

@@ -2,6 +2,9 @@ using System.Threading.Channels;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using MySqlConnector;
+using Polly.CircuitBreaker;
+using Polly.Timeout;
 using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
@@ -24,6 +27,11 @@ public sealed record RoundEndUpdate(string MatchId, int Number, int WinnerTeam, 
 
 public sealed record RoundOfficialEndUpdate(string MatchId, int Number)
     : StatsUpdate(MatchId, Number);
+
+/// <summary>A round restore replays rounds from <paramref name="FromRound"/> on, so their rows written before
+/// <paramref name="VoidedAtUtc"/> are dropped.</summary>
+public sealed record RoundsVoidedUpdate(string MatchId, int FromRound, DateTime VoidedAtUtc)
+    : StatsUpdate(MatchId, FromRound);
 
 public sealed record MatchStartUpdate(string MapName, string MatchId, string? SeriesUuid)
     : StatsUpdate(MatchId);
@@ -185,6 +193,10 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                 await _channel.Writer.WriteAsync(new FlushMessage(completion, null), cancellationToken).ConfigureAwait(false);
                 await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
+            else if (_channel.Reader.Count > 0)
+            {
+                _logger.LogWarning("Stopped before the database was reachable; {Count} queued updates were not written.", _channel.Reader.Count);
+            }
         }
         finally
         {
@@ -203,7 +215,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                 return;
             }
 
-            await ProcessBatchCoreAsync(batch, cancellationToken).ConfigureAwait(false);
+            await WriteAsync(batch, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -215,6 +227,45 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
             BufferFailedBatch([.. batch]);
         }
     }
+
+    // A deterministic error (bad data, a missing column or privilege) fails the same way on every retry; buffered, the
+    // batch would block every later write behind it. Write such a batch one update at a time and drop only the updates
+    // that fail that way. Throws only for errors a retry can fix, so the batch is buffered.
+    private async Task WriteAsync(IReadOnlyList<StatsUpdate> batch, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ProcessBatchCoreAsync(batch, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        catch (Exception ex) when (IsPermanent(ex) && batch.Count > 1)
+        {
+            _logger.LogWarning(ex, "Persistence batch of {Count} updates failed permanently; writing its updates one at a time.", batch.Count);
+        }
+        catch (Exception ex) when (IsPermanent(ex))
+        {
+            LogDropped(batch[0], ex);
+            return;
+        }
+
+        foreach (var update in batch)
+        {
+            try
+            {
+                await ProcessBatchCoreAsync([update], cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (IsPermanent(ex))
+            {
+                LogDropped(update, ex);
+            }
+        }
+    }
+
+    private static bool IsPermanent(Exception ex) => !ResiliencePolicies.IsRetryable(ex);
+
+    private void LogDropped(StatsUpdate update, Exception ex) =>
+        _logger.LogCritical(ex, "Dropped {UpdateType} for {SteamId} in {Match}: it cannot be written.",
+            update.GetType().Name, update.SteamId, update.MatchUuid);
 
     private async Task ProcessBatchCoreAsync(IReadOnlyList<StatsUpdate> batch, CancellationToken cancellationToken)
     {
@@ -246,6 +297,9 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                     break;
                 case RoundOfficialEndUpdate officialEnd:
                     await _repository.OfficiallyEndRoundAsync(officialEnd.MatchId, officialEnd.Number, cancellationToken).ConfigureAwait(false);
+                    break;
+                case RoundsVoidedUpdate voided:
+                    await _repository.VoidRoundsAsync(voided.MatchId, voided.FromRound, voided.VoidedAtUtc, cancellationToken).ConfigureAwait(false);
                     break;
                 case MatchStartUpdate matchStart:
                     await _repository.StartMatchAsync(matchStart.MapName, matchStart.MatchId, matchStart.SeriesUuid, cancellationToken).ConfigureAwait(false);
@@ -288,7 +342,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
             var batch = _failedBatches.Peek();
             try
             {
-                await ProcessBatchCoreAsync(batch, cancellationToken).ConfigureAwait(false);
+                await WriteAsync(batch, cancellationToken).ConfigureAwait(false);
                 _failedBatches.Dequeue();
                 _currentBufferSize -= batch.Count * 1024L;
             }

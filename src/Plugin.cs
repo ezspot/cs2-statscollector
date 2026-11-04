@@ -64,11 +64,33 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
     {
         _logger.LogInformation("statsCollector v{Version} loading... HotReload: {HotReload}", Instrumentation.ServiceVersion, hotReload);
 
+        IPluginLifecycleService lifecycle;
+        try
+        {
+            // Services are built and their handlers registered here, on the game thread: CounterStrikeSharp natives
+            // (Server.GameDirectory in two constructors, event and command registration) throw on any other thread.
+            // Built on the background task, the plugin never initialized.
+            _serviceProvider = BuildServices();
+            lifecycle = _serviceProvider.GetRequiredService<IPluginLifecycleService>();
+            lifecycle.Initialize(this);
+            _lifecycle = lifecycle;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogCritical(ex, "Failed to initialize statsCollector plugin");
+            return;
+        }
+
+        PickUpRunningMatch(_cancellationTokenSource.Token);
+
+        // Schema and background writers need the database. Until they start, stats updates and position events wait in
+        // their bounded queues; an unload before then discards them (there is nothing to write them to).
         _initializationTask = Task.Run(async () =>
         {
             try
             {
-                await InitializePluginAsync(hotReload, _cancellationTokenSource.Token);
+                await lifecycle.StartAsync(_cancellationTokenSource.Token);
+                _logger.LogInformation("statsCollector background initialization complete.");
             }
             catch (OperationCanceledException) when (_cancellationTokenSource.IsCancellationRequested)
             {
@@ -76,12 +98,33 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             }
             catch (Exception ex)
             {
-                _logger.LogCritical(ex, "Failed to initialize statsCollector plugin");
+                _logger.LogCritical(ex, "Failed to start statsCollector persistence");
             }
         }, _cancellationTokenSource.Token);
     }
 
-    private async Task InitializePluginAsync(bool hotReload, CancellationToken ct)
+    // A load in the middle of a map (hot reload, or css_plugins load after replacing the DLL) misses the map start and
+    // the connects of everyone already playing. On a cold start this runs on the first world update.
+    private void PickUpRunningMatch(CancellationToken ct)
+    {
+        var services = _serviceProvider!;
+        services.GetRequiredService<IGameScheduler>().Schedule(() =>
+        {
+            if (ct.IsCancellationRequested) return;
+            var playerSessions = services.GetRequiredService<IPlayerSessionService>();
+            foreach (var player in Utilities.GetPlayers())
+            {
+                if (!player.IsBot && player.SteamID != 0)
+                    playerSessions.EnsurePlayer(PlayerControllerState.From(player));
+            }
+
+            var matchTracker = services.GetRequiredService<IMatchTrackingService>();
+            if (matchTracker.CurrentMatch is null && !string.IsNullOrEmpty(Server.MapName))
+                matchTracker.StartMatch(Server.MapName);
+        });
+    }
+
+    private ServiceProvider BuildServices()
     {
         var services = new ServiceCollection();
 
@@ -113,6 +156,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddSingleton<MovementEventProcessor>();
         services.AddSingleton<CommunicationEventProcessor>();
 
+        // Combat first: its player_hurt handler computes the overkill-free damage the utility handler reuses.
         services.AddSingleton<IEventProcessor>(sp => sp.GetRequiredService<CombatEventProcessor>());
         services.AddSingleton<IEventProcessor>(sp => sp.GetRequiredService<UtilityEventProcessor>());
         services.AddSingleton<IEventProcessor>(sp => sp.GetRequiredService<BombEventProcessor>());
@@ -138,52 +182,11 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddSingleton<IGameHandler, MatchFlowHandler>();
         services.AddSingleton<IGameHandler, PlayerLifecycleHandler>();
 
-        _serviceProvider = services.BuildServiceProvider(new ServiceProviderOptions
+        return services.BuildServiceProvider(new ServiceProviderOptions
         {
             ValidateOnBuild = true,
             ValidateScopes = true
         });
-
-        _lifecycle = _serviceProvider.GetRequiredService<IPluginLifecycleService>();
-        var matchTracker = _serviceProvider.GetRequiredService<IMatchTrackingService>();
-        var scrimManager = _serviceProvider.GetRequiredService<IScrimManager>();
-        var scheduler = _serviceProvider.GetRequiredService<IGameScheduler>();
-        var playerSessions = _serviceProvider.GetRequiredService<IPlayerSessionService>();
-
-        await _lifecycle.StartAsync(ct);
-
-        if (hotReload)
-        {
-            scheduler.Schedule(() =>
-            {
-                if (ct.IsCancellationRequested) return;
-                if (Server.MapName != null)
-                {
-                    foreach (var player in Utilities.GetPlayers())
-                    {
-                        if (!player.IsBot && player.SteamID != 0)
-                            playerSessions.EnsurePlayer(PlayerControllerState.From(player));
-                    }
-                    matchTracker.StartMatch(Server.MapName);
-                }
-            });
-        }
-
-        scheduler.Schedule(() =>
-        {
-            if (ct.IsCancellationRequested) return;
-            _lifecycle.Initialize(this);
-
-            RegisterListener<Listeners.OnMapStart>(mapName =>
-            {
-                matchTracker.StartMatch(mapName);
-                scrimManager.HandleMapStart(mapName);
-            });
-
-            _logger.LogInformation("statsCollector plugin initialized successfully on game thread.");
-        });
-
-        _logger.LogInformation("statsCollector background initialization complete.");
     }
 
     public override void Unload(bool hotReload)
@@ -192,6 +195,11 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
 
         try
         {
+            // Pending scrim and pause timers must be killed here, on the game thread; the container is disposed on a
+            // pool thread, where that native call throws and the timer would fire into the unloaded plugin.
+            (_serviceProvider?.GetService<IScrimManager>() as IDisposable)?.Dispose();
+            (_serviceProvider?.GetService<IPauseService>() as IDisposable)?.Dispose();
+
             _cancellationTokenSource.Cancel();
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
             CleanupAsync(timeout.Token).GetAwaiter().GetResult();
@@ -253,9 +261,6 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             }
         }
     }
-
-    #region Player Lifecycle Events
-    #endregion
 
     [ConsoleCommand("css_recover_scrim", "Recover the last active scrim state after a server crash")]
     [CommandHelper(whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]

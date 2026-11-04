@@ -87,6 +87,16 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
         plugin.AddCommand("css_unpause", "Unpause the match", (player, info) => { if (ValidatePlayer(player)) OnUnpauseCommand(player, info); });
         plugin.AddCommand("css_restore", "Restore a previous round", (player, info) => { if (ValidatePlayer(player)) OnRestoreCommand(player, info); });
         plugin.AddCommand("css_t", "Select T side", (player, info) => { if (ValidatePlayer(player)) OnTCommand(player!, info); });
+        plugin.AddCommandListener("jointeam", OnJoinTeam);
+    }
+
+    private HookResult OnJoinTeam(CCSPlayerController? player, CommandInfo command)
+    {
+        if (player is not { IsValid: true } || player.IsBot || !int.TryParse(command.GetArg(1), out var team)) return HookResult.Continue;
+        if (_scrimManager.CanJoinTeam(player.SteamID, team)) return HookResult.Continue;
+
+        player.PrintToChat(" [Scrim] Picked players stay on their team's side.");
+        return HookResult.Stop;
     }
 
     private static bool ValidatePlayer(CCSPlayerController? player)
@@ -144,7 +154,7 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
                     if (command.ArgCount < 4) return;
                     if (!int.TryParse(command.GetArg(2), out var team) ||
                         !ulong.TryParse(command.GetArg(3), out var targetSteamId)) return;
-                    var target = Utilities.GetPlayerFromSteamId(targetSteamId);
+                    var target = Utilities.GetPlayerFromSteamId64(targetSteamId);
                     if (target != null) RunCommand(_scrimManager.SetCaptainAsync(team, target.SteamID), "set captain");
                     break;
                 case "set":
@@ -168,7 +178,7 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
             case "pick":
                 if (command.ArgCount < 3) return;
                 if (!ulong.TryParse(command.GetArg(2), out var pickTargetSteamId)) return;
-                var pickTarget = Utilities.GetPlayerFromSteamId(pickTargetSteamId);
+                var pickTarget = Utilities.GetPlayerFromSteamId64(pickTargetSteamId);
                 if (pickTarget != null) RunCommand(_scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID), "pick player");
                 break;
             case "ct": RunCommand(_scrimManager.SelectSideAsync(player.SteamID, "ct"), "select CT side"); break;
@@ -198,7 +208,7 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
     {
         if (player == null || command.ArgCount < 2) return;
         if (!ulong.TryParse(command.GetArg(1), out var targetSteamId)) return;
-        var pickTarget = Utilities.GetPlayerFromSteamId(targetSteamId);
+        var pickTarget = Utilities.GetPlayerFromSteamId64(targetSteamId);
         if (pickTarget != null) RunCommand(_scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID), "pick player");
     }
 
@@ -267,7 +277,7 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
             }
             else
             {
-                command.ReplyToCommand($" [statsCollector] Failed to restore round {roundNumber}.");
+                command.ReplyToCommand($" [statsCollector] No backup of round {roundNumber}. Round backups need the -allow_round_backup_files server launch flag.");
             }
         }
     }

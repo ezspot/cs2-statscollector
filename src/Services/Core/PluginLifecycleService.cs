@@ -27,7 +27,6 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     private readonly ISchemaInitializer _schemaInitializer;
     private readonly IMatchStatsService _matchStats;
 
-    private CounterStrikeSharp.API.Modules.Timers.Timer? _autoSaveTimer;
     public PluginLifecycleService(
         ILogger<PluginLifecycleService> logger,
         IOptionsMonitor<PluginConfig> config,
@@ -55,10 +54,8 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         _eventHandler.RegisterEvents(plugin);
 
         var autoSaveInterval = Math.Max(30, _config.CurrentValue.AutoSaveSeconds);
-        _autoSaveTimer = plugin.AddTimer(autoSaveInterval, () =>
-        {
-            SaveAllStats();
-        }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.REPEAT);
+        // BasePlugin.Dispose kills it at unload.
+        plugin.AddTimer(autoSaveInterval, SaveAllStats, CounterStrikeSharp.API.Modules.Timers.TimerFlags.REPEAT);
 
         _logger.LogInformation("Plugin lifecycle initialized.");
     }
@@ -104,10 +101,10 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         }
     }
 
+    // Runs on a pool thread when unload had to wait for startup: no native calls here. The autosave timer cannot fire
+    // while unload blocks the game thread, and BasePlugin.Dispose kills it afterwards.
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        _autoSaveTimer?.Kill();
-
         SaveAllStats();
 
         if (_matchTracker.CurrentMatch != null)

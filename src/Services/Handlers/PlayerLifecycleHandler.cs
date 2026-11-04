@@ -5,6 +5,8 @@ using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
 using statsCollector.Services;
@@ -22,6 +24,7 @@ public sealed class PlayerLifecycleHandler : IGameHandler
     private readonly IPersistenceChannel _persistenceChannel;
     private readonly IStatsRepository _statsRepository;
     private readonly IMatchStatsService _matchStats;
+    private readonly IOptionsMonitor<PluginConfig> _config;
     private readonly CancellationToken _stoppingToken;
 
     public PlayerLifecycleHandler(
@@ -32,6 +35,7 @@ public sealed class PlayerLifecycleHandler : IGameHandler
         IPersistenceChannel persistenceChannel,
         IStatsRepository statsRepository,
         IMatchStatsService matchStats,
+        IOptionsMonitor<PluginConfig> config,
         CancellationTokenSource cancellationTokenSource)
     {
         _logger = logger;
@@ -41,19 +45,20 @@ public sealed class PlayerLifecycleHandler : IGameHandler
         _persistenceChannel = persistenceChannel;
         _statsRepository = statsRepository;
         _matchStats = matchStats;
+        _config = config;
         _stoppingToken = cancellationTokenSource.Token;
 
         _playerSessions.PlayerSessionCreated += OnSessionCreated;
     }
 
-    private void OnSessionCreated(ulong steamId)
+    private void OnSessionCreated(ulong steamId, long sessionId)
     {
-        _ = SeedLifetimeAsync(steamId);
+        _ = SeedLifetimeAsync(steamId, sessionId);
     }
 
     // An unseeded session is never persisted, so one failed read would silently drop the player's whole
     // session: keep trying while they are connected.
-    private async Task SeedLifetimeAsync(ulong steamId)
+    private async Task SeedLifetimeAsync(ulong steamId, long sessionId)
     {
         while (_playerSessions.GetActiveSteamIds().Contains(steamId))
         {
@@ -64,7 +69,7 @@ public sealed class PlayerLifecycleHandler : IGameHandler
                 // for other players don't hold it up).
                 await _persistenceChannel.FlushAsync(steamId, _stoppingToken).ConfigureAwait(false);
                 var lifetime = await _statsRepository.GetLifetimePlayerStatsAsync(steamId, _stoppingToken).ConfigureAwait(false);
-                _playerSessions.HydrateLifetime(steamId, lifetime);
+                _playerSessions.HydrateLifetime(steamId, sessionId, lifetime);
                 _matchStats.EnsureBaseline(steamId);
                 return;
             }
@@ -110,6 +115,7 @@ public sealed class PlayerLifecycleHandler : IGameHandler
             {
                 _logger.LogInformation("Late-joiner detected: {Name}.", player.PlayerName);
             }
+            _scrimManager.HandlePlayerConnected(player.SteamID);
         }
         return HookResult.Continue;
     }
@@ -120,7 +126,9 @@ public sealed class PlayerLifecycleHandler : IGameHandler
         if (player != null && !player.IsBot && player.SteamID != 0)
         {
             var steamId = player.SteamID;
-            _scrimManager.HandleDisconnect(steamId);
+            // A map change disconnects every client, and they reconnect on the new map; only a real disconnect may
+            // abort the scrim (the knife round is played after the change to the voted map).
+            if (!IsMapChangeDisconnect(@event.Reason)) _scrimManager.HandleDisconnect(steamId);
 
             var match = _matchTracker.CurrentMatch;
             _matchStats.FinalizePlayer(steamId);
@@ -133,6 +141,10 @@ public sealed class PlayerLifecycleHandler : IGameHandler
         return HookResult.Continue;
     }
 
+    // ENetworkDisconnectionReason: SHUTDOWN, RECONNECTION, LOOPSHUTDOWN, LOOPDEACTIVATE, HOST_ENDGAME,
+    // LOOP_LEVELLOAD_ACTIVATE (GameTracking-CS2 Protobufs/network_connection.proto).
+    private static bool IsMapChangeDisconnect(int reason) => reason is 1 or 53 or 54 or 55 or 56 or 57;
+
     private HookResult OnPlayerSpawn(EventPlayerSpawn @event, GameEventInfo info)
     {
         var player = @event.GetPlayerOrDefault("userid");
@@ -140,10 +152,11 @@ public sealed class PlayerLifecycleHandler : IGameHandler
         {
             var state = PlayerControllerState.From(player);
             _playerSessions.EnsurePlayer(state);
-            _playerSessions.MutatePlayer(state.SteamId, stats =>
-            {
-                stats.Round.TotalSpawns++;
-            });
+            // Only spawns in tracked rounds count: warmup, deathmatch, lobby and practice respawn players constantly.
+            var config = _config.CurrentValue;
+            if (config.DeathmatchMode || GameRulesState.IsWarmup ||
+                (config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live)) return HookResult.Continue;
+            _playerSessions.MutatePlayer(state.SteamId, stats => stats.Round.TotalSpawns++);
         }
         return HookResult.Continue;
     }

@@ -16,6 +16,16 @@ public interface IMatchStatsService
     void EnsureBaseline(ulong steamId);
     void FinalizePlayer(ulong steamId);
 
+    /// <summary>Copy of the per-match baseline, so a round restore can return to it.</summary>
+    IReadOnlyDictionary<ulong, PlayerSnapshot> CopyBaseline();
+
+    /// <summary>Returns the baseline to <paramref name="baseline"/> for the sessions restarted from
+    /// <paramref name="restartedFrom"/> (their totals at that point), keeping everyone else's.</summary>
+    void RestoreBaseline(IReadOnlyDictionary<ulong, PlayerSnapshot> baseline, IEnumerable<PlayerSnapshot> restartedFrom);
+
+    /// <summary>Rewrites the match row of a player who is not connected, from their totals and match baseline.</summary>
+    void RewriteMatchStats(PlayerSnapshot totals, PlayerSnapshot baseline);
+
     /// <summary>Computes per-match deltas against the baseline and enqueues match summary + weapon rows.</summary>
     void FinalizeMatch();
 }
@@ -118,22 +128,42 @@ public sealed class MatchStatsService(
             _logger.LogInformation("Finalized per-match stats for disconnected player {SteamId}.", steamId);
         }
 
-        // Counters are reseeded from the database on reconnect, but weapon totals are per session and restart
-        // at zero. Keep this session's weapon numbers in the baseline as a negative offset (baseline minus
-        // current) so a reconnected session's totals minus the baseline still cover the whole match.
         lock (_lock)
         {
-            if (_baseline.TryGetValue(steamId, out var kept))
+            if (_baseline.TryGetValue(steamId, out var kept)) _baseline[steamId] = CarryWeaponTotals(kept, current);
+        }
+    }
+
+    public IReadOnlyDictionary<ulong, PlayerSnapshot> CopyBaseline()
+    {
+        lock (_lock) return new Dictionary<ulong, PlayerSnapshot>(_baseline);
+    }
+
+    public void RestoreBaseline(IReadOnlyDictionary<ulong, PlayerSnapshot> baseline, IEnumerable<PlayerSnapshot> restartedFrom)
+    {
+        lock (_lock)
+        {
+            foreach (var totals in restartedFrom)
             {
-                _baseline[steamId] = kept with
-                {
-                    WeaponKills = Subtract(kept.WeaponKills, current.WeaponKills),
-                    WeaponShots = Subtract(kept.WeaponShots, current.WeaponShots),
-                    WeaponHits = Subtract(kept.WeaponHits, current.WeaponHits)
-                };
+                if (baseline.TryGetValue(totals.SteamId, out var kept)) _baseline[totals.SteamId] = CarryWeaponTotals(kept, totals);
             }
         }
     }
+
+    public void RewriteMatchStats(PlayerSnapshot totals, PlayerSnapshot baseline)
+    {
+        if (_matchTracker.CurrentMatch?.MatchUuid is { } matchUuid) WriteMatchStats(totals, baseline, matchUuid, DateTime.UtcNow);
+    }
+
+    // Counters are reseeded from the database when a session restarts (reconnect, round restore), but weapon totals
+    // are per session and restart at zero. Keep the old session's weapon numbers in the baseline as a negative
+    // offset (baseline minus its totals) so the new session's totals minus the baseline still cover the whole match.
+    private static PlayerSnapshot CarryWeaponTotals(PlayerSnapshot baseline, PlayerSnapshot sessionTotals) => baseline with
+    {
+        WeaponKills = Subtract(baseline.WeaponKills, sessionTotals.WeaponKills),
+        WeaponShots = Subtract(baseline.WeaponShots, sessionTotals.WeaponShots),
+        WeaponHits = Subtract(baseline.WeaponHits, sessionTotals.WeaponHits)
+    };
 
     private static Dictionary<string, int> Subtract(IReadOnlyDictionary<string, int> left, IReadOnlyDictionary<string, int> right)
     {

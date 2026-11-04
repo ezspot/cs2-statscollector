@@ -16,6 +16,10 @@ namespace statsCollector.Services;
 public interface ICombatEventProcessor : IEventProcessor
 {
     (int CtAlive, int TAlive) GetAliveCounts();
+
+    /// <summary>HP the player_hurt being dispatched removed from this victim (its dmg_health, capped at the HP they
+    /// had). Valid for handlers that run after this processor's, which subscribes first.</summary>
+    int GetHealthRemoved(int victimIndex, int reportedDamage);
 }
 
 public sealed class CombatEventProcessor : ICombatEventProcessor
@@ -83,6 +87,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
     private int _ctAliveCount;
     private int _tAliveCount;
+    private (int VictimIndex, int Damage) _lastHurt = (-1, 0);
 
     public CombatEventProcessor(
         IPlayerSessionService playerSessions,
@@ -104,6 +109,9 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
     public (int CtAlive, int TAlive) GetAliveCounts() => (_ctAliveCount, _tAliveCount);
 
+    public int GetHealthRemoved(int victimIndex, int reportedDamage) =>
+        _lastHurt.VictimIndex == victimIndex ? _lastHurt.Damage : reportedDamage;
+
     public void RegisterEvents(IEventDispatcher dispatcher)
     {
         dispatcher.Subscribe<EventPlayerDeath>((e, i) => { HandlePlayerDeath(e); return HookResult.Continue; });
@@ -123,7 +131,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
         foreach (var steamId in _playerSessions.GetActiveSteamIds())
         {
-            var player = Utilities.GetPlayerFromSteamId(steamId);
+            var player = Utilities.GetPlayerFromSteamId64(steamId);
             var state = PlayerControllerState.From(player);
             if (!state.IsValid || state.IsBot || player is null) continue;
 
@@ -208,6 +216,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             activity?.SetTag("headshot", isHeadshot);
 
             bool isGrenadeKill = GrenadeWeaponNames.Contains(NormalizeWeaponName(weaponName));
+            // The entry duel is lost only to the player who opened it, as EntryKills counts it.
+            bool killedByEngager = attacker is { IsValid: true } && (int)attacker.Index == _firstEngagementAttackerIndex;
             bool isFirstKillOfRound = !_firstKillHappened &&
                 attackerState.IsValid && !attackerState.IsBot &&
                 attackerState.SteamId != victimState.SteamId && attackerState.Team != victimTeam;
@@ -244,7 +254,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     stats.CurrentTeam = victimTeam;
 
                     // Entry Death tracking
-                    if (_firstEngagementVictimIndex == victimIndex)
+                    if (_firstEngagementVictimIndex == victimIndex && killedByEngager)
                     {
                         stats.Combat.EntryDeaths++;
                     }
@@ -408,7 +418,9 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 }
             }
 
-            if (assisterState.IsValid && !assisterState.IsBot && assisterState.SteamId != victimState.SteamId && assisterState.SteamId != attackerState.SteamId)
+            // The engine names the top damage dealer even when that is the victim's teammate, and does not score it.
+            if (assisterState.IsValid && !assisterState.IsBot && assisterState.SteamId != victimState.SteamId &&
+                assisterState.SteamId != attackerState.SteamId && assisterState.Team != victimTeam)
             {
                 _playerSessions.MutatePlayer(assisterState.SteamId, stats =>
                 {
@@ -444,6 +456,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
             var weapon = (@event.GetStringValue("weapon", "unknown") ?? "unknown").ToLowerInvariant();
             var damage = ClampToRemainingHealth(victimIndex, victimState.SteamId, @event.GetIntValue("dmg_health", 0), @event.GetIntValue("health", 0));
+            _lastHurt = (victimIndex, damage);
             var damageArmor = @event.GetIntValue("dmg_armor", 0);
             var hitgroup = @event.GetIntValue("hitgroup", 0);
             var isUtilityDamage = UtilityDamageWeapons.Contains(weapon);
@@ -651,21 +664,24 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         UpdateClutchStats(winningTeam);
     }
 
+    // A clutch is won when the clutcher's side wins the round, even if they died first (a plant that explodes). A
+    // drawn or aborted round decides nothing.
     private void UpdateClutchStats(PlayerTeam winningTeam)
     {
+        if (winningTeam == PlayerTeam.Spectator) return;
         try
         {
             foreach (var (team, candidate) in _clutchCandidates)
             {
                 _playerSessions.MutatePlayer(candidate.SteamId, stats =>
                 {
-                    if (team == winningTeam && IsPlayerAlive(candidate.SteamId))
+                    if (team == winningTeam)
                     {
                         var settings = _config.CurrentValue.ClutchSettings;
                         stats.Combat.ClutchesWon++;
                         stats.Combat.ClutchPoints += settings.BaseMultiplier + (candidate.Opponents * settings.DifficultyWeight);
                     }
-                    else if (team != winningTeam)
+                    else
                     {
                         stats.Combat.ClutchesLost++;
                     }
@@ -693,15 +709,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 return;
             }
         }
-    }
-
-    private bool IsPlayerAlive(ulong steamId)
-    {
-        for (var i = 0; i < MaxPlayers; i++)
-        {
-            if (_playerSteamIds[i] == steamId) return _isPlayerAlive[i];
-        }
-        return false;
     }
 
     // player_hurt's dmg_health is not capped at the victim's remaining HP (a 110-damage headshot on a 30 HP

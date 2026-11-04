@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS player_stats (
     impact_rating DECIMAL(5,3) DEFAULT 0,
     survival_rating DECIMAL(5,3) DEFAULT 0,
     utility_score DECIMAL(5,3) DEFAULT 0,
-    round_swing DECIMAL(7,3) DEFAULT 0,
+    round_swing DECIMAL(10,3) DEFAULT 0,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_player_stats_updated_at (updated_at),
     INDEX idx_player_stats_hltv_rating (hltv_rating DESC),

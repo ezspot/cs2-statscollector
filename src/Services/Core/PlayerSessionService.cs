@@ -11,12 +11,15 @@ namespace statsCollector.Services;
 
 public interface IPlayerSessionService
 {
-    /// <summary>Raised (once) with the SteamID when a new in-memory session is created, so a consumer
-    /// can seed it from the database. Fires regardless of how the session was first created
+    /// <summary>Raised (once) with the SteamID and a session id when a new in-memory session is created, so a
+    /// consumer can seed it from the database. Fires regardless of how the session was first created
     /// (connect, spawn, or hot-reload).</summary>
-    event Action<ulong>? PlayerSessionCreated;
+    event Action<ulong, long>? PlayerSessionCreated;
     void EnsurePlayer(PlayerControllerState player);
-    void HydrateLifetime(ulong steamId, LifetimePlayerStatsRow? lifetime);
+
+    /// <summary>Seeds the session with this id; a seed for a session since replaced (reconnect, round restore)
+    /// is ignored, since it read the row the replacement must not start from.</summary>
+    void HydrateLifetime(ulong steamId, long sessionId, LifetimePlayerStatsRow? lifetime);
     bool TryRemovePlayer(ulong steamId);
     void MutatePlayer(ulong steamId, Action<PlayerStats> mutation);
     T WithPlayer<T>(ulong steamId, Func<PlayerStats, T> accessor, T defaultValue = default!);
@@ -39,7 +42,7 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
         _analytics = analytics;
     }
 
-    public event Action<ulong>? PlayerSessionCreated;
+    public event Action<ulong, long>? PlayerSessionCreated;
 
     public void EnsurePlayer(PlayerControllerState player)
     {
@@ -67,12 +70,13 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
 
         // Notify outside the lock so the seeding consumer can hydrate this session from the database
         // before it is eligible for persistence (see the LifetimeSeeded guard in the capture methods).
-        if (isNew) PlayerSessionCreated?.Invoke(player.SteamId);
+        if (isNew) PlayerSessionCreated?.Invoke(player.SteamId, wrapper.Id);
     }
 
-    public void HydrateLifetime(ulong steamId, LifetimePlayerStatsRow? lifetime)
+    public void HydrateLifetime(ulong steamId, long sessionId, LifetimePlayerStatsRow? lifetime)
     {
-        if (!_playerStats.TryGetValue(steamId, out var wrapper)) return; // player already left
+        // The player left, or the session was replaced while this seed was reading.
+        if (!_playerStats.TryGetValue(steamId, out var wrapper) || wrapper.Id != sessionId) return;
 
         wrapper.Lock.EnterWriteLock();
         try
@@ -216,8 +220,11 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
 
     private sealed class PlayerStatsWrapper : IDisposable
     {
+        private static long _lastId;
+
         public PlayerStats Stats { get; }
         public ReaderWriterLockSlim Lock { get; }
+        public long Id { get; } = Interlocked.Increment(ref _lastId);
 
         public PlayerStatsWrapper(PlayerStats stats)
         {

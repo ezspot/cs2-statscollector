@@ -98,32 +98,25 @@ public sealed class MatchTrackingService : IMatchTrackingService
         }
     }
 
+    // CT round-win rate by players alive (row = Ts alive, column = CTs alive, 1..5), measured over 400k+ CS:GO
+    // matchmaking rounds: https://cryptm.org/posts/2020/06/12/csgo.html. It is monotone, so every enemy kill
+    // raises the killer's side; the old hand-made table mixed in a ct/(ct+t) fallback that made 8 of the 40
+    // 5v5 kill transitions (e.g. CT 5v3 -> 5v2) score negative.
+    private static readonly float[,] CtWinRate =
+    {
+        // 1 CT    2 CT    3 CT    4 CT    5 CT
+        { 0.430f, 0.792f, 0.942f, 0.985f, 0.997f }, // 1 T
+        { 0.123f, 0.440f, 0.733f, 0.893f, 0.961f }, // 2 T
+        { 0.029f, 0.187f, 0.455f, 0.700f, 0.858f }, // 3 T
+        { 0.007f, 0.068f, 0.236f, 0.470f, 0.683f }, // 4 T
+        { 0.002f, 0.023f, 0.106f, 0.275f, 0.487f }, // 5 T
+    };
+
     public float GetRoundWinProbability(int ctAlive, int tAlive)
     {
-        // Simple historical model for CT win probability based on alive counts
-        // 5v5 -> 0.5, 5v4 -> 0.7, etc.
-        if (ctAlive == 0) return 0.0f;
-        if (tAlive == 0) return 1.0f;
-
-        // Using a basic sigmoid-like approach or lookup table for CS2 standard meta
-        return (ctAlive, tAlive) switch
-        {
-            (5, 5) => 0.50f,
-            (5, 4) => 0.72f,
-            (4, 5) => 0.28f,
-            (4, 4) => 0.50f,
-            (5, 3) => 0.85f,
-            (3, 5) => 0.15f,
-            (4, 3) => 0.70f,
-            (3, 4) => 0.30f,
-            (3, 3) => 0.50f,
-            (2, 3) => 0.25f,
-            (3, 2) => 0.75f,
-            (2, 2) => 0.50f,
-            (1, 2) => 0.15f,
-            (2, 1) => 0.85f,
-            (1, 1) => 0.50f,
-            _ => (float)ctAlive / (ctAlive + tAlive)
-        };
+        if (ctAlive <= 0) return 0f;
+        if (tAlive <= 0) return 1f;
+        // ponytail: no data beyond 5 per side, so larger teams read the 5-player cells (kills there score 0).
+        return CtWinRate[Math.Min(tAlive, 5) - 1, Math.Min(ctAlive, 5) - 1];
     }
 }

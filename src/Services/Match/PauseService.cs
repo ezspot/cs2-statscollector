@@ -29,7 +29,8 @@ public sealed class PauseService(
     {
         if (_isPaused || _pauseRequested) return;
 
-        if (player != null)
+        // Admin pauses may come from a spectating admin; the other kinds are charged to the requester's team.
+        if (player != null && type != PauseType.Admin)
         {
             var team = player.TeamNum;
             if (team is < 2 or > 3) return;
@@ -50,20 +51,20 @@ public sealed class PauseService(
         _currentPauseType = type;
 
         var typeStr = type.ToString();
-        var requester = player is null ? "server console" : $"Team {(_requestingTeam == 2 ? "T" : "CT")}";
+        var requester = player is null ? "server console" : type == PauseType.Admin ? "an admin" : $"Team {(_requestingTeam == 2 ? "T" : "CT")}";
         _scheduler.Schedule(() => Server.PrintToChatAll($" [Scrim] {typeStr} pause requested by {requester}. It will take effect at the end of the round."));
     }
 
     public void RequestUnpause(CCSPlayerController? player)
     {
-        if (!_isPaused) return;
-
+        // Admins can also end pauses this service did not start, such as the engine's pause after a round restore.
         if (player == null || AdminUtils.HasPermission(player, "@css/root", "@css/admin"))
         {
             Unpause();
             return;
         }
 
+        if (!_isPaused) return;
         player.PrintToChat(" [Scrim] An admin must unpause the match.");
     }
 
@@ -92,6 +93,9 @@ public sealed class PauseService(
                 var duration = _config.Scrim.TacticalPauseDuration > 0 ? _config.Scrim.TacticalPauseDuration : 30;
                 _pauseTimer = new CounterStrikeSharp.API.Modules.Timers.Timer(duration, () =>
                 {
+                    // CounterStrikeSharp frees the timer after this callback; a later Kill of the stale pointer could
+                    // hit another timer allocated at the same address.
+                    _pauseTimer = null;
                     _scheduler.Schedule(() =>
                     {
                         Server.PrintToChatAll(" [Scrim] Tactical pause finished. Unpausing...");
@@ -130,5 +134,11 @@ public sealed class PauseService(
         _tacticalPausesUsed[3] = 0;
     }
 
-    public void Dispose() => _pauseTimer?.Kill();
+    // Plugin.Unload calls this on the game thread (killing a timer is a native call); the container's later call on a
+    // pool thread then finds nothing to kill.
+    public void Dispose()
+    {
+        _pauseTimer?.Kill();
+        _pauseTimer = null;
+    }
 }

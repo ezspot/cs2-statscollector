@@ -12,7 +12,7 @@ public interface IGameScheduler
 public sealed class GameScheduler(ILogger<GameScheduler> logger) : IGameScheduler
 {
     // CounterStrikeSharp swallows exceptions thrown inside NextWorldUpdate callbacks without logging them, so a
-    // failure here (including the deferred registration of every event hook) would otherwise be invisible.
+    // failure here (such as the late-load bootstrap) would otherwise be invisible.
     public void Schedule(Action action) => Server.NextWorldUpdate(() =>
     {
         try

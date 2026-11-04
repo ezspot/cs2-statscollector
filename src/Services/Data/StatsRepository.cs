@@ -11,6 +11,7 @@ using statsCollector.Domain;
 using statsCollector.Infrastructure.Database;
 using statsCollector.Infrastructure;
 using Polly;
+using Polly.CircuitBreaker;
 using Polly.Registry;
 
 namespace statsCollector.Services;
@@ -29,6 +30,7 @@ public interface IStatsRepository
     Task StartRoundAsync(string matchUuid, int roundNumber, CancellationToken ct);
     Task EndRoundAsync(string matchUuid, int roundNumber, int winnerTeam, int winReason, CancellationToken ct);
     Task OfficiallyEndRoundAsync(string matchUuid, int roundNumber, CancellationToken ct);
+    Task VoidRoundsAsync(string matchUuid, int fromRound, DateTime voidedAtUtc, CancellationToken ct);
 }
 
 public sealed class StatsRepository : IStatsRepository
@@ -137,7 +139,7 @@ public sealed class StatsRepository : IStatsRepository
                 );
             }
 
-            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_match_player_stats_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, kills INT, deaths INT, assists INT, headshots INT, damage_dealt INT, mvps INT, score INT, rating2 DECIMAL(5,3), adr DECIMAL(10,2), kast DECIMAL(5,2), entry_kills INT, entry_deaths INT, entry_kill_attempts INT, entry_kill_attempt_wins INT, idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);", ct).ConfigureAwait(false);
+            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_match_player_stats_uuid (row_id INT AUTO_INCREMENT PRIMARY KEY, match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, kills INT, deaths INT, assists INT, headshots INT, damage_dealt INT, mvps INT, score INT, rating2 DECIMAL(5,3), adr DECIMAL(10,2), kast DECIMAL(5,2), entry_kills INT, entry_deaths INT, entry_kill_attempts INT, entry_kill_attempt_wins INT, idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);", ct).ConfigureAwait(false);
 
             var bulkCopy = new MySqlBulkCopy(connection)
             {
@@ -214,7 +216,7 @@ public sealed class StatsRepository : IStatsRepository
                 dataTable.Rows.Add(w.MatchUuid, w.SteamId, w.Weapon, w.Kills, w.Shots, w.Hits, w.IdempotencyKey, now, 0);
             }
 
-            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_match_weapon_stats_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, weapon_name VARCHAR(64), kills INT, shots INT, hits INT, idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);", ct).ConfigureAwait(false);
+            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_match_weapon_stats_uuid (row_id INT AUTO_INCREMENT PRIMARY KEY, match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, weapon_name VARCHAR(64), kills INT, shots INT, hits INT, idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);", ct).ConfigureAwait(false);
 
             var bulkCopy = new MySqlBulkCopy(connection)
             {
@@ -286,63 +288,79 @@ public sealed class StatsRepository : IStatsRepository
         }, cancellationToken);
     }
 
-    public async Task StartMatchAsync(string mapName, string? matchUuid, string? seriesUuid, CancellationToken ct)
-    {
-        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-        const string sql = "INSERT INTO matches (match_uuid, series_uuid, map_name, status) VALUES (@MatchUuid, @SeriesUuid, @MapName, 'IN_PROGRESS') ON DUPLICATE KEY UPDATE status = 'IN_PROGRESS';";
-        await connection.ExecuteAsync(new CommandDefinition(sql, new { MatchUuid = matchUuid, SeriesUuid = seriesUuid, MapName = mapName }, cancellationToken: ct)).ConfigureAwait(false);
-    }
+    public Task StartMatchAsync(string mapName, string? matchUuid, string? seriesUuid, CancellationToken ct) =>
+        ExecuteResilientAsync(
+            "INSERT INTO matches (match_uuid, series_uuid, map_name, status) VALUES (@MatchUuid, @SeriesUuid, @MapName, 'IN_PROGRESS') ON DUPLICATE KEY UPDATE status = 'IN_PROGRESS';",
+            new { MatchUuid = matchUuid, SeriesUuid = seriesUuid, MapName = mapName }, ct);
 
-    public async Task EndMatchAsync(string matchUuid, CancellationToken ct)
-    {
-        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-        // COALESCE: a retried batch must not move end_time to the retry time.
-        const string sql = "UPDATE matches SET end_time = COALESCE(end_time, CURRENT_TIMESTAMP), status = 'COMPLETED' WHERE match_uuid = @MatchUuid";
-        await connection.ExecuteAsync(new CommandDefinition(sql, new { MatchUuid = matchUuid }, cancellationToken: ct)).ConfigureAwait(false);
-    }
+    // COALESCE: a retried batch must not move end_time to the retry time.
+    public Task EndMatchAsync(string matchUuid, CancellationToken ct) =>
+        ExecuteResilientAsync(
+            "UPDATE matches SET end_time = COALESCE(end_time, CURRENT_TIMESTAMP), status = 'COMPLETED' WHERE match_uuid = @MatchUuid",
+            new { MatchUuid = matchUuid }, ct);
 
-    public async Task StartRoundAsync(string matchUuid, int roundNumber, CancellationToken ct)
-    {
-        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-        const string sql = """
-            INSERT INTO rounds (match_id, round_number) 
+    public Task StartRoundAsync(string matchUuid, int roundNumber, CancellationToken ct) =>
+        ExecuteResilientAsync("""
+            INSERT INTO rounds (match_id, round_number)
             SELECT id, @RoundNumber FROM matches WHERE match_uuid = @MatchUuid
             ON DUPLICATE KEY UPDATE round_number = rounds.round_number;
-            """;
-        await connection.ExecuteAsync(new CommandDefinition(sql, new { MatchUuid = matchUuid, RoundNumber = roundNumber }, cancellationToken: ct)).ConfigureAwait(false);
-    }
+            """, new { MatchUuid = matchUuid, RoundNumber = roundNumber }, ct);
 
-    public async Task EndRoundAsync(string matchUuid, int roundNumber, int winnerTeam, int winReason, CancellationToken ct)
-    {
-        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-        const string sql = """
+    public Task EndRoundAsync(string matchUuid, int roundNumber, int winnerTeam, int winReason, CancellationToken ct) =>
+        ExecuteResilientAsync("""
             UPDATE rounds r
             JOIN matches m ON r.match_id = m.id
             SET r.end_time = COALESCE(r.end_time, CURRENT_TIMESTAMP), r.winner_team = @Winner, r.win_type = @WinType
             WHERE m.match_uuid = @MatchUuid AND r.round_number = @RoundNumber;
-            """;
-        await connection.ExecuteAsync(new CommandDefinition(sql, new { MatchUuid = matchUuid, RoundNumber = roundNumber, Winner = winnerTeam, WinType = winReason }, cancellationToken: ct)).ConfigureAwait(false);
-    }
+            """, new { MatchUuid = matchUuid, RoundNumber = roundNumber, Winner = winnerTeam, WinType = winReason }, ct);
 
-    public async Task OfficiallyEndRoundAsync(string matchUuid, int roundNumber, CancellationToken ct)
-    {
-        await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-        const string sql = """
+    public Task OfficiallyEndRoundAsync(string matchUuid, int roundNumber, CancellationToken ct) =>
+        ExecuteResilientAsync("""
             UPDATE rounds r
             JOIN matches m ON r.match_id = m.id
             SET r.official_end_time = COALESCE(r.official_end_time, CURRENT_TIMESTAMP)
             WHERE m.match_uuid = @MatchUuid AND r.round_number = @RoundNumber;
-            """;
-        await connection.ExecuteAsync(new CommandDefinition(
-            sql,
-            new { MatchUuid = matchUuid, RoundNumber = roundNumber },
-            cancellationToken: ct)).ConfigureAwait(false);
+            """, new { MatchUuid = matchUuid, RoundNumber = roundNumber }, ct);
+
+    // Rows of rounds a restore voided; the replay writes them again. Position rows come from the separate position
+    // writer, so only those written before the restore go: this can run late (buffered), and the replay's must stay.
+    // The rounds rows are written on this channel, behind this delete.
+    // ponytail: position events of voided rounds still queued in the position writer at the restore are kept.
+    public async Task VoidRoundsAsync(string matchUuid, int fromRound, DateTime voidedAtUtc, CancellationToken ct)
+    {
+        try
+        {
+            await ExecuteResilientAsync("""
+                DELETE t FROM kill_positions t JOIN matches m ON t.match_id = m.id
+                    WHERE m.match_uuid = @MatchUuid AND t.round_number >= @FromRound AND t.created_at <= FROM_UNIXTIME(@VoidedAt);
+                DELETE t FROM death_positions t JOIN matches m ON t.match_id = m.id
+                    WHERE m.match_uuid = @MatchUuid AND t.round_number >= @FromRound AND t.created_at <= FROM_UNIXTIME(@VoidedAt);
+                DELETE t FROM utility_positions t JOIN matches m ON t.match_id = m.id
+                    WHERE m.match_uuid = @MatchUuid AND t.round_number >= @FromRound AND t.created_at <= FROM_UNIXTIME(@VoidedAt);
+                DELETE t FROM rounds t JOIN matches m ON t.match_id = m.id WHERE m.match_uuid = @MatchUuid AND t.round_number >= @FromRound;
+                """, new { MatchUuid = matchUuid, FromRound = fromRound, VoidedAt = new DateTimeOffset(voidedAtUtc, TimeSpan.Zero).ToUnixTimeSeconds() }, ct)
+                .ConfigureAwait(false);
+        }
+        // Cleanup only. A delete that keeps failing (no DELETE grant, or the match_id index of migration 004 missing on a
+        // big table so it times out) must not hold up every write queued behind it; only an outage is worth a retry.
+        catch (Exception ex) when (ex is not (OperationCanceledException or BrokenCircuitException) &&
+                                   !(ex is MySqlException mysql && ResiliencePolicies.IsTransient(mysql)))
+        {
+            _logger.LogWarning(ex, "Could not remove the rows of rounds {FromRound}+ of match {Match} voided by a restore; they stay next to the replayed rounds.", fromRound, matchUuid);
+        }
     }
+
+    private Task ExecuteResilientAsync(string sql, object parameters, CancellationToken cancellationToken) =>
+        _resiliencePipeline.ExecuteAsync(async ct =>
+        {
+            await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)).ConfigureAwait(false);
+        }, cancellationToken).AsTask();
 
     // MySqlBulkCopy maps DataTable columns to the destination by ordinal unless told otherwise.
     // Mapping each source column to the destination column of the same name removes any dependency
-    // on the DataTable's column order matching the table definition.
-    private static void AddColumnMappingsByName(MySqlBulkCopy bulkCopy, DataTable dataTable)
+    // on the DataTable's column order matching the table definition (and leaves staging keys to auto-increment).
+    internal static void AddColumnMappingsByName(MySqlBulkCopy bulkCopy, DataTable dataTable)
     {
         for (var i = 0; i < dataTable.Columns.Count; i++)
         {
