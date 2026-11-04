@@ -26,6 +26,7 @@ public sealed class RoundStats
     private bool _wasFlashedForKill;
     private int _pings;
     private int _footsteps;
+    private int _liveTime;
 
     public RoundStats(Action markDirty)
     {
@@ -51,6 +52,8 @@ public sealed class RoundStats
     public bool WasFlashedForKill { get => _wasFlashedForKill; set { _wasFlashedForKill = value; _markDirty(); } }
     public int Pings { get => _pings; set { _pings = value; _markDirty(); } }
     public int Footsteps { get => _footsteps; set { _footsteps = value; _markDirty(); } }
+    // Time alive as the engine counts it (CSMatchStats_t m_iLiveTime), accrued at round end.
+    public int LiveTime { get => _liveTime; set { _liveTime = value; _markDirty(); } }
 
     public void ResetRoundFlags()
     {
@@ -69,6 +72,7 @@ public sealed class RoundStats
         _aliveOnTeamAtRoundStart = _aliveEnemyAtRoundStart = 0;
         _jumps = _totalSpawns = 0;
         _roundNumber = _ctRounds = _tRounds = 0;
+        _liveTime = 0;
         ResetRoundFlags();
     }
 }

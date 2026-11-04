@@ -504,6 +504,22 @@ public sealed class StatsRepository : IStatsRepository
         dataTable.Columns.Add("pings", typeof(int));
         dataTable.Columns.Add("footsteps", typeof(int));
         dataTable.Columns.Add("round_swing", typeof(decimal));
+        dataTable.Columns.Add("team_kills", typeof(int));
+        dataTable.Columns.Add("suicides", typeof(int));
+        dataTable.Columns.Add("clutch_1v1_attempts", typeof(int));
+        dataTable.Columns.Add("clutch_1v1_wins", typeof(int));
+        dataTable.Columns.Add("clutch_1v2_attempts", typeof(int));
+        dataTable.Columns.Add("clutch_1v2_wins", typeof(int));
+        dataTable.Columns.Add("clutch_1v3_attempts", typeof(int));
+        dataTable.Columns.Add("clutch_1v3_wins", typeof(int));
+        dataTable.Columns.Add("clutch_1v4_attempts", typeof(int));
+        dataTable.Columns.Add("clutch_1v4_wins", typeof(int));
+        dataTable.Columns.Add("clutch_1v5_attempts", typeof(int));
+        dataTable.Columns.Add("clutch_1v5_wins", typeof(int));
+        dataTable.Columns.Add("kill_reward", typeof(int));
+        dataTable.Columns.Add("cash_earned", typeof(int));
+        dataTable.Columns.Add("money_saved", typeof(int));
+        dataTable.Columns.Add("live_time", typeof(int));
 
         foreach (var s in snapshotList)
         {
@@ -529,7 +545,11 @@ public sealed class StatsRepository : IStatsRepository
                 s.KDRatio, s.HeadshotPercentage, s.AccuracyPercentage, s.KASTPercentage,
                 s.AverageDamagePerRound, s.HLTVRating, s.ImpactRating, s.SurvivalRating, s.UtilityScore,
                 s.NoscopeKills, s.ThruSmokeKills, s.AttackerBlindKills, s.FlashAssistedKills, s.WallbangKills,
-                s.Pings, s.Footsteps, s.RoundSwing
+                s.Pings, s.Footsteps, s.RoundSwing,
+                s.TeamKills, s.Suicides,
+                s.Clutch1v1Attempts, s.Clutch1v1Wins, s.Clutch1v2Attempts, s.Clutch1v2Wins, s.Clutch1v3Attempts, s.Clutch1v3Wins,
+                s.Clutch1v4Attempts, s.Clutch1v4Wins, s.Clutch1v5Attempts, s.Clutch1v5Wins,
+                s.KillReward, s.CashEarned, s.MoneySaved, s.LiveTime
             );
         }
 
@@ -605,7 +625,15 @@ public sealed class StatsRepository : IStatsRepository
                 noscope_kills = src.noscope_kills, thru_smoke_kills = src.thru_smoke_kills,
                 attacker_blind_kills = src.attacker_blind_kills, flash_assisted_kills = src.flash_assisted_kills,
                 wallbang_kills = src.wallbang_kills, pings = src.pings, footsteps = src.footsteps,
-                round_swing = src.round_swing;
+                round_swing = src.round_swing,
+                team_kills = src.team_kills, suicides = src.suicides,
+                clutch_1v1_attempts = src.clutch_1v1_attempts, clutch_1v1_wins = src.clutch_1v1_wins,
+                clutch_1v2_attempts = src.clutch_1v2_attempts, clutch_1v2_wins = src.clutch_1v2_wins,
+                clutch_1v3_attempts = src.clutch_1v3_attempts, clutch_1v3_wins = src.clutch_1v3_wins,
+                clutch_1v4_attempts = src.clutch_1v4_attempts, clutch_1v4_wins = src.clutch_1v4_wins,
+                clutch_1v5_attempts = src.clutch_1v5_attempts, clutch_1v5_wins = src.clutch_1v5_wins,
+                kill_reward = src.kill_reward, cash_earned = src.cash_earned, money_saved = src.money_saved,
+                live_time = src.live_time;
             """;
 
         await ExecuteAsync(connection, mergeSql, cancellationToken).ConfigureAwait(false);

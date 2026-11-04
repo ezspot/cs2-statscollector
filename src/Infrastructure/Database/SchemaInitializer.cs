@@ -111,7 +111,24 @@ public sealed class SchemaInitializer(
                 ("multi_kill_3", "INT NOT NULL DEFAULT 0 AFTER `multi_kill_2`"),
                 ("multi_kill_4", "INT NOT NULL DEFAULT 0 AFTER `multi_kill_3`"),
                 ("multi_kill_5", "INT NOT NULL DEFAULT 0 AFTER `multi_kill_4`"),
-                ("clutch_kills", "INT NOT NULL DEFAULT 0 AFTER `clutches_lost`")
+                ("clutch_kills", "INT NOT NULL DEFAULT 0 AFTER `clutches_lost`"),
+                // Migration 005: team kills, suicides, the 1vX clutch split, and the engine's economy/time-alive counters.
+                ("team_kills", "INT NOT NULL DEFAULT 0 AFTER `round_swing`"),
+                ("suicides", "INT NOT NULL DEFAULT 0 AFTER `team_kills`"),
+                ("clutch_1v1_attempts", "INT NOT NULL DEFAULT 0 AFTER `suicides`"),
+                ("clutch_1v1_wins", "INT NOT NULL DEFAULT 0 AFTER `clutch_1v1_attempts`"),
+                ("clutch_1v2_attempts", "INT NOT NULL DEFAULT 0 AFTER `clutch_1v1_wins`"),
+                ("clutch_1v2_wins", "INT NOT NULL DEFAULT 0 AFTER `clutch_1v2_attempts`"),
+                ("clutch_1v3_attempts", "INT NOT NULL DEFAULT 0 AFTER `clutch_1v2_wins`"),
+                ("clutch_1v3_wins", "INT NOT NULL DEFAULT 0 AFTER `clutch_1v3_attempts`"),
+                ("clutch_1v4_attempts", "INT NOT NULL DEFAULT 0 AFTER `clutch_1v3_wins`"),
+                ("clutch_1v4_wins", "INT NOT NULL DEFAULT 0 AFTER `clutch_1v4_attempts`"),
+                ("clutch_1v5_attempts", "INT NOT NULL DEFAULT 0 AFTER `clutch_1v4_wins`"),
+                ("clutch_1v5_wins", "INT NOT NULL DEFAULT 0 AFTER `clutch_1v5_attempts`"),
+                ("kill_reward", "INT NOT NULL DEFAULT 0 AFTER `clutch_1v5_wins`"),
+                ("cash_earned", "INT NOT NULL DEFAULT 0 AFTER `kill_reward`"),
+                ("money_saved", "INT NOT NULL DEFAULT 0 AFTER `cash_earned`"),
+                ("live_time", "INT NOT NULL DEFAULT 0 AFTER `money_saved`")
             ], cancellationToken).ConfigureAwait(false);
         // v3.0.0 (2026-01-01) match tables, which every match-end write needs.
         foreach (var (table, after) in new[] { ("match_player_stats", "entry_kill_attempt_wins"), ("match_weapon_stats", "hits") })

@@ -153,6 +153,18 @@ public sealed class PlayerStats
         Combat.ArmHits += r.ArmHits;
         Combat.LegHits += r.LegHits;
         Combat.RoundSwing += r.RoundSwing;
+        Combat.TeamKills += r.TeamKills;
+        Combat.Suicides += r.Suicides;
+        Combat.Clutch1v1Attempts += r.Clutch1v1Attempts;
+        Combat.Clutch1v1Wins += r.Clutch1v1Wins;
+        Combat.Clutch1v2Attempts += r.Clutch1v2Attempts;
+        Combat.Clutch1v2Wins += r.Clutch1v2Wins;
+        Combat.Clutch1v3Attempts += r.Clutch1v3Attempts;
+        Combat.Clutch1v3Wins += r.Clutch1v3Wins;
+        Combat.Clutch1v4Attempts += r.Clutch1v4Attempts;
+        Combat.Clutch1v4Wins += r.Clutch1v4Wins;
+        Combat.Clutch1v5Attempts += r.Clutch1v5Attempts;
+        Combat.Clutch1v5Wins += r.Clutch1v5Wins;
         Round.RoundsPlayed += r.RoundsPlayed;
         Round.RoundsWon += r.RoundsWon;
         Round.TotalSpawns += r.TotalSpawns;
@@ -161,6 +173,7 @@ public sealed class PlayerStats
         Round.Jumps += r.Jumps;
         Round.Pings += r.Pings;
         Round.Footsteps += r.Footsteps;
+        Round.LiveTime += r.LiveTime;
         // kast_rounds is exact, but rows written before it existed (0) or by an older build sharing the
         // database (stale, while kast_percentage kept updating) must fall back to the stored percentage.
         // The DECIMAL(5,2) percentage reproduces the exact count below 5,000 rounds, so any difference there
@@ -213,6 +226,9 @@ public sealed class PlayerStats
         Economy.EquipmentValue = r.EquipmentValue;
         Economy.ItemsPurchased += r.ItemsPurchased;
         Economy.ItemsPickedUp += r.ItemsPickedUp;
+        Economy.KillReward += r.KillReward;
+        Economy.CashEarned += r.CashEarned;
+        Economy.MoneySaved += r.MoneySaved;
         Economy.RoundStartMoney = r.RoundStartMoney;
         Economy.RoundEndMoney = r.RoundEndMoney;
         Economy.EquipmentValueStart = r.EquipmentValueStart;

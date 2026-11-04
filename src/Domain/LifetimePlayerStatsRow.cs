@@ -116,4 +116,20 @@ public sealed record LifetimePlayerStatsRow
     public int ArmHits { get; init; }
     public int LegHits { get; init; }
     public decimal RoundSwing { get; init; }
+    public int TeamKills { get; init; }
+    public int Suicides { get; init; }
+    public int Clutch1v1Attempts { get; init; }
+    public int Clutch1v1Wins { get; init; }
+    public int Clutch1v2Attempts { get; init; }
+    public int Clutch1v2Wins { get; init; }
+    public int Clutch1v3Attempts { get; init; }
+    public int Clutch1v3Wins { get; init; }
+    public int Clutch1v4Attempts { get; init; }
+    public int Clutch1v4Wins { get; init; }
+    public int Clutch1v5Attempts { get; init; }
+    public int Clutch1v5Wins { get; init; }
+    public int KillReward { get; init; }
+    public int CashEarned { get; init; }
+    public int MoneySaved { get; init; }
+    public int LiveTime { get; init; }
 }

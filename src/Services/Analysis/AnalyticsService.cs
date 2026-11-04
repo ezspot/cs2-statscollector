@@ -315,7 +315,23 @@ public sealed class AnalyticsService : IAnalyticsService
             averageMoneySpentPerRound,
             survivalRating,
             utilityImpactScore,
-            topWeapon
+            topWeapon,
+            stats.Combat.TeamKills,
+            stats.Combat.Suicides,
+            stats.Combat.Clutch1v1Attempts,
+            stats.Combat.Clutch1v1Wins,
+            stats.Combat.Clutch1v2Attempts,
+            stats.Combat.Clutch1v2Wins,
+            stats.Combat.Clutch1v3Attempts,
+            stats.Combat.Clutch1v3Wins,
+            stats.Combat.Clutch1v4Attempts,
+            stats.Combat.Clutch1v4Wins,
+            stats.Combat.Clutch1v5Attempts,
+            stats.Combat.Clutch1v5Wins,
+            stats.Economy.KillReward,
+            stats.Economy.CashEarned,
+            stats.Economy.MoneySaved,
+            stats.Round.LiveTime
         );
     }
 }

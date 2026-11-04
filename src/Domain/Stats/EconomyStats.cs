@@ -14,6 +14,9 @@ public sealed class EconomyStats
     private int _roundEndMoney;
     private int _equipmentValueStart;
     private int _equipmentValueEnd;
+    private int _killReward;
+    private int _cashEarned;
+    private int _moneySaved;
 
     public EconomyStats(Action markDirty)
     {
@@ -28,12 +31,17 @@ public sealed class EconomyStats
     public int RoundEndMoney { get => _roundEndMoney; set { _roundEndMoney = value; _markDirty(); } }
     public int EquipmentValueStart { get => _equipmentValueStart; set { _equipmentValueStart = value; _markDirty(); } }
     public int EquipmentValueEnd { get => _equipmentValueEnd; set { _equipmentValueEnd = value; _markDirty(); } }
+    // The engine's per-match counters (CSMatchStats_t), accrued at round end.
+    public int KillReward { get => _killReward; set { _killReward = value; _markDirty(); } }
+    public int CashEarned { get => _cashEarned; set { _cashEarned = value; _markDirty(); } }
+    public int MoneySaved { get => _moneySaved; set { _moneySaved = value; _markDirty(); } }
 
     public void Reset()
     {
         _moneySpent = _equipmentValue = _itemsPurchased = _itemsPickedUp = 0;
         _roundStartMoney = _roundEndMoney = 0;
         _equipmentValueStart = _equipmentValueEnd = 0;
+        _killReward = _cashEarned = _moneySaved = 0;
         _markDirty();
     }
 }

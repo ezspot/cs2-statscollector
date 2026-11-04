@@ -84,7 +84,7 @@ See `config.sample.json` for the full set of options (persistence, trade window,
 
 For an existing database, treat `database/init.sql` as a bootstrap script rather than a migration.
 When upgrading, apply each SQL file under `database/migrations/` that has not been applied yet, in numeric
-order. 001 and 002 are not idempotent (MySQL has no `ADD COLUMN IF NOT EXISTS`, so a re-run fails with error 1060);
+order. 001, 002 and 005 are not idempotent (MySQL has no `ADD COLUMN IF NOT EXISTS`, so a re-run fails with error 1060);
 003 and 004 can be run again. A fresh `init.sql` already includes them, and `AutoCreateSchema` applies them itself (it
 adds missing columns and indexes and widens narrower columns before running `init.sql`). The Docker image runs
 `init.sql` only on an empty volume.
@@ -97,6 +97,8 @@ adds missing columns and indexes and widens narrower columns before running `ini
 - `004_index_position_match_ids.sql` adds the `match_id` index that databases created before 2026-07-18 lack on the
   position tables. Without it, removing a restored round's rows scans and locks those whole tables, and on large ones
   times out, leaving the voided rounds' heatmap rows in place.
+- `005_add_engine_counters_and_clutch_split.sql` adds team kills, suicides and 1v1 to 1v5 clutch attempts and wins,
+  and the engine's own kill reward, cash earned, money saved and time alive (`live_time`, the engine's `m_iLiveTime`).
 - If `SHOW COLUMNS FROM player_stats LIKE 'round_swing';` returns nothing (databases created by v3.1.0 or older, which
   every lifetime write fails on), `AutoCreateSchema` adds the column. By hand, run this before migration 001, and run
   `init.sql` once more after the migrations to re-create the views:

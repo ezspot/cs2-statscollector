@@ -221,6 +221,13 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             bool isFirstKillOfRound = !_firstKillHappened &&
                 attackerState.IsValid && !attackerState.IsBot &&
                 attackerState.SteamId != victimState.SteamId && attackerState.Team != victimTeam;
+            // A suicide has no attacker or the victim as attacker; the bomb is neither a suicide nor a team kill (the game
+            // does not penalise it either).
+            bool killedByBomb = weaponName == "planted_c4";
+            bool isSuicide = !killedByBomb && (!attackerState.IsValid || attackerState.SteamId == victimState.SteamId);
+            bool isTeamKill = !killedByBomb && attackerState.IsValid && !attackerState.IsBot && victimState.IsValid &&
+                attackerState.SteamId != victimState.SteamId && attackerState.Team == victimTeam &&
+                victimTeam is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist;
 
             if (victimState.IsValid && !victimState.IsBot)
             {
@@ -251,6 +258,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 {
                     stats.Round.SurvivedThisRound = false;
                     stats.Combat.Deaths++;
+                    if (isSuicide) stats.Combat.Suicides++;
                     stats.CurrentTeam = victimTeam;
 
                     // Entry Death tracking
@@ -268,6 +276,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     CaptureClutchCandidate();
                 }
             }
+
+            if (isTeamKill) _playerSessions.MutatePlayer(attackerState.SteamId, stats => stats.Combat.TeamKills++);
 
             if (attackerState.IsValid && !attackerState.IsBot && attackerState.SteamId != victimState.SteamId &&
                 attackerState.Team != victimTeam && attackerState.Team is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist)
@@ -677,6 +687,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             {
                 _playerSessions.MutatePlayer(candidate.SteamId, stats =>
                 {
+                    stats.Combat.RecordClutch(candidate.Opponents, team == winningTeam);
                     if (team == winningTeam)
                     {
                         var settings = _config.CurrentValue.ClutchSettings;

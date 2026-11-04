@@ -27,10 +27,10 @@ public sealed class MatchFlowHandler : IGameHandler
 
     private PluginConfig _config => _configMonitor.CurrentValue;
     private int _currentRoundNumber = 0;
-    // Per-match engine counters (scoreboard score, cash spent) per player at the last observation: the previous
-    // round_end, or this round_start when there is none. Each round_end adds the change since then to the
-    // lifetime totals, so points scored after a round ended (exit frags) count in the next round.
-    private readonly Dictionary<ulong, (int Score, int CashSpent)> _lastTotals = [];
+    // Engine per-match counters per player at the last observation: the previous round_end, or this round_start when
+    // there is none. Each round_end, and the match end, adds the change since then to the lifetime totals, so points
+    // or money awarded after a round ended (exit frags, round-end payouts) count at the next observation.
+    private readonly Dictionary<ulong, EngineTotals> _lastTotals = [];
     private int _lastTotalsRound;
 
     public MatchFlowHandler(
@@ -101,6 +101,11 @@ public sealed class MatchFlowHandler : IGameHandler
         // round_officially_ended does not follow the final round, so close it here.
         if (_matchTracker.CurrentMatch?.MatchUuid is { } matchUuid)
             _persistenceChannel.TryWrite(new RoundOfficialEndUpdate(matchUuid, _currentRoundNumber));
+        // The final round's round-end awards land after its round_end, and no later round_end picks them up.
+        _playerSessions.ForEachPlayer(stats =>
+        {
+            if (Utilities.GetPlayerFromSteamId64(stats.SteamId) is { IsValid: true } player) AccrueEngineTotals(stats, player);
+        });
         _matchStats.FinalizeMatch();
         _matchTracker.EndMatch();
         _roundBackup.Reset();
@@ -149,7 +154,7 @@ public sealed class MatchFlowHandler : IGameHandler
             var player = Utilities.GetPlayerFromSteamId64(steamId);
             var state = PlayerControllerState.From(player);
             if (player is { IsValid: true })
-                _lastTotals.TryAdd(steamId, (player.Score, player.InGameMoneyServices?.TotalCashSpent ?? 0));
+                _lastTotals.TryAdd(steamId, EngineTotals.Of(player));
             _playerSessions.MutatePlayer(steamId, stats =>
             {
                 stats.ResetRoundStats();
@@ -259,17 +264,7 @@ public sealed class MatchFlowHandler : IGameHandler
             var player = Utilities.GetPlayerFromSteamId64(stats.SteamId);
             if (player is { IsValid: true })
             {
-                // Deltas of the engine's per-match counters: includes buys after freeze end, and is not thrown
-                // off by values seeded from the database (the old freeze-end money diff was both).
-                var cashSpent = player.InGameMoneyServices?.TotalCashSpent ?? 0;
-                var observed = _lastTotals.TryGetValue(stats.SteamId, out var last);
-                _lastTotals[stats.SteamId] = (player.Score, cashSpent);
-                if (observed)
-                {
-                    // Both engine counters restart at zero if a reconnecting player's match data is not restored.
-                    stats.Combat.Score += Math.Max(0, player.Score - last.Score);
-                    stats.Economy.MoneySpent += Math.Max(0, cashSpent - last.CashSpent);
-                }
+                AccrueEngineTotals(stats, player);
 
                 if (player.InGameMoneyServices is not null)
                 {
@@ -311,6 +306,35 @@ public sealed class MatchFlowHandler : IGameHandler
             {
                 _playerSessions.MarkPersisted(snapshot.SteamId, snapshot.Version);
             }
+        }
+    }
+
+    // Adds the change of the engine's per-match counters since the last observation to the lifetime totals. The
+    // counters restart at zero if a reconnecting player's match data is not restored, so a decrease adds nothing.
+    private void AccrueEngineTotals(PlayerStats stats, CCSPlayerController player)
+    {
+        var now = EngineTotals.Of(player);
+        var observed = _lastTotals.TryGetValue(stats.SteamId, out var last);
+        _lastTotals[stats.SteamId] = now;
+        if (!observed) return;
+        stats.Combat.Score += Math.Max(0, now.Score - last.Score);
+        stats.Economy.MoneySpent += Math.Max(0, now.CashSpent - last.CashSpent);
+        stats.Economy.KillReward += Math.Max(0, now.KillReward - last.KillReward);
+        stats.Economy.CashEarned += Math.Max(0, now.CashEarned - last.CashEarned);
+        stats.Economy.MoneySaved += Math.Max(0, now.MoneySaved - last.MoneySaved);
+        stats.Round.LiveTime += Math.Max(0, now.LiveTime - last.LiveTime);
+    }
+
+    // The scoreboard score, the cash spent, and the engine's CSMatchStats_t economy and time-alive counters.
+    private readonly record struct EngineTotals(int Score, int CashSpent, int KillReward, int CashEarned, int MoneySaved, int LiveTime)
+    {
+        public static EngineTotals Of(CCSPlayerController player)
+        {
+            var cashSpent = player.InGameMoneyServices?.TotalCashSpent ?? 0;
+            var match = player.ActionTrackingServices?.MatchStats;
+            return match is null
+                ? new(player.Score, cashSpent, 0, 0, 0, 0)
+                : new(player.Score, cashSpent, match.KillReward, match.CashEarned, match.MoneySaved, match.LiveTime);
         }
     }
 

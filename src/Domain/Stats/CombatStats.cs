@@ -52,6 +52,12 @@ public sealed class CombatStats
     private int _multiKillNades;
     private int _nadeKills;
     private int _highImpactKills;
+    private int _teamKills;
+    private int _suicides;
+    // 1vX clutch attempts and wins by opponents alive when the player became the last of their team, index 1..5
+    // (six or more opponents count as 1v5).
+    private readonly int[] _clutchAttempts = new int[6];
+    private readonly int[] _clutchWins = new int[6];
 
     // Round Swing: sum of win-probability deltas from this player's enemy kills, credited only on
     // rounds their team won. _currentRoundSwing accumulates within a round; CommitRoundSwing folds it
@@ -115,6 +121,25 @@ public sealed class CombatStats
     public int MultiKillNades { get => _multiKillNades; set { _multiKillNades = value; _markDirty(); } }
     public int NadeKills { get => _nadeKills; set { _nadeKills = value; _markDirty(); } }
     public int HighImpactKills { get => _highImpactKills; set { _highImpactKills = value; _markDirty(); } }
+    public int TeamKills { get => _teamKills; set { _teamKills = value; _markDirty(); } }
+    public int Suicides { get => _suicides; set { _suicides = value; _markDirty(); } }
+    public int Clutch1v1Attempts { get => _clutchAttempts[1]; set { _clutchAttempts[1] = value; _markDirty(); } }
+    public int Clutch1v1Wins { get => _clutchWins[1]; set { _clutchWins[1] = value; _markDirty(); } }
+    public int Clutch1v2Attempts { get => _clutchAttempts[2]; set { _clutchAttempts[2] = value; _markDirty(); } }
+    public int Clutch1v2Wins { get => _clutchWins[2]; set { _clutchWins[2] = value; _markDirty(); } }
+    public int Clutch1v3Attempts { get => _clutchAttempts[3]; set { _clutchAttempts[3] = value; _markDirty(); } }
+    public int Clutch1v3Wins { get => _clutchWins[3]; set { _clutchWins[3] = value; _markDirty(); } }
+    public int Clutch1v4Attempts { get => _clutchAttempts[4]; set { _clutchAttempts[4] = value; _markDirty(); } }
+    public int Clutch1v4Wins { get => _clutchWins[4]; set { _clutchWins[4] = value; _markDirty(); } }
+    public int Clutch1v5Attempts { get => _clutchAttempts[5]; set { _clutchAttempts[5] = value; _markDirty(); } }
+    public int Clutch1v5Wins { get => _clutchWins[5]; set { _clutchWins[5] = value; _markDirty(); } }
+    public void RecordClutch(int opponents, bool won)
+    {
+        var bucket = Math.Clamp(opponents, 1, 5);
+        _clutchAttempts[bucket]++;
+        if (won) _clutchWins[bucket]++;
+        _markDirty();
+    }
 
     public void Reset()
     {
@@ -135,6 +160,9 @@ public sealed class CombatStats
         _lowImpactKills = 0;
         _multiKillNades = _nadeKills = _highImpactKills = 0;
         _roundSwing = _currentRoundSwing = 0;
+        _teamKills = _suicides = 0;
+        Array.Clear(_clutchAttempts);
+        Array.Clear(_clutchWins);
         _markDirty();
     }
 }

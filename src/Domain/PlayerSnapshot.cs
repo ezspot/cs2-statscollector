@@ -161,5 +161,23 @@ public sealed record PlayerSnapshot
     decimal AverageMoneySpentPerRound,
     decimal SurvivalRating,
     decimal UtilityImpactScore,
-    string TopWeaponByKills
+    string TopWeaponByKills,
+    // Team kills, suicides, the 1vX clutch split and the engine's CSMatchStats_t economy/time-alive counters (2026-11).
+    // Appended so the positional constructor call in AnalyticsService.CreateSnapshot stays aligned.
+    int TeamKills,
+    int Suicides,
+    int Clutch1v1Attempts,
+    int Clutch1v1Wins,
+    int Clutch1v2Attempts,
+    int Clutch1v2Wins,
+    int Clutch1v3Attempts,
+    int Clutch1v3Wins,
+    int Clutch1v4Attempts,
+    int Clutch1v4Wins,
+    int Clutch1v5Attempts,
+    int Clutch1v5Wins,
+    int KillReward,
+    int CashEarned,
+    int MoneySaved,
+    int LiveTime
 );
