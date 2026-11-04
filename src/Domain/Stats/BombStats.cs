@@ -5,9 +5,10 @@ namespace statsCollector.Domain.Stats;
 public sealed class BombStats
 {
     private readonly Action _markDirty;
-    
+
     private int _bombPlants;
     private int _bombDefuses;
+    private int _bombExplosions;
     private int _bombPlantAttempts;
     private int _bombDefuseAttempts;
     private int _bombPlantAborts;
@@ -31,6 +32,7 @@ public sealed class BombStats
 
     public int BombPlants { get => _bombPlants; set { _bombPlants = value; _markDirty(); } }
     public int BombDefuses { get => _bombDefuses; set { _bombDefuses = value; _markDirty(); } }
+    public int BombExplosions { get => _bombExplosions; set { _bombExplosions = value; _markDirty(); } }
     public int BombPlantAttempts { get => _bombPlantAttempts; set { _bombPlantAttempts = value; _markDirty(); } }
     public int BombDefuseAttempts { get => _bombDefuseAttempts; set { _bombDefuseAttempts = value; _markDirty(); } }
     public int BombPlantAborts { get => _bombPlantAborts; set { _bombPlantAborts = value; _markDirty(); } }
@@ -49,7 +51,7 @@ public sealed class BombStats
 
     public void Reset()
     {
-        _bombPlants = _bombDefuses = _bombPlantAttempts = _bombDefuseAttempts = 0;
+        _bombPlants = _bombDefuses = _bombExplosions = _bombPlantAttempts = _bombDefuseAttempts = 0;
         _bombPlantAborts = _bombDefuseAborts = _bombDefuseWithKit = _bombDefuseWithoutKit = 0;
         _bombDrops = _bombPickups = _defuserDrops = _defuserPickups = 0;
         _bombKills = _bombDeaths = _clutchDefuses = 0;

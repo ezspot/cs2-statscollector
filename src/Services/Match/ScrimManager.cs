@@ -96,6 +96,10 @@ public sealed class ScrimManager : IScrimManager, IDisposable
                 break;
             case ScrimState.Live:
                 await OnLiveEntry();
+                // knife.cfg plays the knife round as live round 1; restart so the match starts at 0:0 with
+                // live economy (queued after live.cfg's commands, and after the side swap moves players).
+                if (from == ScrimState.KnifeRound)
+                    _scheduler.Schedule(() => Server.ExecuteCommand("mp_restartgame 1"));
                 break;
         }
 
@@ -276,7 +280,8 @@ public sealed class ScrimManager : IScrimManager, IDisposable
         _sideSelectionTimer = null;
         await TransitionToAsync(ScrimState.Idle);
         await _recovery.ClearScrimStateAsync();
-        Server.PrintToChatAll(" [Scrim] Scrim stopped by admin.");
+        // After the awaits this runs on a thread-pool thread; chat must be sent from the game thread.
+        _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Scrim stopped by admin."));
     }
 
     public async Task SetReadyAsync(ulong steamId, bool ready)
@@ -439,6 +444,8 @@ public sealed class ScrimManager : IScrimManager, IDisposable
                 _logger.LogInformation("Side selection timed out. Auto-assigning sides.");
                 _scheduler.Schedule(() =>
                 {
+                    // The scrim may have been aborted or a side chosen since the timer started.
+                    if (_state != ScrimState.KnifeRound) return;
                     Server.PrintToChatAll(" [Scrim] Side selection timed out. Proceeding with current sides.");
                     RunTransition(TransitionToAsync(ScrimState.Live), "start live match after side-selection timeout");
                 });
@@ -451,12 +458,16 @@ public sealed class ScrimManager : IScrimManager, IDisposable
     public Task SelectSideAsync(ulong steamId, string side)
     {
         if (_state != ScrimState.KnifeRound) return Task.CompletedTask;
+        // Until the knife round has a winner there is no side choice (otherwise captain 2 could skip it).
+        if (_knifeWinnerTeam is not (2 or 3)) return Task.CompletedTask;
 
         var winningCaptainId = _knifeWinnerTeam == 2 ? _team1.FirstOrDefault() : _team2.FirstOrDefault();
         if (steamId != winningCaptainId) return Task.CompletedTask;
 
         _scheduler.Schedule(() =>
         {
+            // A second queued choice (or the timeout) must not swap again.
+            if (_state != ScrimState.KnifeRound) return;
             _sideSelectionTimer?.Kill();
 
             bool stay = (string.Equals(side, "t", StringComparison.OrdinalIgnoreCase) && _knifeWinnerTeam == 2) ||
@@ -475,8 +486,8 @@ public sealed class ScrimManager : IScrimManager, IDisposable
                     _captains[1] = c2;
                     _captains[2] = c1;
                 }
-
-                Server.ExecuteCommand("mp_swapteams");
+                // No mp_swapteams: entering Live moves players to the swapped lists and restarts the match
+                // itself, and a second swap from mp_swapteams (applied at its own restart) could undo that.
             }
 
             Server.PrintToChatAll($" [Scrim] Side selected: {side.ToUpperInvariant()}. Match starting...");

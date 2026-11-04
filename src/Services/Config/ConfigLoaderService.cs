@@ -28,7 +28,9 @@ public class ConfigLoaderService : IConfigLoaderService
         _config = config.Value;
         _scheduler = scheduler;
         _whitelistedSteamIds.UnionWith(_config.Scrim.WhitelistedSteamIds);
-        _configDirectory = Path.GetFullPath(Path.Combine(Server.GameDirectory, "csgo", _config.Scrim.ScrimConfigPath));
+        // Trim so "cfg/" behaves like "cfg" in the containment check below.
+        _configDirectory = Path.TrimEndingDirectorySeparator(
+            Path.GetFullPath(Path.Combine(Server.GameDirectory, "csgo", _config.Scrim.ScrimConfigPath)));
     }
 
     public async Task LoadAndExecuteConfigAsync(string fileName)

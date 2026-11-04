@@ -265,7 +265,8 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
 
                 var batch = new List<PositionEvent>();
 
-                while (_retryQueue.TryDequeue(out var retryEvent) && batch.Count < 100)
+                // Count first: dequeuing when the batch is already full would drop that event.
+                while (batch.Count < 100 && _retryQueue.TryDequeue(out var retryEvent))
                 {
                     batch.Add(retryEvent);
                 }
@@ -348,14 +349,17 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
 
     private async Task<List<PositionEvent>> ProcessBatchInternalAsync(List<PositionEvent> batch, CancellationToken ct)
     {
-        var killBatch = batch.OfType<KillPositionEvent>().ToList();
-        var deathBatch = batch.OfType<DeathPositionEvent>().ToList();
-        var utilityBatch = batch.OfType<UtilityPositionEvent>().ToList();
         var failed = new List<PositionEvent>();
 
-        await PersistGroupAsync(killBatch, _repository.BulkTrackKillPositionsAsync, failed, ct).ConfigureAwait(false);
-        await PersistGroupAsync(deathBatch, _repository.BulkTrackDeathPositionsAsync, failed, ct).ConfigureAwait(false);
-        await PersistGroupAsync(utilityBatch, _repository.BulkTrackUtilityPositionsAsync, failed, ct).ConfigureAwait(false);
+        // One write per match: its rows either all resolve the match row or none do, so a group that failed
+        // because another match wasn't written yet can't leave committed rows behind to duplicate on retry.
+        foreach (var match in batch.GroupBy(@event => @event.MatchUuid))
+        {
+            await PersistGroupAsync(match.OfType<KillPositionEvent>().ToList(), _repository.BulkTrackKillPositionsAsync, failed, ct).ConfigureAwait(false);
+            await PersistGroupAsync(match.OfType<DeathPositionEvent>().ToList(), _repository.BulkTrackDeathPositionsAsync, failed, ct).ConfigureAwait(false);
+            await PersistGroupAsync(match.OfType<UtilityPositionEvent>().ToList(), _repository.BulkTrackUtilityPositionsAsync, failed, ct).ConfigureAwait(false);
+        }
+
         return failed;
     }
 

@@ -196,6 +196,7 @@ public sealed class AnalyticsService : IAnalyticsService
             stats.Round.TRounds,
             stats.Bomb.BombPlants,
             stats.Bomb.BombDefuses,
+            stats.Bomb.BombExplosions,
             stats.Bomb.BombPlantAttempts,
             stats.Bomb.BombPlantAborts,
             stats.Bomb.BombDefuseAttempts,
@@ -253,6 +254,10 @@ public sealed class AnalyticsService : IAnalyticsService
             stats.Combat.HighImpactKills,
             stats.Combat.LowImpactKills,
             stats.Combat.MultiKills,
+            stats.Combat.MultiKill2,
+            stats.Combat.MultiKill3,
+            stats.Combat.MultiKill4,
+            stats.Combat.MultiKill5,
             stats.Combat.FirstKills, // OpeningDuelsWon
             stats.Combat.FirstDeaths, // OpeningDuelsLost
             stats.Combat.Noscopes,
@@ -263,6 +268,7 @@ public sealed class AnalyticsService : IAnalyticsService
             stats.Combat.Revenges,
             stats.Combat.ClutchesWon,
             stats.Combat.ClutchesLost,
+            stats.Combat.ClutchKills,
             stats.Combat.ClutchPoints,
             stats.Combat.MvpsEliminations,
             stats.Combat.MvpsBomb,

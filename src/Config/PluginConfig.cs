@@ -77,7 +77,10 @@ public sealed class PluginConfig : BasePluginConfig
     [JsonPropertyName("EnableScrim")]
     public bool EnableScrim { get; set; } = true;
 
+    // CounterStrikeSharp deserializes plugin configs without a string-enum converter, so without this the
+    // documented "LogLevel": "Information" fails to load the plugin. Numeric values still work.
     [JsonPropertyName("LogLevel")]
+    [JsonConverter(typeof(JsonStringEnumConverter))]
     public LogLevel LogLevel { get; set; } = LogLevel.Information;
 
     [JsonPropertyName("Scrim")]

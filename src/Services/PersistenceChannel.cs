@@ -34,14 +34,17 @@ public sealed record MatchEndUpdate(string MatchId)
 public interface IPersistenceChannel
 {
     bool TryWrite(StatsUpdate update);
-    Task FlushAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>Writes everything queued so far. With a SteamID, only fails while that player's own writes are
+    /// still buffered, so failures for other players don't hold it up.</summary>
+    Task FlushAsync(ulong? steamId = null, CancellationToken cancellationToken = default);
 }
 
 public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
 {
     private abstract record PersistenceMessage;
     private sealed record UpdateMessage(StatsUpdate Update) : PersistenceMessage;
-    private sealed record FlushMessage(TaskCompletionSource Completion) : PersistenceMessage;
+    private sealed record FlushMessage(TaskCompletionSource Completion, ulong? SteamId) : PersistenceMessage;
 
     private readonly Channel<PersistenceMessage> _channel;
     private readonly ILogger<PersistenceChannel> _logger;
@@ -49,7 +52,8 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
     private readonly Queue<List<StatsUpdate>> _failedBatches = new();
     private const long MaxBufferSize = 50 * 1024 * 1024;
     private long _currentBufferSize;
-    private volatile bool _acceptingWrites;
+    // Open from construction: the channel buffers writes made before the worker's first read.
+    private volatile bool _acceptingWrites = true;
 
     public PersistenceChannel(
         ILogger<PersistenceChannel> logger,
@@ -83,7 +87,6 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _acceptingWrites = true;
         _logger.LogInformation("Persistence background worker started.");
 
         var batch = new List<StatsUpdate>(100);
@@ -111,14 +114,17 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                                 batch.Clear();
                             }
                             await ProcessRetryQueueAsync(stoppingToken).ConfigureAwait(false);
-                            if (_failedBatches.Count == 0)
+                            var unflushed = flush.SteamId is { } steamId
+                                ? _failedBatches.Count(failed => failed.Any(pending => pending.SteamId == steamId))
+                                : _failedBatches.Count;
+                            if (unflushed == 0)
                             {
                                 flush.Completion.TrySetResult();
                             }
                             else
                             {
                                 flush.Completion.TrySetException(new InvalidOperationException(
-                                    $"Unable to flush {_failedBatches.Count} persistence batches."));
+                                    $"Unable to flush {unflushed} persistence batches."));
                             }
                             break;
                     }
@@ -158,12 +164,12 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
         }
     }
 
-    public async Task FlushAsync(CancellationToken cancellationToken = default)
+    public async Task FlushAsync(ulong? steamId = null, CancellationToken cancellationToken = default)
     {
         if (!_acceptingWrites) return;
 
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        await _channel.Writer.WriteAsync(new FlushMessage(completion), cancellationToken).ConfigureAwait(false);
+        await _channel.Writer.WriteAsync(new FlushMessage(completion, steamId), cancellationToken).ConfigureAwait(false);
         await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -172,9 +178,13 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
         _acceptingWrites = false;
         try
         {
-            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            await _channel.Writer.WriteAsync(new FlushMessage(completion), cancellationToken).ConfigureAwait(false);
-            await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            // Without a running worker nothing would ever complete the flush (e.g. startup failed before it started).
+            if (ExecuteTask is { IsCompleted: false })
+            {
+                var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                await _channel.Writer.WriteAsync(new FlushMessage(completion, null), cancellationToken).ConfigureAwait(false);
+                await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
         }
         finally
         {

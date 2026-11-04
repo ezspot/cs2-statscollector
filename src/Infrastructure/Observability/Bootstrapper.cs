@@ -1,5 +1,7 @@
+using System.IO;
 using Microsoft.Extensions.Logging;
 using Serilog;
+using Serilog.Core;
 using Serilog.Events;
 using statsCollector.Config;
 using statsCollector.Infrastructure;
@@ -8,18 +10,19 @@ namespace statsCollector.Infrastructure.Observability;
 
 public static class Bootstrapper
 {
-    public static void InitializeSerilog(PluginConfig config)
-    {
-        Log.Logger = new LoggerConfiguration()
+    // Returns a private logger rather than assigning Serilog's static Log.Logger: CounterStrikeSharp shares its
+    // Serilog assembly with every plugin, so that static (and closing it on unload) is process-wide. The path is
+    // absolute because the file sink resolves relative paths against the CS2 process's working directory.
+    public static Logger CreateLogger(PluginConfig config, string logDirectory) =>
+        new LoggerConfiguration()
             .MinimumLevel.Is(GetSerilogLevel(config.LogLevel))
             .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
             .MinimumLevel.Override("System.Net.Http", LogEventLevel.Warning)
             .Enrich.FromLogContext()
             .Enrich.WithProperty("Version", Instrumentation.ServiceVersion)
             .WriteTo.Console()
-            .WriteTo.File("logs/statscollector-.log", rollingInterval: RollingInterval.Day)
+            .WriteTo.File(Path.Join(logDirectory, "statscollector-.log"), rollingInterval: RollingInterval.Day)
             .CreateLogger();
-    }
 
     private static LogEventLevel GetSerilogLevel(LogLevel level) => level switch
     {

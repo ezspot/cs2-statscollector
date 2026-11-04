@@ -83,7 +83,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 ct).ConfigureAwait(false);
 
             var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_kill_positions_uuid" };
-            EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
+            StatsRepository.EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
 
             const string mergeSql = """
                 INSERT INTO kill_positions
@@ -97,8 +97,12 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 JOIN matches m ON t.match_uuid = m.match_uuid;
                 """;
 
+            // MySQL can't reference a TEMPORARY table twice in one statement (ERROR 1137), so one insert per side.
             await ExecuteAsync(connection,
-                "INSERT IGNORE INTO players (steam_id) SELECT killer_steam_id FROM temp_kill_positions_uuid UNION SELECT victim_steam_id FROM temp_kill_positions_uuid;",
+                "INSERT IGNORE INTO players (steam_id) SELECT DISTINCT killer_steam_id FROM temp_kill_positions_uuid;",
+                ct).ConfigureAwait(false);
+            await ExecuteAsync(connection,
+                "INSERT IGNORE INTO players (steam_id) SELECT DISTINCT victim_steam_id FROM temp_kill_positions_uuid;",
                 ct).ConfigureAwait(false);
             var inserted = await ExecuteAsync(connection, mergeSql, ct).ConfigureAwait(false);
             if (inserted != eventList.Count) throw new InvalidOperationException("Kill positions could not resolve their match UUID.");
@@ -141,7 +145,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
             await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_death_positions_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, x FLOAT, y FLOAT, z FLOAT, cause_of_death VARCHAR(100), is_headshot TINYINT(1), team INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);", ct).ConfigureAwait(false);
 
             var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_death_positions_uuid" };
-            EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
+            StatsRepository.EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
 
             const string mergeSql = """
                 INSERT INTO death_positions
@@ -205,7 +209,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
             await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_utility_positions_uuid (match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, throw_x FLOAT, throw_y FLOAT, throw_z FLOAT, land_x FLOAT, land_y FLOAT, land_z FLOAT, utility_type INT, entity_id INT, lifecycle_start_event VARCHAR(32), lifecycle_end_event VARCHAR(32), lifecycle_duration_ms INT UNSIGNED, opponents_affected INT, teammates_affected INT, damage INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);", ct).ConfigureAwait(false);
 
             var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_utility_positions_uuid" };
-            EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
+            StatsRepository.EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
 
             const string mergeSql = """
                 INSERT INTO utility_positions
@@ -230,12 +234,4 @@ public sealed class PositionTrackingService : IPositionTrackingService
 
     private static Task<int> ExecuteAsync(MySqlConnection connection, string sql, CancellationToken cancellationToken) =>
         connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: cancellationToken));
-
-    private static void EnsureBulkCopySucceeded(MySqlBulkCopyResult result)
-    {
-        if (result.Warnings.Count > 0)
-        {
-            throw new InvalidOperationException(string.Join("; ", result.Warnings.Select(warning => warning.Message)));
-        }
-    }
 }

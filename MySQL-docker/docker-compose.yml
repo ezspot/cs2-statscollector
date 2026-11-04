@@ -1,6 +1,8 @@
 services:
   mysql:
-    image: mysql:9.6
+    # 9.7 LTS. 9.6 (Innovation) lost support in April 2026; an existing 9.6 volume upgrades in place on first
+    # start, with no way back, so back up mysql_data first.
+    image: mysql:9.7
     container_name: statscollector-mysql
     restart: unless-stopped
     command:

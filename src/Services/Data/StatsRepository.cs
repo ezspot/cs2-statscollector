@@ -57,7 +57,9 @@ public sealed class StatsRepository : IStatsRepository
 
     public async Task UpsertPlayersAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
     {
-        var snapshotList = snapshots.ToList();
+        // One row per player: temp_player_stats inherits the primary key, and LOAD DATA would keep the first
+        // (oldest) duplicate and fail the copy on every retry. Snapshots are cumulative, so the last one wins.
+        var snapshotList = snapshots.GroupBy(s => s.SteamId).Select(g => g.Last()).ToList();
         if (snapshotList.Count == 0) return;
 
         await _resiliencePipeline.ExecuteAsync(async ct =>
@@ -294,7 +296,8 @@ public sealed class StatsRepository : IStatsRepository
     public async Task EndMatchAsync(string matchUuid, CancellationToken ct)
     {
         await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-        const string sql = "UPDATE matches SET end_time = CURRENT_TIMESTAMP, status = 'COMPLETED' WHERE match_uuid = @MatchUuid";
+        // COALESCE: a retried batch must not move end_time to the retry time.
+        const string sql = "UPDATE matches SET end_time = COALESCE(end_time, CURRENT_TIMESTAMP), status = 'COMPLETED' WHERE match_uuid = @MatchUuid";
         await connection.ExecuteAsync(new CommandDefinition(sql, new { MatchUuid = matchUuid }, cancellationToken: ct)).ConfigureAwait(false);
     }
 
@@ -379,6 +382,7 @@ public sealed class StatsRepository : IStatsRepository
         dataTable.Columns.Add("score", typeof(int));
         dataTable.Columns.Add("rounds_played", typeof(int));
         dataTable.Columns.Add("rounds_won", typeof(int));
+        dataTable.Columns.Add("kast_rounds", typeof(int));
         dataTable.Columns.Add("total_spawns", typeof(int));
         dataTable.Columns.Add("playtime_seconds", typeof(int));
         dataTable.Columns.Add("ct_rounds", typeof(int));
@@ -398,6 +402,7 @@ public sealed class StatsRepository : IStatsRepository
         dataTable.Columns.Add("utility_damage_taken", typeof(int));
         dataTable.Columns.Add("bomb_plants", typeof(int));
         dataTable.Columns.Add("bomb_defuses", typeof(int));
+        dataTable.Columns.Add("bomb_explosions", typeof(int));
         dataTable.Columns.Add("bomb_plant_attempts", typeof(int));
         dataTable.Columns.Add("bomb_plant_aborts", typeof(int));
         dataTable.Columns.Add("bomb_defuse_attempts", typeof(int));
@@ -440,11 +445,16 @@ public sealed class StatsRepository : IStatsRepository
         dataTable.Columns.Add("high_impact_kills", typeof(int));
         dataTable.Columns.Add("low_impact_kills", typeof(int));
         dataTable.Columns.Add("multi_kills", typeof(int));
+        dataTable.Columns.Add("multi_kill_2", typeof(int));
+        dataTable.Columns.Add("multi_kill_3", typeof(int));
+        dataTable.Columns.Add("multi_kill_4", typeof(int));
+        dataTable.Columns.Add("multi_kill_5", typeof(int));
         dataTable.Columns.Add("opening_duels_won", typeof(int));
         dataTable.Columns.Add("opening_duels_lost", typeof(int));
         dataTable.Columns.Add("revenges", typeof(int));
         dataTable.Columns.Add("clutches_won", typeof(int));
         dataTable.Columns.Add("clutches_lost", typeof(int));
+        dataTable.Columns.Add("clutch_kills", typeof(int));
         dataTable.Columns.Add("clutch_points", typeof(decimal));
         dataTable.Columns.Add("mvps_eliminations", typeof(int));
         dataTable.Columns.Add("mvps_bomb", typeof(int));
@@ -476,11 +486,11 @@ public sealed class StatsRepository : IStatsRepository
         {
             dataTable.Rows.Add(
                 s.SteamId, s.Name, s.Kills, s.Deaths, s.Assists, s.Headshots, s.DamageDealt, s.DamageTaken, s.DamageArmor,
-                s.ShotsFired, s.ShotsHit, s.Mvps, s.Score, s.RoundsPlayed, s.RoundsWon, s.TotalSpawns, s.PlaytimeSeconds,
+                s.ShotsFired, s.ShotsHit, s.Mvps, s.Score, s.RoundsPlayed, s.RoundsWon, s.KASTRounds, s.TotalSpawns, s.PlaytimeSeconds,
                 s.CtRounds, s.TRounds, s.GrenadesThrown, s.FlashesThrown, s.SmokesThrown, s.MolotovsThrown,
                 s.HeGrenadesThrown, s.DecoysThrown, s.PlayersBlinded, s.TimesBlinded,
                 s.FlashAssists, s.TotalBlindTime, s.TotalBlindTimeInflicted, s.UtilityDamageDealt, s.UtilityDamageTaken,
-                s.BombPlants, s.BombDefuses, s.BombPlantAttempts, s.BombPlantAborts, s.BombDefuseAttempts,
+                s.BombPlants, s.BombDefuses, s.BombExplosions, s.BombPlantAttempts, s.BombPlantAborts, s.BombDefuseAttempts,
                 s.BombDefuseAborts, s.BombDefuseWithKit, s.BombDefuseWithoutKit, s.BombDrops, s.BombPickups,
                 s.DefuserDrops, s.DefuserPickups, s.ClutchDefuses, s.TotalPlantTime, s.TotalDefuseTime,
                 s.BombKills, s.BombDeaths, s.Jumps,
@@ -489,8 +499,9 @@ public sealed class StatsRepository : IStatsRepository
                 s.EnemiesFlashed, s.TeammatesFlashed, s.EffectiveFlashes, s.EffectiveSmokes, s.EffectiveHEGrenades,
                 s.EffectiveMolotovs, s.FlashWaste, s.MultiKillNades, s.NadeKills,
                 s.EntryKills, s.EntryDeaths, s.EntryKillAttempts, s.EntryKillAttemptWins,
-                s.TradeKills, s.TradedDeaths, s.HighImpactKills, s.LowImpactKills, s.MultiKills, s.OpeningDuelsWon, s.OpeningDuelsLost,
-                s.Revenges, s.ClutchesWon, s.ClutchesLost, s.ClutchPoints, s.MvpsEliminations, s.MvpsBomb, s.MvpsHostage,
+                s.TradeKills, s.TradedDeaths, s.HighImpactKills, s.LowImpactKills, s.MultiKills,
+                s.MultiKill2, s.MultiKill3, s.MultiKill4, s.MultiKill5, s.OpeningDuelsWon, s.OpeningDuelsLost,
+                s.Revenges, s.ClutchesWon, s.ClutchesLost, s.ClutchKills, s.ClutchPoints, s.MvpsEliminations, s.MvpsBomb, s.MvpsHostage,
                 s.HeadshotsHit, s.ChestHits, s.StomachHits, s.ArmHits, s.LegHits,
                 s.KDRatio, s.HeadshotPercentage, s.AccuracyPercentage, s.KASTPercentage,
                 s.AverageDamagePerRound, s.HLTVRating, s.ImpactRating, s.SurvivalRating, s.UtilityScore,
@@ -523,7 +534,8 @@ public sealed class StatsRepository : IStatsRepository
                 headshots = src.headshots, damage_dealt = src.damage_dealt, damage_taken = src.damage_taken,
                 damage_armor = src.damage_armor, shots_fired = src.shots_fired, shots_hit = src.shots_hit,
                 mvps = src.mvps, score = src.score, rounds_played = src.rounds_played,
-                rounds_won = src.rounds_won, total_spawns = src.total_spawns, playtime_seconds = src.playtime_seconds,
+                rounds_won = src.rounds_won, kast_rounds = src.kast_rounds,
+                total_spawns = src.total_spawns, playtime_seconds = src.playtime_seconds,
                 ct_rounds = src.ct_rounds, t_rounds = src.t_rounds, 
                 grenades_thrown = src.grenades_thrown,
                 flashes_thrown = src.flashes_thrown, smokes_thrown = src.smokes_thrown, molotovs_thrown = src.molotovs_thrown,
@@ -532,7 +544,7 @@ public sealed class StatsRepository : IStatsRepository
                 times_blinded = src.times_blinded, flash_assists = src.flash_assists,
                 total_blind_time = src.total_blind_time, total_blind_time_inflicted = src.total_blind_time_inflicted,
                 utility_damage_dealt = src.utility_damage_dealt, utility_damage_taken = src.utility_damage_taken,
-                bomb_plants = src.bomb_plants, bomb_defuses = src.bomb_defuses,
+                bomb_plants = src.bomb_plants, bomb_defuses = src.bomb_defuses, bomb_explosions = src.bomb_explosions,
                 bomb_plant_attempts = src.bomb_plant_attempts, bomb_plant_aborts = src.bomb_plant_aborts,
                 bomb_defuse_attempts = src.bomb_defuse_attempts, bomb_defuse_aborts = src.bomb_defuse_aborts,
                 bomb_defuse_with_kit = src.bomb_defuse_with_kit, bomb_defuse_without_kit = src.bomb_defuse_without_kit,
@@ -553,9 +565,12 @@ public sealed class StatsRepository : IStatsRepository
                 entry_kill_attempts = src.entry_kill_attempts, entry_kill_attempt_wins = src.entry_kill_attempt_wins,
                 trade_kills = src.trade_kills, traded_deaths = src.traded_deaths,
                 high_impact_kills = src.high_impact_kills, low_impact_kills = src.low_impact_kills,
-                multi_kills = src.multi_kills, opening_duels_won = src.opening_duels_won,
+                multi_kills = src.multi_kills, multi_kill_2 = src.multi_kill_2, multi_kill_3 = src.multi_kill_3,
+                multi_kill_4 = src.multi_kill_4, multi_kill_5 = src.multi_kill_5,
+                opening_duels_won = src.opening_duels_won,
                 opening_duels_lost = src.opening_duels_lost, revenges = src.revenges,
-                clutches_won = src.clutches_won, clutches_lost = src.clutches_lost, clutch_points = src.clutch_points,
+                clutches_won = src.clutches_won, clutches_lost = src.clutches_lost,
+                clutch_kills = src.clutch_kills, clutch_points = src.clutch_points,
                 mvps_eliminations = src.mvps_eliminations, mvps_bomb = src.mvps_bomb, mvps_hostage = src.mvps_hostage,
                 headshots_hit = src.headshots_hit, chest_hits = src.chest_hits, stomach_hits = src.stomach_hits,
                 arm_hits = src.arm_hits, leg_hits = src.leg_hits,
@@ -578,11 +593,19 @@ public sealed class StatsRepository : IStatsRepository
     private static Task<int> ExecuteAsync(MySqlConnection connection, string sql, CancellationToken cancellationToken) =>
         connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: cancellationToken));
 
-    private static void EnsureBulkCopySucceeded(MySqlBulkCopyResult result)
+    // Notes are DECIMAL rounding to the column scale (kd_ratio 2.41176 -> 2.412) and out-of-range values are
+    // derived ratios saturating at the column limit (utility_score after a new player's first round); MySQL
+    // stores both and the next save rewrites them. Any other warning means the copy lost or mangled data.
+    internal static void EnsureBulkCopySucceeded(MySqlBulkCopyResult result)
     {
-        if (result.Warnings.Count > 0)
+        var problems = result.Warnings
+            .Where(warning => !string.Equals(warning.Level, "Note", StringComparison.OrdinalIgnoreCase) &&
+                              warning.ErrorCode != MySqlErrorCode.WarningDataOutOfRange)
+            .Select(warning => warning.Message)
+            .ToList();
+        if (problems.Count > 0)
         {
-            throw new InvalidOperationException(string.Join("; ", result.Warnings.Select(warning => warning.Message)));
+            throw new InvalidOperationException(string.Join("; ", problems));
         }
     }
 }

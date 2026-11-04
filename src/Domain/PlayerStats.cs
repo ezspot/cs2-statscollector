@@ -122,6 +122,17 @@ public sealed class PlayerStats
         Combat.TradedDeaths += r.TradedDeaths;
         Combat.HighImpactKills += r.HighImpactKills;
         Combat.LowImpactKills += r.LowImpactKills;
+        if (r.MultiKill2 + r.MultiKill3 + r.MultiKill4 + r.MultiKill5 > 0)
+        {
+            Combat.MultiKill2 += r.MultiKill2;
+            Combat.MultiKill3 += r.MultiKill3;
+            Combat.MultiKill4 += r.MultiKill4;
+            Combat.MultiKill5 += r.MultiKill5;
+        }
+        else
+        {
+            Combat.MultiKill2 += r.MultiKills;
+        }
         Combat.FirstKills += r.OpeningDuelsWon;
         Combat.FirstDeaths += r.OpeningDuelsLost;
         Combat.Noscopes += r.NoscopeKills;
@@ -131,6 +142,7 @@ public sealed class PlayerStats
         Combat.Revenges += r.Revenges;
         Combat.ClutchesWon += r.ClutchesWon;
         Combat.ClutchesLost += r.ClutchesLost;
+        Combat.ClutchKills += r.ClutchKills;
         Combat.ClutchPoints += r.ClutchPoints;
         Combat.MvpsEliminations += r.MvpsEliminations;
         Combat.MvpsBomb += r.MvpsBomb;
@@ -149,9 +161,15 @@ public sealed class PlayerStats
         Round.Jumps += r.Jumps;
         Round.Pings += r.Pings;
         Round.Footsteps += r.Footsteps;
-        // KASTRounds isn't a stored column; reconstruct it from the persisted KAST% so KAST and the
-        // KAST-dependent HLTV rating stay correct after a reseed.
-        Round.KASTRounds += (int)Math.Round(r.KastPercentage / 100m * r.RoundsPlayed);
+        // kast_rounds is exact, but rows written before it existed (0) or by an older build sharing the
+        // database (stale, while kast_percentage kept updating) must fall back to the stored percentage.
+        // The DECIMAL(5,2) percentage reproduces the exact count below 5,000 rounds, so any difference there
+        // means the column is stale; above that, rounding can account for about one round per 5,000.
+        var kastFromPercentage = (int)Math.Round(r.KastPercentage / 100m * r.RoundsPlayed);
+        var kastTolerance = r.RoundsPlayed / 5_000;
+        Round.KASTRounds += r.KastRounds > 0 && Math.Abs(r.KastRounds - kastFromPercentage) <= kastTolerance
+            ? r.KastRounds
+            : kastFromPercentage;
 
         Utility.FlashbangsThrown += r.FlashesThrown;
         Utility.SmokesThrown += r.SmokesThrown;
@@ -174,6 +192,7 @@ public sealed class PlayerStats
 
         Bomb.BombPlants += r.BombPlants;
         Bomb.BombDefuses += r.BombDefuses;
+        Bomb.BombExplosions += r.BombExplosions;
         Bomb.BombPlantAttempts += r.BombPlantAttempts;
         Bomb.BombPlantAborts += r.BombPlantAborts;
         Bomb.BombDefuseAttempts += r.BombDefuseAttempts;

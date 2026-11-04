@@ -1,7 +1,7 @@
+using System.Numerics;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
-using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using statsCollector.Config;
@@ -52,6 +52,7 @@ public sealed class UtilityEventProcessor : IEventProcessor
         dispatcher.Subscribe<EventFlashbangDetonate>((e, i) => { TrackDetonation(e, UtilityType.Flash); return HookResult.Continue; });
         dispatcher.Subscribe<EventSmokegrenadeDetonate>((e, i) => { TrackDetonation(e, UtilityType.Smoke); return HookResult.Continue; });
         dispatcher.Subscribe<EventMolotovDetonate>((e, i) => { TrackDetonation(e, UtilityType.Molotov); return HookResult.Continue; });
+        dispatcher.Subscribe<EventDecoyDetonate>((e, i) => { TrackDetonation(e, UtilityType.Decoy); return HookResult.Continue; });
         dispatcher.Subscribe<EventSmokegrenadeExpired>((e, i) => { HandleSmokeExpired(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventInfernoStartburn>((e, i) => { HandleInfernoStarted(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventInfernoExpire>((e, i) => { HandleInfernoEnded(e); return HookResult.Continue; });
@@ -178,7 +179,8 @@ public sealed class UtilityEventProcessor : IEventProcessor
             var state = PlayerControllerState.From(@event.GetPlayerOrDefault("userid"));
             if (!state.IsValid || state.IsBot) return;
 
-            var pending = _pendingGrenades.LastOrDefault(grenade =>
+            // Oldest first: two same-type grenades in flight detonate in throw order.
+            var pending = _pendingGrenades.FirstOrDefault(grenade =>
                 grenade.OwnerSteamId == state.SteamId && grenade.Type == type && !grenade.Detonated);
             if (pending is null)
             {
@@ -187,13 +189,18 @@ public sealed class UtilityEventProcessor : IEventProcessor
             }
 
             pending.EntityId = @event.GetIntValue("entityid");
-            pending.LandPosition = new Vector(
+            pending.LandPosition = new Vector3(
                 @event.GetFloatValue("x"),
                 @event.GetFloatValue("y"),
                 @event.GetFloatValue("z"));
             pending.DetonatedAt = _timeProvider.GetUtcNow().UtcDateTime;
             pending.LifecycleStartedAt = pending.DetonatedAt;
-            pending.LifecycleStartEvent = GetDetonationEventName(type);
+            pending.LifecycleStartEvent = @event.EventName;
+            if (type is UtilityType.HeGrenade or UtilityType.Flash or UtilityType.Decoy)
+            {
+                pending.LifecycleEndedAt = pending.DetonatedAt;
+                pending.LifecycleEndEvent = @event.EventName;
+            }
             pending.Detonated = true;
         }
         catch (Exception ex)
@@ -210,7 +217,7 @@ public sealed class UtilityEventProcessor : IEventProcessor
             var pending = FindPending(owner.SteamId, UtilityType.Smoke, @event.Entityid);
             if (pending is null) return;
 
-            pending.LandPosition = new Vector(@event.X, @event.Y, @event.Z);
+            pending.LandPosition = new Vector3(@event.X, @event.Y, @event.Z);
             FinalizePending(pending, @event.EventName);
         }
         catch (Exception ex)
@@ -225,14 +232,14 @@ public sealed class UtilityEventProcessor : IEventProcessor
         {
             if (@event.Entityid == 0) return;
 
-            var position = new Vector(@event.X, @event.Y, @event.Z);
+            var position = new Vector3(@event.X, @event.Y, @event.Z);
             var cutoff = _timeProvider.GetUtcNow().UtcDateTime - InfernoAssociationWindow;
             var pending = _pendingGrenades
                 .Where(grenade => grenade.Type == UtilityType.Molotov && grenade.Detonated &&
                                   !grenade.Finalized && grenade.EntityId == 0 && grenade.DetonatedAt >= cutoff)
-                .OrderBy(grenade => DistanceSquared(grenade.LandPosition, position))
+                .OrderBy(grenade => Vector3.DistanceSquared(grenade.LandPosition, position))
                 .FirstOrDefault();
-            if (pending is null || DistanceSquared(pending.LandPosition, position) > InfernoAssociationRadiusSquared) return;
+            if (pending is null || Vector3.DistanceSquared(pending.LandPosition, position) > InfernoAssociationRadiusSquared) return;
 
             pending.EntityId = @event.Entityid;
             pending.LandPosition = position;
@@ -256,7 +263,7 @@ public sealed class UtilityEventProcessor : IEventProcessor
                 grenade.Type == UtilityType.Molotov && grenade.EntityId == entityId && !grenade.Finalized);
             if (pending is null) return;
 
-            pending.LandPosition = new Vector(
+            pending.LandPosition = new Vector3(
                 @event.GetFloatValue("x"),
                 @event.GetFloatValue("y"),
                 @event.GetFloatValue("z"));
@@ -285,22 +292,16 @@ public sealed class UtilityEventProcessor : IEventProcessor
     {
         if (pending.Finalized) return;
 
-        var endedAt = _timeProvider.GetUtcNow().UtcDateTime;
+        var endedAt = pending.LifecycleEndedAt == default
+            ? _timeProvider.GetUtcNow().UtcDateTime
+            : pending.LifecycleEndedAt;
         var startedAt = pending.LifecycleStartedAt == default ? pending.DetonatedAt : pending.LifecycleStartedAt;
         var durationMs = (long)Math.Max(0, (endedAt - startedAt).TotalMilliseconds);
-        pending.LifecycleEndEvent = lifecycleEndEvent;
+        if (string.IsNullOrEmpty(pending.LifecycleEndEvent)) pending.LifecycleEndEvent = lifecycleEndEvent;
         pending.LifecycleDurationMs = (int)Math.Min(durationMs, int.MaxValue);
         pending.Finalized = true;
         UpdateEffectiveness(pending);
         PersistPosition(pending);
-    }
-
-    private static float DistanceSquared(Vector left, Vector right)
-    {
-        var x = left.X - right.X;
-        var y = left.Y - right.Y;
-        var z = left.Z - right.Z;
-        return x * x + y * y + z * z;
     }
 
     private void UpdateEffectiveness(PendingGrenade pending)
@@ -368,21 +369,11 @@ public sealed class UtilityEventProcessor : IEventProcessor
         };
     }
 
-    private static string GetDetonationEventName(UtilityType type) => type switch
-    {
-        UtilityType.Flash => "flashbang_detonate",
-        UtilityType.Smoke => "smokegrenade_detonate",
-        UtilityType.Molotov => "molotov_detonate",
-        UtilityType.HeGrenade => "hegrenade_detonate",
-        UtilityType.Decoy => "decoy_detonate",
-        _ => "grenade_detonate"
-    };
-
     private sealed class PendingGrenade(
         ulong ownerSteamId,
         PlayerTeam ownerTeam,
         UtilityType type,
-        Vector throwPosition)
+        Vector3 throwPosition)
     {
         private readonly HashSet<ulong> _opponentsAffected = [];
         private readonly HashSet<ulong> _teammatesAffected = [];
@@ -390,12 +381,13 @@ public sealed class UtilityEventProcessor : IEventProcessor
         public ulong OwnerSteamId { get; } = ownerSteamId;
         public PlayerTeam OwnerTeam { get; } = ownerTeam;
         public UtilityType Type { get; } = type;
-        public Vector ThrowPosition { get; } = throwPosition;
-        public Vector LandPosition { get; set; } = new(0, 0, 0);
+        public Vector3 ThrowPosition { get; } = throwPosition;
+        public Vector3 LandPosition { get; set; }
         public int EntityId { get; set; }
         public int Damage { get; set; }
         public DateTime DetonatedAt { get; set; }
         public DateTime LifecycleStartedAt { get; set; }
+        public DateTime LifecycleEndedAt { get; set; }
         public string LifecycleStartEvent { get; set; } = string.Empty;
         public string LifecycleEndEvent { get; set; } = string.Empty;
         public int LifecycleDurationMs { get; set; }

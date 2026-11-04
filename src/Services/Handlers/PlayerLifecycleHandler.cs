@@ -13,6 +13,8 @@ namespace statsCollector.Services.Handlers;
 
 public sealed class PlayerLifecycleHandler : IGameHandler
 {
+    private static readonly TimeSpan SeedRetryDelay = TimeSpan.FromSeconds(30);
+
     private readonly ILogger<PlayerLifecycleHandler> _logger;
     private readonly IPlayerSessionService _playerSessions;
     private readonly IScrimManager _scrimManager;
@@ -49,20 +51,40 @@ public sealed class PlayerLifecycleHandler : IGameHandler
         _ = SeedLifetimeAsync(steamId);
     }
 
+    // An unseeded session is never persisted, so one failed read would silently drop the player's whole
+    // session: keep trying while they are connected.
     private async Task SeedLifetimeAsync(ulong steamId)
     {
-        try
+        while (_playerSessions.GetActiveSteamIds().Contains(steamId))
         {
-            var lifetime = await _statsRepository.GetLifetimePlayerStatsAsync(steamId, _stoppingToken).ConfigureAwait(false);
-            _playerSessions.HydrateLifetime(steamId, lifetime);
-            _matchStats.EnsureBaseline(steamId);
-        }
-        catch (OperationCanceledException) when (_stoppingToken.IsCancellationRequested)
-        {
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to seed lifetime stats for {SteamId}", steamId);
+            try
+            {
+                // Write this player's queued and buffered snapshots first so the row read below is not older
+                // than them (it throws while those writes still fail, which retries the seed later; failures
+                // for other players don't hold it up).
+                await _persistenceChannel.FlushAsync(steamId, _stoppingToken).ConfigureAwait(false);
+                var lifetime = await _statsRepository.GetLifetimePlayerStatsAsync(steamId, _stoppingToken).ConfigureAwait(false);
+                _playerSessions.HydrateLifetime(steamId, lifetime);
+                _matchStats.EnsureBaseline(steamId);
+                return;
+            }
+            catch (OperationCanceledException) when (_stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to seed lifetime stats for {SteamId}; retrying in {Delay}s", steamId, SeedRetryDelay.TotalSeconds);
+            }
+
+            try
+            {
+                await Task.Delay(SeedRetryDelay, _stoppingToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
         }
     }
 

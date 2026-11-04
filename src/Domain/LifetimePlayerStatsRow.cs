@@ -4,8 +4,8 @@ namespace statsCollector.Domain;
 /// Flat projection of a player's persisted lifetime row (<c>player_stats</c>), read back on connect to
 /// seed the in-memory session. Only the raw cumulative counters are carried — derived ratings
 /// (kd_ratio, hltv_rating, kast_percentage, …) are recomputed from these, so they are not seeded
-/// directly. <c>KastPercentage</c> and <c>PlaytimeSeconds</c> are the two exceptions: they are used to
-/// reconstruct the un-stored intermediates <c>KASTRounds</c> and the session start time.
+/// directly. <c>KastPercentage</c> remains as a compatibility fallback for rows created before exact
+/// KAST rounds were stored; <c>PlaytimeSeconds</c> restores the session time origin.
 /// Column names map via Dapper's underscore matching.
 /// </summary>
 public sealed record LifetimePlayerStatsRow
@@ -24,6 +24,7 @@ public sealed record LifetimePlayerStatsRow
 
     public int RoundsPlayed { get; init; }
     public int RoundsWon { get; init; }
+    public int KastRounds { get; init; }
     public int TotalSpawns { get; init; }
     public int PlaytimeSeconds { get; init; }
     public int CtRounds { get; init; }
@@ -54,6 +55,7 @@ public sealed record LifetimePlayerStatsRow
 
     public int BombPlants { get; init; }
     public int BombDefuses { get; init; }
+    public int BombExplosions { get; init; }
     public int BombPlantAttempts { get; init; }
     public int BombPlantAborts { get; init; }
     public int BombDefuseAttempts { get; init; }
@@ -89,6 +91,11 @@ public sealed record LifetimePlayerStatsRow
     public int TradedDeaths { get; init; }
     public int HighImpactKills { get; init; }
     public int LowImpactKills { get; init; }
+    public int MultiKills { get; init; }
+    public int MultiKill2 { get; init; }
+    public int MultiKill3 { get; init; }
+    public int MultiKill4 { get; init; }
+    public int MultiKill5 { get; init; }
     public int OpeningDuelsWon { get; init; }
     public int OpeningDuelsLost { get; init; }
     public int NoscopeKills { get; init; }
@@ -98,6 +105,7 @@ public sealed record LifetimePlayerStatsRow
     public int Revenges { get; init; }
     public int ClutchesWon { get; init; }
     public int ClutchesLost { get; init; }
+    public int ClutchKills { get; init; }
     public decimal ClutchPoints { get; init; }
     public int MvpsEliminations { get; init; }
     public int MvpsBomb { get; init; }

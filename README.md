@@ -15,13 +15,18 @@ A CounterStrikeSharp plugin for CS2 that collects detailed player statistics int
 - **Tactical pause system** — `.pause` / `.unpause` with technical/tactical limits.
 
 ## Requirements
-- CounterStrikeSharp v1.0.371+ (.NET 10 runtime)
-- .NET 10 SDK (to build) / .NET 10 runtime (to run)
-- MySQL 8.0+ / 9.x — required for `POINT` columns and spatial indexes
+- CounterStrikeSharp v1.0.378+ on the server (the plugin is built against v1.0.379; .NET 10). CS2 1.41.9.2+
+  crashes older cores when a client connects, and CounterStrikeSharp v1.0.375+ needs Metamod:Source 2.x build 1467+.
+- .NET 10 SDK (to build)
+- MySQL 8.4 LTS or 9.7 LTS (8.0 and 9.6 are out of support), with `local_infile=ON` — see *Database prerequisites*
+- For `.restore`: start the CS2 server with `-allow_round_backup_files` (required for round backups since the
+  14 Oct 2026 CS2 update)
 
-A MySQL 9.6 stack is provided under `MySQL-docker/`. Copy both `*.example` files in
+A MySQL 9.7 LTS stack is provided under `MySQL-docker/`. Copy both `*.example` files in
 `MySQL-docker/secrets/` to matching `*.txt` files, replace their contents, then run
 `docker compose up -d`. phpMyAdmin is optional: `docker compose --profile tools up -d`.
+A volume created by the earlier `mysql:9.6` image upgrades in place on the first 9.7 start and cannot be
+downgraded afterwards, so back up the `mysql_data` volume first.
 MySQL and phpMyAdmin bind to loopback by default; set `MYSQL_BIND_ADDRESS` only when the game
 server connects from another host, and restrict that port at the firewall.
 
@@ -31,10 +36,25 @@ server connects from another host, and restrict that port at the firewall.
 
 ## Installation
 1. Install [CounterStrikeSharp](https://docs.cssharp.dev/) on your CS2 server.
-2. Copy the plugin to `game/csgo/addons/counterstrikesharp/plugins/statsCollector/`.
-3. Create `config.json` in that folder (see `config.sample.json`).
+2. Copy the plugin to `game/csgo/addons/counterstrikesharp/plugins/statsCollector/`, and copy `cfg/*.cfg` to
+   `game/csgo/cfg/` (scrim configs are loaded from there, see `Scrim.ScrimConfigPath`).
+3. Configure `game/csgo/addons/counterstrikesharp/configs/plugins/statsCollector/statsCollector.json`
+   (CounterStrikeSharp creates it on first start; see `config.sample.json`).
 4. Create the configured database, select it, then run `database/init.sql` to create the tables and views.
-5. Start the server and confirm with `css_plugins list`.
+5. Start the server and confirm with `css_plugins list`. After replacing the DLL, restart the server or
+   `css_plugins unload` + `load` it: on CounterStrikeSharp v1.0.379, `css_plugins reload` after an
+   upload-and-rename leaves the plugin unloaded.
+
+Scrim and pause commands are registered as `css_*`. CounterStrikeSharp maps the `!` and `/` chat prefixes by
+default (`!ready`, `!pause`); add `"."` to `PublicChatTrigger` in `configs/core.json` to use the `.ready` style
+shown in the in-game prompts.
+
+### Database prerequisites
+The bundled Docker stack already satisfies these. For your own MySQL server:
+- `local_infile=ON` (`SET PERSIST local_infile = ON;`). All bulk writes use `LOAD DATA LOCAL INFILE` and fail
+  with error 3948 while it is off, which is MySQL's default.
+- Grants on the database: `SELECT, INSERT, UPDATE, CREATE TEMPORARY TABLES`; with `AutoCreateSchema` also
+  `CREATE, ALTER, INDEX, REFERENCES, CREATE VIEW, DROP`.
 
 ### Minimal config
 ```json
@@ -49,11 +69,19 @@ server connects from another host, and restrict that port at the firewall.
   "LogLevel": "Information"
 }
 ```
-Use `VerifyFull` and set `DatabaseSslCa` to your CA certificate when connecting to a remote MySQL host.
+For a remote MySQL host use `VerifyCA` with `DatabaseSslCa` set to the server's CA certificate (for the Docker
+stack, a copy of the container's `/var/lib/mysql/ca.pem`; its auto-generated certificate fails `VerifyFull`'s
+hostname check), or `VerifyFull` with a certificate issued for `DatabaseHost`. `None` only works over loopback:
+MySQL's default `caching_sha2_password` rejects non-TLS remote logins after every server restart.
 See `config.sample.json` for the full set of options (persistence, trade window, clutch weighting, scrim settings).
 
 For an existing database, treat `database/init.sql` as a bootstrap script rather than a migration.
-Apply `database/migrations/001_add_event_lifecycle_fields.sql` before deploying this release.
+When upgrading, apply each SQL file under `database/migrations/` that has not been applied yet, in numeric
+order. They are not idempotent (MySQL has no `ADD COLUMN IF NOT EXISTS`, so a re-run fails with error 1060);
+a fresh `init.sql` already includes them, and `AutoCreateSchema` adds missing columns itself. The Docker image
+runs `init.sql` only on an empty volume.
+Migration `002_add_exact_player_event_counters.sql` preserves exact KAST rounds, multi-kill tiers,
+clutch kills, and bomb explosions across reconnects.
 This release widens `clutch_points`; apply the following before deployment:
 ```sql
 ALTER TABLE player_stats MODIFY clutch_points DECIMAL(10,3) DEFAULT 0;
@@ -83,9 +111,9 @@ Any option can be overridden by an environment variable prefixed with `STATSCOLL
 
 ## Data model
 - `players` — registry with first/last seen timestamps.
-- `player_stats` — lifetime aggregated statistics.
-- `matches` / `rounds` — match and round lifecycle.
-- `kill_positions` / `death_positions` / `utility_positions` — spatial event data linked to a match.
+- `player_stats` — lifetime aggregated statistics, including exact KAST, multi-kill, clutch, and bomb-event counters.
+- `matches` / `rounds` — match and round lifecycle, including the official round-end timestamp.
+- `kill_positions` / `death_positions` / `utility_positions` — spatial event data linked to a match; utility rows include entity and lifecycle event metadata.
 - `match_player_stats` / `match_weapon_stats` — per-match performance and weapon breakdowns (written at match end).
 - `player_advanced_analytics` — temporal performance snapshots (Rating 2.0, Impact, KAST, ADR).
 
@@ -100,12 +128,12 @@ Several CS2 servers (target: up to ~5) can run this plugin against one MySQL dat
 
 - **Player identity** is the SteamID64 (`player_stats.steam_id`, primary key) — globally unique, so a player has exactly one lifetime row no matter which server they play on.
 - **Match identity** is a per-server generated UUID (`matches.match_uuid`, `UNIQUE`); the integer `matches.id` is assigned by the database. No cross-server collisions, so match UUIDs do not need to be a primary key.
-- **Lifetime stats are seeded on connect** — when a player joins, their existing `player_stats` row is loaded into the in-memory session (off the game thread) *before* new stats accumulate, then written back. Since a Steam account can only be on one server at a time there is no write race on a row, and moving between servers never overwrites history with a single session.
+- **Lifetime stats are seeded on connect** — when a player joins, their existing `player_stats` row is loaded into the in-memory session (off the game thread) *before* new stats accumulate, then written back. Since a Steam account can only be on one server at a time there is no write race on a row, and moving between servers never overwrites history with a single session. The exception is a database outage: snapshots a server buffers while MySQL is down are written when it recovers, and can overwrite newer totals if the player has since played on another server.
 - **Per-match rows** (`match_player_stats`, `match_weapon_stats`, `rounds`, position tables) are immutable per `(match_id, …)`, so every server records its own matches independently.
 
 > **Connection budget:** each server opens its own MySqlConnector pool (max **50** connections per server). For *N* servers, make sure MySQL `max_connections` comfortably exceeds `N × 50` — e.g. for 5 servers set `max_connections >= 300`.
 
-> **Note on derived ratings after a reseed:** raw counters (K/D/A, damage, accuracy, KAST, utility, bomb, economy) are restored exactly. A few rating *sub-terms* whose intermediate counts aren't stored as columns (per-tier multi-kills, clutch-kill impact, exact weighted-kill bonuses) are reconstructed approximately, so `hltv_rating`/`impact_rating` can differ very slightly immediately after a reconnect; they re-converge as the session plays. KAST and the KAST-driven part of the rating are reconstructed exactly from the stored KAST%.
+> **Existing-data note:** after migration 002, KAST rounds, multi-kill tiers, and clutch kills are restored exactly across reconnects. Multi-kill tiers are exclusive (a 3k round counts only as a 3k). Rows written before the migration have no tiers, and their `multi_kills` reflects only the player's most recent session, counted the old way (a 3k round also counted as a 2k); it is carried into `multi_kill_2` on the player's next connect. Pre-migration tiers and clutch kills cannot be recovered; KAST rounds are reconstructed from the stored KAST%.
 
 ## Round Swing
 
@@ -129,7 +157,7 @@ Flow: CS2 event → event processor → `PlayerSessionService` (per-player locke
 `PlayerSnapshot` → `PersistenceChannel` (bounded background queue) → `StatsRepository` → MySQL.
 
 - Database access goes through `IConnectionFactory` + Dapper, wrapped in a Polly resilience pipeline.
-- Logging is via Serilog (console + daily rolling file under `logs/`).
+- Logging is via Serilog (console + daily rolling file under the plugin folder's `logs/`).
 - Observability is structured logging (Serilog). A lightweight `System.Diagnostics.ActivitySource` is
   present for optional tracing (a no-op with no listener attached); no metrics `Meter`/exporter is wired
   since the plugin runs in-process with no scrape endpoint.

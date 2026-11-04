@@ -43,13 +43,16 @@ public sealed class MatchStatsService(
 
     public void CaptureBaseline()
     {
-        var snapshots = _playerSessions.CaptureSnapshots(onlyDirty: false);
+        int count;
         lock (_lock)
         {
+            // Captured under the lock so a seed completing concurrently (EnsureBaseline) is not wiped by Clear.
+            var snapshots = _playerSessions.CaptureSnapshots(onlyDirty: false);
             _baseline.Clear();
             foreach (var s in snapshots) _baseline[s.SteamId] = s;
+            count = snapshots.Length;
         }
-        _logger.LogInformation("Captured per-match baseline for {Count} players.", snapshots.Length);
+        _logger.LogInformation("Captured per-match baseline for {Count} players.", count);
     }
 
     public void EnsureBaseline(ulong steamId)
@@ -67,7 +70,7 @@ public sealed class MatchStatsService(
         // the player's lifetime totals — making the end-of-match delta their contribution this match.
         if (_playerSessions.TryGetSnapshot(steamId, out var snapshot))
         {
-            lock (_lock) { _baseline[steamId] = snapshot; }
+            lock (_lock) { _baseline.TryAdd(steamId, snapshot); }
         }
     }
 
@@ -105,13 +108,38 @@ public sealed class MatchStatsService(
         PlayerSnapshot? baseline;
         lock (_lock)
         {
-            if (!_baseline.Remove(steamId, out baseline)) return;
+            // Keep the match-start baseline: if the player reconnects, FinalizeMatch rewrites this row with
+            // the whole match instead of only the part after the reconnect.
+            if (!_baseline.TryGetValue(steamId, out baseline)) return;
         }
 
         if (WriteMatchStats(current, baseline, matchUuid, DateTime.UtcNow))
         {
             _logger.LogInformation("Finalized per-match stats for disconnected player {SteamId}.", steamId);
         }
+
+        // Counters are reseeded from the database on reconnect, but weapon totals are per session and restart
+        // at zero. Keep this session's weapon numbers in the baseline as a negative offset (baseline minus
+        // current) so a reconnected session's totals minus the baseline still cover the whole match.
+        lock (_lock)
+        {
+            if (_baseline.TryGetValue(steamId, out var kept))
+            {
+                _baseline[steamId] = kept with
+                {
+                    WeaponKills = Subtract(kept.WeaponKills, current.WeaponKills),
+                    WeaponShots = Subtract(kept.WeaponShots, current.WeaponShots),
+                    WeaponHits = Subtract(kept.WeaponHits, current.WeaponHits)
+                };
+            }
+        }
+    }
+
+    private static Dictionary<string, int> Subtract(IReadOnlyDictionary<string, int> left, IReadOnlyDictionary<string, int> right)
+    {
+        var result = new Dictionary<string, int>(left);
+        foreach (var (weapon, value) in right) result[weapon] = result.GetValueOrDefault(weapon) - value;
+        return result;
     }
 
     private bool WriteMatchStats(PlayerSnapshot current, PlayerSnapshot? baseline, string matchUuid, DateTime calculatedAt)

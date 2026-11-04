@@ -27,6 +27,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
     private IServiceProvider? _serviceProvider;
     private readonly ILogger<Plugin> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     private PluginConfig _config = new();
+    private Serilog.Core.Logger? _serilog;
 
     private IPluginLifecycleService? _lifecycle;
     private readonly CancellationTokenSource _cancellationTokenSource = new();
@@ -47,7 +48,8 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             config.Validate();
             _config = config;
 
-            Bootstrapper.InitializeSerilog(config);
+            _serilog?.Dispose();
+            _serilog = Bootstrapper.CreateLogger(config, Path.Join(ModuleDirectory, "logs"));
 
             _logger.LogInformation("Configuration validated and Serilog initialized. DB Host: {Host}, DB Port: {Port}", config.DatabaseHost, config.DatabasePort);
         }
@@ -85,7 +87,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
 
         services.AddSingleton(Options.Create(_config));
         services.AddSingleton<IOptionsMonitor<PluginConfig>>(new StaticOptionsMonitor<PluginConfig>(_config));
-        services.AddLogging(builder => { builder.ClearProviders(); builder.AddSerilog(Log.Logger); });
+        services.AddLogging(builder => { builder.ClearProviders(); builder.AddSerilog(_serilog); });
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton(_cancellationTokenSource);
 
@@ -247,7 +249,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             finally
             {
                 _cancellationTokenSource.Dispose();
-                Log.CloseAndFlush();
+                _serilog?.Dispose();
             }
         }
     }

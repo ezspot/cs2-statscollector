@@ -6,6 +6,7 @@ using CounterStrikeSharp.API.Core;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using MySqlConnector;
 using statsCollector.Config;
 using statsCollector.Infrastructure;
 using statsCollector.Infrastructure.Database;
@@ -14,6 +15,8 @@ namespace statsCollector.Services;
 
 public sealed class PluginLifecycleService : IPluginLifecycleService
 {
+    private static readonly TimeSpan SchemaRetryDelay = TimeSpan.FromSeconds(15);
+
     private readonly ILogger<PluginLifecycleService> _logger;
     private readonly IOptionsMonitor<PluginConfig> _config;
     private readonly IMatchTrackingService _matchTracker;
@@ -62,16 +65,43 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
 
     public async Task StartAsync(CancellationToken ct)
     {
-        await _schemaInitializer.EnsureSchemaAsync(ct);
+        await EnsureSchemaAsync(ct);
 
         await _positionPersistence.StartAsync(ct);
 
         if (_persistenceChannel is IHostedService hosted)
         {
-            await hosted.StartAsync(ct);
+            // Not the plugin token: Unload cancels that before StopAsync, which would stop the worker ahead of
+            // the final save. StopAsync flushes the worker and then stops it.
+            await hosted.StartAsync(CancellationToken.None);
         }
 
         _logger.LogInformation("Background persistence services started.");
+    }
+
+    // A failed schema step used to abort startup, leaving the plugin loaded but recording nothing until the
+    // next restart. Wait out an unreachable database (e.g. MySQL still starting after a host reboot); for
+    // anything else (such as a missing privilege) carry on against the existing schema.
+    private async Task EnsureSchemaAsync(CancellationToken ct)
+    {
+        while (true)
+        {
+            try
+            {
+                await _schemaInitializer.EnsureSchemaAsync(ct);
+                return;
+            }
+            catch (MySqlException ex) when (!ct.IsCancellationRequested && ResiliencePolicies.IsTransient(ex))
+            {
+                _logger.LogWarning(ex, "Database unreachable for schema initialization; retrying in {Delay}s.", SchemaRetryDelay.TotalSeconds);
+                await Task.Delay(SchemaRetryDelay, ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                _logger.LogError(ex, "Schema initialization failed; continuing with the existing schema.");
+                return;
+            }
+        }
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -86,16 +116,22 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
             _matchTracker.EndMatch();
         }
 
-        if (_persistenceChannel is IHostedService hosted)
+        try
         {
-            await hosted.StopAsync(cancellationToken);
+            if (_persistenceChannel is IHostedService hosted)
+            {
+                await hosted.StopAsync(cancellationToken);
+            }
+            else
+            {
+                await _persistenceChannel.FlushAsync(cancellationToken: cancellationToken);
+            }
         }
-        else
+        finally
         {
-            await _persistenceChannel.FlushAsync(cancellationToken);
+            // Position writes are independent of the stats channel; flush them even if its final flush failed.
+            await _positionPersistence.StopAsync(TimeSpan.FromSeconds(10), cancellationToken);
         }
-
-        await _positionPersistence.StopAsync(TimeSpan.FromSeconds(10), cancellationToken);
 
         _logger.LogInformation("Plugin lifecycle stopped.");
     }

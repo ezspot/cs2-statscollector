@@ -26,6 +26,11 @@ public sealed class MatchFlowHandler : IGameHandler
 
     private PluginConfig _config => _configMonitor.CurrentValue;
     private int _currentRoundNumber = 0;
+    // Per-match engine counters (scoreboard score, cash spent) per player at the last observation: the previous
+    // round_end, or this round_start when there is none. Each round_end adds the change since then to the
+    // lifetime totals, so points scored after a round ended (exit frags) count in the next round.
+    private readonly Dictionary<ulong, (int Score, int CashSpent)> _lastTotals = [];
+    private int _lastTotalsRound;
 
     public MatchFlowHandler(
         ILogger<MatchFlowHandler> logger,
@@ -69,6 +74,9 @@ public sealed class MatchFlowHandler : IGameHandler
         if (_config.DeathmatchMode) return HookResult.Continue;
         if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live) return HookResult.Continue;
 
+        // round_officially_ended does not follow the final round, so close it here.
+        if (_matchTracker.CurrentMatch?.MatchUuid is { } matchUuid)
+            _persistenceChannel.TryWrite(new RoundOfficialEndUpdate(matchUuid, _currentRoundNumber));
         _matchStats.FinalizeMatch();
         _matchTracker.EndMatch();
         if (_config.EnableScrim) _scrimManager.HandleMatchEnd();
@@ -88,6 +96,10 @@ public sealed class MatchFlowHandler : IGameHandler
         _pauseService.Reset();
         _logger.LogInformation("Match start announced. Live tracking enabled.");
         _currentRoundNumber = 1;
+        // This fires at round 1's freeze end, after round_start already recorded round 1 (and its backup
+        // point) under the previous match.
+        _matchTracker.StartRound(1);
+        _roundBackup.CreateSnapshot(1);
         _matchStats.CaptureBaseline();
         return HookResult.Continue;
     }
@@ -99,11 +111,16 @@ public sealed class MatchFlowHandler : IGameHandler
 
         _damageReport.ResetRound();
         _currentRoundNumber = GetCurrentRoundNumber();
+        // Only the next round of the same match continues from the previous round_end: a restart, new map or
+        // round restore resets the engine counters.
+        if (_currentRoundNumber != _lastTotalsRound + 1) _lastTotals.Clear();
 
         foreach (var steamId in _playerSessions.GetActiveSteamIds())
         {
             var player = Utilities.GetPlayerFromSteamId(steamId);
             var state = PlayerControllerState.From(player);
+            if (player is { IsValid: true })
+                _lastTotals.TryAdd(steamId, (player.Score, player.InGameMoneyServices?.TotalCashSpent ?? 0));
             _playerSessions.MutatePlayer(steamId, stats =>
             {
                 stats.ResetRoundStats();
@@ -159,7 +176,6 @@ public sealed class MatchFlowHandler : IGameHandler
                 stats.Round.RoundStartUtc = roundStartUtc;
                 stats.Round.AliveOnTeamAtRoundStart = state.Team == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
                 stats.Round.AliveEnemyAtRoundStart = state.Team == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
-                stats.Economy.MoneySpent += Math.Max(0, stats.Economy.RoundStartMoney - state.Money);
                 stats.Economy.EquipmentValue = state.EquipmentValue;
                 stats.Economy.EquipmentValueStart = state.EquipmentValue;
             });
@@ -196,6 +212,9 @@ public sealed class MatchFlowHandler : IGameHandler
 
         _playerSessions.ForEachPlayer(stats =>
         {
+            // Spectators, casters and coaches have sessions too, but they did not play the round.
+            if (stats.CurrentTeam is not (PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist)) return;
+
             stats.Round.RoundsPlayed++;
             if (winningTeam != PlayerTeam.Spectator && stats.CurrentTeam == winningTeam) stats.Round.RoundsWon++;
             if (stats.CurrentTeam == PlayerTeam.CounterTerrorist) stats.Round.CtRounds++;
@@ -205,7 +224,16 @@ public sealed class MatchFlowHandler : IGameHandler
             var player = Utilities.GetPlayerFromSteamId(stats.SteamId);
             if (player is { IsValid: true })
             {
-                stats.Combat.Score = player.Score;
+                // Deltas of the engine's per-match counters: includes buys after freeze end, and is not thrown
+                // off by values seeded from the database (the old freeze-end money diff was both).
+                var cashSpent = player.InGameMoneyServices?.TotalCashSpent ?? 0;
+                var observed = _lastTotals.TryGetValue(stats.SteamId, out var last);
+                _lastTotals[stats.SteamId] = (player.Score, cashSpent);
+                if (observed)
+                {
+                    stats.Combat.Score += player.Score - last.Score;
+                    stats.Economy.MoneySpent += Math.Max(0, cashSpent - last.CashSpent);
+                }
 
                 if (player.InGameMoneyServices is not null)
                 {
@@ -217,6 +245,7 @@ public sealed class MatchFlowHandler : IGameHandler
             }
         });
 
+        _lastTotalsRound = _currentRoundNumber;
         _matchTracker.EndRound(_currentRoundNumber, winningTeamInt, winReason);
 
         SaveStatsAtRoundEnd();

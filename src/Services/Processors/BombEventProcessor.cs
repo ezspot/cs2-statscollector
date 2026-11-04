@@ -142,8 +142,17 @@ public sealed class BombEventProcessor : IEventProcessor
 
     private void HandleBombExploded(EventBombExploded @event)
     {
-        _logger.LogInformation("Bomb exploded");
-        ResetBombState();
+        try
+        {
+            var playerState = PlayerControllerState.From(@event.GetPlayerOrDefault("userid"));
+            if (playerState.IsValid && !playerState.IsBot)
+            {
+                _playerSessions.MutatePlayer(playerState.SteamId, stats => stats.Bomb.BombExplosions++);
+                _logger.LogInformation("Bomb planted by {SteamId} exploded", playerState.SteamId);
+            }
+        }
+        catch (Exception ex) { _logger.LogError(ex, "Error handling bomb exploded event"); }
+        finally { ResetBombState(); }
     }
 
     private void HandleBombDropped(EventBombDropped @event)

@@ -62,6 +62,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     // Last known team per entity index, so alive-count cleanup on disconnect does not depend on the
     // player session still existing (the lifecycle handler may have already removed it).
     private readonly PlayerTeam[] _playerTeams = new PlayerTeam[MaxPlayers];
+    // Last known HP per entity index (0 = unknown), used to clamp player_hurt damage to what was actually removed.
+    private readonly int[] _playerHealth = new int[MaxPlayers];
     private readonly int[] _playerRoundKills = new int[MaxPlayers];
     private readonly int[] _playerRoundNadeKills = new int[MaxPlayers];
 
@@ -73,16 +75,10 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     // Tracks whether the first kill of the round has occurred (O(1) replacement for an array scan).
     private bool _firstKillHappened;
 
-    private readonly Dictionary<PlayerTeam, DateTime> _lastTeamDeathTime = new()
-    {
-        [PlayerTeam.Terrorist] = DateTime.MinValue,
-        [PlayerTeam.CounterTerrorist] = DateTime.MinValue
-    };
-    private readonly Dictionary<PlayerTeam, ulong> _lastTeamDeathVictim = new()
-    {
-        [PlayerTeam.Terrorist] = 0,
-        [PlayerTeam.CounterTerrorist] = 0
-    };
+    // Per killer entity index (bots included): the player they last killed and when. Killing that enemy within
+    // the trade window trades the death, however many other deaths happened in between.
+    private readonly ulong[] _lastVictimOf = new ulong[MaxPlayers];
+    private readonly DateTime[] _lastKillAt = new DateTime[MaxPlayers];
     private readonly Dictionary<PlayerTeam, (ulong SteamId, int Opponents)> _clutchCandidates = [];
 
     private int _ctAliveCount;
@@ -135,6 +131,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             if (index < 0 || index >= MaxPlayers) continue;
 
             _isPlayerAlive[index] = state.Health > 0;
+            _playerHealth[index] = state.Health;
             _playerSteamIds[index] = state.SteamId;
             _playerTeams[index] = state.Team;
             if (!_isPlayerAlive[index]) continue;
@@ -147,6 +144,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     {
         Array.Clear(_isPlayerAlive);
         Array.Clear(_playerTeams);
+        Array.Clear(_playerHealth);
         Array.Clear(_playerRoundKills);
         Array.Clear(_playerRoundNadeKills);
 
@@ -158,10 +156,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         _firstEngagementVictimIndex = -1;
         _firstKillHappened = false;
 
-        _lastTeamDeathTime[PlayerTeam.Terrorist] = DateTime.MinValue;
-        _lastTeamDeathTime[PlayerTeam.CounterTerrorist] = DateTime.MinValue;
-        _lastTeamDeathVictim[PlayerTeam.Terrorist] = 0;
-        _lastTeamDeathVictim[PlayerTeam.CounterTerrorist] = 0;
+        Array.Clear(_lastVictimOf);
         _clutchCandidates.Clear();
     }
 
@@ -280,7 +275,18 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     _firstKillHappened = true;
                 }
 
-                bool isClutchKill = teammatesAlive == 1 && enemyAlive >= 1;
+                // Counts are post-kill: the victim was a living enemy, so the kill that wins the clutch counts too.
+                // A dead attacker (fire, grenade) is not the one clutching.
+                bool isClutchKill = teammatesAlive == 1 && _isPlayerAlive[attackerIndex];
+
+                // Round counters for this slot belong to the player who held it at the last reset; someone else in
+                // the slot (a disconnect not delivered outside Live) starts from zero.
+                if (_playerSteamIds[attackerIndex] != attackerState.SteamId)
+                {
+                    _playerSteamIds[attackerIndex] = attackerState.SteamId;
+                    _playerRoundKills[attackerIndex] = 0;
+                    _playerRoundNadeKills[attackerIndex] = 0;
+                }
 
                 var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
                 if (attackerState.PawnHandle != 0 && victimState.PawnHandle != 0 && _config.CurrentValue.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
@@ -350,12 +356,13 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     var killsThisRound = _playerRoundKills[attackerIndex];
                     stats.Combat.CurrentRoundKills = killsThisRound;
 
+                    // Tiers are exact: a round moves up a tier with each kill, so a 3k is not also a 2k.
                     switch (killsThisRound)
                     {
                         case 2: stats.Combat.MultiKill2++; break;
-                        case 3: stats.Combat.MultiKill3++; break;
-                        case 4: stats.Combat.MultiKill4++; break;
-                        case 5: stats.Combat.MultiKill5++; break;
+                        case 3: stats.Combat.MultiKill2--; stats.Combat.MultiKill3++; break;
+                        case 4: stats.Combat.MultiKill3--; stats.Combat.MultiKill4++; break;
+                        case 5: stats.Combat.MultiKill4--; stats.Combat.MultiKill5++; break;
                     }
 
                     if (noscope) stats.Combat.Noscopes++;
@@ -370,18 +377,19 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                         if (_playerRoundNadeKills[attackerIndex] == 2) stats.Combat.MultiKillNades++;
                     }
 
-                    bool highImpact = killsThisRound >= 3 || (teammatesAlive == 1 && enemyAlive >= 1) || isFirstKillOfRound;
+                    bool highImpact = killsThisRound >= 3 || isClutchKill || isFirstKillOfRound;
                     if (highImpact) stats.Combat.HighImpactKills++;
                     else if (teammatesAlive >= enemyAlive + 3) stats.Combat.LowImpactKills++;
                 });
 
-                var lastDeath = _lastTeamDeathTime[attackerTeam];
-                var tradedSteamId = _lastTeamDeathVictim[attackerTeam];
-                if (tradedSteamId != 0 && (now - lastDeath).TotalSeconds <= tradeWindowSeconds)
+                // A trade: the enemy just killed had killed one of the attacker's teammates within the window.
+                var tradedSteamId = _lastVictimOf[victimIndex];
+                if (tradedSteamId != 0 && tradedSteamId != attackerState.SteamId &&
+                    (now - _lastKillAt[victimIndex]).TotalSeconds <= tradeWindowSeconds)
                 {
                     _playerSessions.MutatePlayer(attackerState.SteamId, stats => { stats.Combat.TradeKills++; stats.Round.DidTradeThisRound = true; });
                     _playerSessions.MutatePlayer(tradedSteamId, stats => { stats.Combat.TradedDeaths++; stats.Round.WasTradedThisRound = true; });
-                    _lastTeamDeathVictim[attackerTeam] = 0;
+                    _lastVictimOf[victimIndex] = 0;
                 }
             }
 
@@ -391,8 +399,13 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 {
                     _playerSessions.MutatePlayer(victimState.SteamId, stats => stats.Combat.FirstDeaths++);
                 }
-                _lastTeamDeathTime[victimTeam] = now;
-                _lastTeamDeathVictim[victimTeam] = victimState.SteamId;
+
+                // Remember whom the enemy killer (a bot counts) took down, so killing it can trade this death.
+                if (attacker is { IsValid: true } && (PlayerTeam)attacker.TeamNum != victimTeam && attacker.Index < MaxPlayers)
+                {
+                    _lastVictimOf[attacker.Index] = victimState.SteamId;
+                    _lastKillAt[attacker.Index] = now;
+                }
             }
 
             if (assisterState.IsValid && !assisterState.IsBot && assisterState.SteamId != victimState.SteamId && assisterState.SteamId != attackerState.SteamId)
@@ -430,7 +443,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             var attackerState = PlayerControllerState.From(attacker);
 
             var weapon = (@event.GetStringValue("weapon", "unknown") ?? "unknown").ToLowerInvariant();
-            var damage = @event.GetIntValue("dmg_health", 0);
+            var damage = ClampToRemainingHealth(victimIndex, victimState.SteamId, @event.GetIntValue("dmg_health", 0), @event.GetIntValue("health", 0));
             var damageArmor = @event.GetIntValue("dmg_armor", 0);
             var hitgroup = @event.GetIntValue("hitgroup", 0);
             var isUtilityDamage = UtilityDamageWeapons.Contains(weapon);
@@ -519,7 +532,9 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
                 stats.Combat.ShotsFired++;
                 stats.Combat.CurrentRoundShotsFired++;
-                stats.Weapon.RecordShot(weapon);
+                // weapon_fire reports "weapon_ak47"; player_hurt/player_death report "ak47". Key shots the same way
+                // so a weapon's shots, hits and kills land in one match_weapon_stats row.
+                stats.Weapon.RecordShot(NormalizeWeaponName(weaponLower));
             });
         }
         catch (Exception ex) { _logger.LogError(ex, "Error handling weapon fire event"); }
@@ -539,11 +554,13 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             _playerSessions.MutatePlayer(playerState.SteamId, stats =>
             {
                 stats.Combat.MVPs++;
+                // CS2 reasons (Valve hudwinpanel.js): 1 eliminations, 9 ace, 15/16 3k/4k; 2 plant, 3 defuse,
+                // 13 plant and defend, 14 clutch defuse; 4 hostage rescue. 0 is undefined.
                 switch (mvpReason)
                 {
-                    case 0: stats.Combat.MvpsEliminations++; break;
-                    case 1: stats.Combat.MvpsBomb++; break;
-                    case 2: stats.Combat.MvpsHostage++; break;
+                    case 1 or 9 or 15 or 16: stats.Combat.MvpsEliminations++; break;
+                    case 2 or 3 or 13 or 14: stats.Combat.MvpsBomb++; break;
+                    case 4: stats.Combat.MvpsHostage++; break;
                 }
             });
         }
@@ -581,6 +598,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 }
 
                 _isPlayerAlive[playerIndex] = true;
+                _playerHealth[playerIndex] = playerState.Health;
                 _playerSteamIds[playerIndex] = playerState.SteamId;
                 _playerTeams[playerIndex] = playerState.Team;
                 _playerSessions.MutatePlayer(playerState.SteamId, stats => { stats.Round.SurvivedThisRound = true; stats.CurrentTeam = playerState.Team; });
@@ -606,6 +624,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 }
 
                 _isPlayerAlive[playerIndex] = false;
+                _playerHealth[playerIndex] = 0;
+                _lastVictimOf[playerIndex] = 0;
                 _playerSteamIds[playerIndex] = 0;
                 _playerTeams[playerIndex] = PlayerTeam.Spectator;
                 _playerRoundKills[playerIndex] = 0;
@@ -682,6 +702,17 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             if (_playerSteamIds[i] == steamId) return _isPlayerAlive[i];
         }
         return false;
+    }
+
+    // player_hurt's dmg_health is not capped at the victim's remaining HP (a 110-damage headshot on a 30 HP
+    // player reports 110). ADR counts only the HP actually removed, so clamp to the last known health.
+    private int ClampToRemainingHealth(int victimIndex, ulong victimSteamId, int damage, int healthAfter)
+    {
+        if (victimIndex < 0 || victimIndex >= MaxPlayers) return damage;
+        // HP recorded for a different player in this slot is not this victim's.
+        var healthBefore = _playerSteamIds[victimIndex] == victimSteamId ? _playerHealth[victimIndex] : 0;
+        _playerHealth[victimIndex] = healthAfter;
+        return healthBefore > 0 ? Math.Min(damage, healthBefore) : damage;
     }
 
     private static string NormalizeWeaponName(string weapon) =>

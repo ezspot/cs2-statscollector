@@ -63,7 +63,9 @@ public sealed class RoundBackupService(
             return false;
         }
 
-        var fileName = $"{BackupPrefix}_round{roundNumber:D2}.txt";
+        // Backup files are numbered by rounds already played: the one written at the start of round N is
+        // round(N-1) (round00 = start of the match), so restoring round N loads N-1.
+        var fileName = $"{BackupPrefix}_round{roundNumber - 1:D2}.txt";
         _logger.LogInformation("Restoring round {RoundNumber} from native backup {File}", roundNumber, fileName);
         _scheduler.Schedule(() => Server.ExecuteCommand($"mp_backup_restore_load_file {fileName}"));
         return true;
