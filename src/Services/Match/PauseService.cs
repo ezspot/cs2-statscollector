@@ -77,6 +77,10 @@ public sealed class PauseService(
         }
     }
 
+    // Tactical pauses are a team's; the counters are kept by side, so they swap when the sides do (halftime).
+    public void OnSidesSwapped() =>
+        (_tacticalPausesUsed[2], _tacticalPausesUsed[3]) = (_tacticalPausesUsed[3], _tacticalPausesUsed[2]);
+
     private void Pause()
     {
         _scheduler.Schedule(() =>

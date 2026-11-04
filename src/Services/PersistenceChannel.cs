@@ -28,9 +28,8 @@ public sealed record RoundEndUpdate(string MatchId, int Number, int WinnerTeam, 
 public sealed record RoundOfficialEndUpdate(string MatchId, int Number)
     : StatsUpdate(MatchId, Number);
 
-/// <summary>A round restore replays rounds from <paramref name="FromRound"/> on, so their rows written before
-/// <paramref name="VoidedAtUtc"/> are dropped.</summary>
-public sealed record RoundsVoidedUpdate(string MatchId, int FromRound, DateTime VoidedAtUtc)
+/// <summary>A round restore replays rounds from <paramref name="FromRound"/> on, so their rows are dropped.</summary>
+public sealed record RoundsVoidedUpdate(string MatchId, int FromRound)
     : StatsUpdate(MatchId, FromRound);
 
 public sealed record MatchStartUpdate(string MapName, string MatchId, string? SeriesUuid)
@@ -299,7 +298,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                     await _repository.OfficiallyEndRoundAsync(officialEnd.MatchId, officialEnd.Number, cancellationToken).ConfigureAwait(false);
                     break;
                 case RoundsVoidedUpdate voided:
-                    await _repository.VoidRoundsAsync(voided.MatchId, voided.FromRound, voided.VoidedAtUtc, cancellationToken).ConfigureAwait(false);
+                    await _repository.VoidRoundsAsync(voided.MatchId, voided.FromRound, cancellationToken).ConfigureAwait(false);
                     break;
                 case MatchStartUpdate matchStart:
                     await _repository.StartMatchAsync(matchStart.MapName, matchStart.MatchId, matchStart.SeriesUuid, cancellationToken).ConfigureAwait(false);

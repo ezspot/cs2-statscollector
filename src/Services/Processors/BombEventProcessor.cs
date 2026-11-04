@@ -19,6 +19,8 @@ public sealed class BombEventProcessor : IEventProcessor
     private DateTime? _bombDefuseStartTime;
     private bool _defuseHasKit;
     private bool _defuseStartedAsClutch;
+    // Freeze end to round end: the engine hands a T the bomb at round start, which fires bomb_pickup too.
+    private bool _roundLive;
 
     public BombEventProcessor(
         IPlayerSessionService playerSessions,
@@ -177,6 +179,7 @@ public sealed class BombEventProcessor : IEventProcessor
     {
         try
         {
+            if (!_roundLive) return;
             var player = @event.GetPlayerOrDefault("userid");
             var playerState = PlayerControllerState.From(player);
 
@@ -287,11 +290,13 @@ public sealed class BombEventProcessor : IEventProcessor
     public void OnRoundStart(RoundContext context)
     {
         ResetBombState();
+        _roundLive = true;
     }
 
     public void OnRoundEnd(int winnerTeam, int winReason)
     {
         ResetBombState();
+        _roundLive = false;
     }
 
     private void ResetBombState()

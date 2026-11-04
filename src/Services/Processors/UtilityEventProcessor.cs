@@ -336,7 +336,8 @@ public sealed class UtilityEventProcessor : IEventProcessor
     private void PersistPosition(PendingGrenade pending)
     {
         var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
-        if (!_config.CurrentValue.EnablePositionTracking || string.IsNullOrWhiteSpace(matchUuid)) return;
+        // Round 0: no freeze end seen yet (loaded mid-round), so there is no round to attribute the throw to.
+        if (!_config.CurrentValue.EnablePositionTracking || string.IsNullOrWhiteSpace(matchUuid) || _currentRoundNumber == 0) return;
 
         var @event = _positionPersistence.GetUtilityEvent();
         @event.MatchUuid = matchUuid;

@@ -122,9 +122,6 @@ public sealed record PlayerSnapshot
     int ArmHits,
     int LegHits,
 
-    int CurrentRoundKills,
-    int CurrentRoundDeaths,
-    int CurrentRoundShotsFired,
     bool HadKillThisRound,
     bool HadAssistThisRound,
     bool SurvivedThisRound,

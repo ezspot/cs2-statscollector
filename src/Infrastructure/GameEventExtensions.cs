@@ -25,9 +25,12 @@ public static class GameEventExtensions
         return @event.TryGetField<T>(key, out var value) ? value : defaultValue;
     }
 
+    // GameEvent.Get<CCSPlayerController> substitutes an invalid controller for a missing player (a world kill's
+    // attacker, no assister) instead of returning null, and reading any of its fields then throws.
     public static CCSPlayerController? GetPlayerOrDefault(this GameEvent @event, string key)
     {
-        return @event.GetFieldOrDefault<CCSPlayerController?>(key);
+        var player = @event.GetFieldOrDefault<CCSPlayerController?>(key);
+        return player is { IsValid: true } ? player : null;
     }
 
     public static string? GetStringValue(this GameEvent @event, string key, string? defaultValue = null)

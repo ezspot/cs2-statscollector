@@ -99,12 +99,11 @@ public sealed class MatchStatsService(
 
         var baselineById = baseline.ToDictionary(snapshot => snapshot.SteamId);
         var current = _playerSessions.CaptureSnapshots(onlyDirty: false, matchUuid: match.MatchUuid);
-        var calculatedAt = DateTime.UtcNow;
 
         var written = 0;
         foreach (var cur in current)
         {
-            if (WriteMatchStats(cur, baselineById.GetValueOrDefault(cur.SteamId), match.MatchUuid, calculatedAt)) written++;
+            if (WriteMatchStats(cur, baselineById.GetValueOrDefault(cur.SteamId), match.MatchUuid)) written++;
         }
 
         _logger.LogInformation("Finalized per-match stats for {Count} players in match {Uuid}.", written, match.MatchUuid);
@@ -123,7 +122,7 @@ public sealed class MatchStatsService(
             if (!_baseline.TryGetValue(steamId, out baseline)) return;
         }
 
-        if (WriteMatchStats(current, baseline, matchUuid, DateTime.UtcNow))
+        if (WriteMatchStats(current, baseline, matchUuid))
         {
             _logger.LogInformation("Finalized per-match stats for disconnected player {SteamId}.", steamId);
         }
@@ -152,7 +151,7 @@ public sealed class MatchStatsService(
 
     public void RewriteMatchStats(PlayerSnapshot totals, PlayerSnapshot baseline)
     {
-        if (_matchTracker.CurrentMatch?.MatchUuid is { } matchUuid) WriteMatchStats(totals, baseline, matchUuid, DateTime.UtcNow);
+        if (_matchTracker.CurrentMatch?.MatchUuid is { } matchUuid) WriteMatchStats(totals, baseline, matchUuid);
     }
 
     // Counters are reseeded from the database when a session restarts (reconnect, round restore), but weapon totals
@@ -172,13 +171,13 @@ public sealed class MatchStatsService(
         return result;
     }
 
-    private bool WriteMatchStats(PlayerSnapshot current, PlayerSnapshot? baseline, string matchUuid, DateTime calculatedAt)
+    private bool WriteMatchStats(PlayerSnapshot current, PlayerSnapshot? baseline, string matchUuid)
     {
         var rounds = current.RoundsPlayed - (baseline?.RoundsPlayed ?? 0);
         if (rounds <= 0) return false;
 
         var delta = BuildMatchDelta(current, baseline, matchUuid, rounds);
-        var analytics = BuildAnalyticsSnapshot(current, matchUuid, calculatedAt);
+        var analytics = BuildAnalyticsSnapshot(current, matchUuid);
         return _persistenceChannel.TryWrite(new MatchPlayerStatsUpdate(delta, analytics));
     }
 
@@ -217,7 +216,7 @@ public sealed class MatchStatsService(
         };
     }
 
-    private PlayerAnalyticsSnapshot BuildAnalyticsSnapshot(PlayerSnapshot cur, string matchUuid, DateTime calculatedAt)
+    private PlayerAnalyticsSnapshot BuildAnalyticsSnapshot(PlayerSnapshot cur, string matchUuid)
     {
         // Rating 2.0 approximation from lifetime totals at this point in time.
         var rating2 = _analytics.CalculateHltv2Rating(cur.Kills, cur.Assists, cur.Deaths, cur.RoundsPlayed, cur.KASTPercentage, cur.AverageDamagePerRound);
@@ -228,7 +227,6 @@ public sealed class MatchStatsService(
         return new PlayerAnalyticsSnapshot(
             MatchUuid: matchUuid,
             SteamId: cur.SteamId,
-            CalculatedAt: calculatedAt,
             Name: cur.Name,
             Rating2: rating2,
             KillsPerRound: cur.AverageKillsPerRound,

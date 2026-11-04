@@ -17,9 +17,22 @@ namespace statsCollector.Services;
 public abstract class PositionEvent
 {
     public string? MatchUuid { get; set; }
-    // Failed write attempts; reset when the event returns to its pool.
-    public int Attempts { get; set; }
+    public int RoundNumber { get; set; }
     public abstract void Reset();
+}
+
+/// <summary>Queued at a round restore. The position rows of the voided rounds were enqueued before it, so they are
+/// written by the time the writer reaches it and it removes them; the replay's rows follow it and stay.</summary>
+public sealed class VoidRoundsMarker : PositionEvent
+{
+    public VoidRoundsMarker(string matchUuid, int fromRound)
+    {
+        MatchUuid = matchUuid;
+        RoundNumber = fromRound;
+    }
+
+    public int FromRound => RoundNumber;
+    public override void Reset() { }
 }
 
 public sealed class KillPositionEvent : PositionEvent
@@ -39,7 +52,6 @@ public sealed class KillPositionEvent : PositionEvent
     public int KillerTeam { get; set; }
     public int VictimTeam { get; set; }
     public string MapName { get; set; } = string.Empty;
-    public int RoundNumber { get; set; }
     public int RoundTime { get; set; }
 
     public override void Reset()
@@ -70,7 +82,6 @@ public sealed class DeathPositionEvent : PositionEvent
     public bool IsHeadshot { get; set; }
     public int Team { get; set; }
     public string MapName { get; set; } = string.Empty;
-    public int RoundNumber { get; set; }
     public int RoundTime { get; set; }
 
     public override void Reset()
@@ -105,7 +116,6 @@ public sealed class UtilityPositionEvent : PositionEvent
     public int TeammatesAffected { get; set; }
     public int Damage { get; set; }
     public string MapName { get; set; } = string.Empty;
-    public int RoundNumber { get; set; }
     public int RoundTime { get; set; }
 
     public override void Reset()
@@ -133,6 +143,8 @@ public interface IPositionPersistenceService : IAsyncDisposable
     Task StartAsync(CancellationToken cancellationToken);
     bool TryEnqueue(PositionEvent @event);
     Task StopAsync(TimeSpan timeout, CancellationToken cancellationToken);
+    /// <summary>Removes the position rows of rounds <paramref name="fromRound"/> on, after everything queued so far.</summary>
+    void VoidRounds(string matchUuid, int fromRound);
 
     KillPositionEvent GetKillEvent();
     DeathPositionEvent GetDeathEvent();
@@ -141,10 +153,6 @@ public interface IPositionPersistenceService : IAsyncDisposable
 
 public sealed class PositionPersistenceService : IPositionPersistenceService
 {
-    // Failures that no retry can fix (a match row that never got written) before an event is dropped: with the 5 s
-    // doubling backoff, about 75 seconds. Outage failures do not count.
-    private const int MaxWriteAttempts = 5;
-
     private readonly IPositionTrackingService _repository;
     private readonly ILogger<PositionPersistenceService> _logger;
     private readonly Channel<PositionEvent> _channel;
@@ -155,6 +163,8 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
     private Task? _processingTask;
     private CancellationTokenSource? _linkedCts;
     private volatile bool _started;
+    // A restore's void waits here until the database has taken it; nothing is written before it.
+    private VoidRoundsMarker? _pendingVoid;
 
     private readonly ObjectPool<KillPositionEvent> _killPool;
     private readonly ObjectPool<DeathPositionEvent> _deathPool;
@@ -190,7 +200,7 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
     private class PositionEventPooledObjectPolicy<T> : IPooledObjectPolicy<T> where T : PositionEvent, new()
     {
         public T Create() => new();
-        public bool Return(T obj) { obj.Reset(); obj.Attempts = 0; return true; }
+        public bool Return(T obj) { obj.Reset(); return true; }
     }
     public Task StartAsync(CancellationToken cancellationToken)
     {
@@ -219,6 +229,12 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         activity?.SetStatus(ActivityStatusCode.Error, "Channel full");
         ReturnToPool(@event);
         return false;
+    }
+
+    public void VoidRounds(string matchUuid, int fromRound)
+    {
+        if (!_channel.Writer.TryWrite(new VoidRoundsMarker(matchUuid, fromRound)))
+            _logger.LogError("Position channel full: the position rows of rounds {FromRound}+ of match {Match} voided by a restore stay next to the replayed rounds.", fromRound, matchUuid);
     }
 
     public async Task StopAsync(TimeSpan timeout, CancellationToken cancellationToken)
@@ -255,20 +271,38 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
     {
         var reader = _channel.Reader;
         var retryDelay = TimeSpan.FromSeconds(5);
-        var maxRetryDelay = TimeSpan.FromMinutes(5);
+        // Near the breaker's 60 s: a longer wait after an outage only fills the channel.
+        var maxRetryDelay = TimeSpan.FromMinutes(1);
 
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
+                if (_pendingVoid is { } pending)
+                {
+                    if (!await TryVoidAsync(pending, cancellationToken).ConfigureAwait(false))
+                    {
+                        await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+                        retryDelay = TimeSpan.FromTicks(Math.Min(retryDelay.Ticks * 2, maxRetryDelay.Ticks));
+                        continue;
+                    }
+                    _pendingVoid = null;
+                }
+
                 if (_retryQueue.IsEmpty && !await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false)) break;
 
                 var batch = new List<PositionEvent>();
 
                 // Fresh events first, so retries that keep failing cannot crowd them out. Count first: dequeuing
-                // when the batch is already full would drop that event.
+                // when the batch is already full would drop that event. A void marker ends the batch: the events
+                // before it are written now, it is applied next, and only then are the events after it read.
                 while (batch.Count < 100 && reader.TryRead(out var @event))
                 {
+                    if (@event is VoidRoundsMarker marker)
+                    {
+                        _pendingVoid = marker;
+                        break;
+                    }
                     batch.Add(@event);
                 }
 
@@ -301,13 +335,7 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
                     activity?.SetStatus(ActivityStatusCode.Error, "One or more position groups failed");
                     foreach (var item in failed)
                     {
-                        // An event whose match row never got written fails every time; give up on it eventually.
-                        if (item.Attempts >= MaxWriteAttempts)
-                        {
-                            _logger.LogError("Dropped {Type} for match {Match} after {Attempts} failed writes.", item.GetType().Name, item.MatchUuid, item.Attempts);
-                            ReturnToPool(item);
-                        }
-                        else if (_retryQueue.Count < 5000)
+                        if (_retryQueue.Count < 5000)
                         {
                             _retryQueue.Enqueue(item);
                         }
@@ -381,17 +409,66 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         try
         {
             await persist(events, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ResiliencePolicies.IsRetryable(ex))
+        {
+            // An outage keeps its events buffered however long it lasts.
+            _logger.LogError(ex, "Failed to persist {PositionType} batch. Buffering {Count} items.", typeof(T).Name, events.Count);
+            failed.AddRange(events);
+            return;
+        }
+        catch (Exception ex) when (events.Count > 1)
+        {
+            // Rejected data fails the same way every time: find the rows and drop only those.
+            _logger.LogWarning(ex, "{PositionType} batch of {Count} rejected; writing its rows one at a time.", typeof(T).Name, events.Count);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to persist {PositionType} batch. Buffering {Count} items.", typeof(T).Name, events.Count);
-            // Only failures no retry can fix count toward giving up (a match row that never got written); an outage
-            // keeps its events buffered however long it lasts.
-            if (!ResiliencePolicies.IsRetryable(ex))
-            {
-                foreach (var @event in events) @event.Attempts++;
-            }
-            failed.AddRange(events);
+            _logger.LogError(ex, "Dropped a {PositionType} row of match {Match}: it cannot be written.", typeof(T).Name, events[0].MatchUuid);
+            return;
+        }
+
+        foreach (var @event in events)
+        {
+            await PersistGroupAsync([@event], persist, failed, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    // The voided rounds' rows still waiting for a retry are dropped; those written are deleted. Only an outage is worth
+    // waiting for (false): a delete that cannot work (no DELETE grant) is given up.
+    private async Task<bool> TryVoidAsync(VoidRoundsMarker marker, CancellationToken cancellationToken)
+    {
+        var kept = new List<PositionEvent>();
+        while (_retryQueue.TryDequeue(out var queued))
+        {
+            if (queued.MatchUuid == marker.MatchUuid && queued.RoundNumber >= marker.FromRound) ReturnToPool(queued);
+            else kept.Add(queued);
+        }
+        foreach (var queued in kept) _retryQueue.Enqueue(queued);
+
+        try
+        {
+            await _repository.VoidRoundPositionsAsync(marker.MatchUuid!, marker.FromRound, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ResiliencePolicies.IsOutage(ex))
+        {
+            _logger.LogWarning(ex, "Database unavailable; the position rows of rounds {FromRound}+ of match {Match} voided by a restore are removed once it is back.", marker.FromRound, marker.MatchUuid);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not remove the position rows of rounds {FromRound}+ of match {Match} voided by a restore; they stay next to the replayed rounds.", marker.FromRound, marker.MatchUuid);
+            return true;
         }
     }
 

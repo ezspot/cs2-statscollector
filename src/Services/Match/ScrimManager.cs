@@ -99,7 +99,8 @@ public sealed class ScrimManager : IScrimManager, IDisposable
                 OnMapVoteEntry();
                 break;
             case ScrimState.Picking:
-                StartPicking();
+                // Nobody to pick (every ready player is a captain): straight to the knife round or match.
+                if (!StartPicking()) await TransitionToAsync(_config.Scrim.KnifeRoundEnabled ? ScrimState.KnifeRound : ScrimState.Live);
                 break;
             case ScrimState.KnifeRound:
                 await OnKnifeRoundEntry();
@@ -157,6 +158,16 @@ public sealed class ScrimManager : IScrimManager, IDisposable
         if (!Enum.IsDefined(data.State))
         {
             _logger.LogError("Scrim recovery contains invalid state value {State}.", (int)data.State);
+            return;
+        }
+
+        if (data.State is not (ScrimState.KnifeRound or ScrimState.Live))
+        {
+            // After a restart nobody is connected, so the saved ready-ups, votes and picks are of players who may never
+            // return and could never be completed. Those phases are quick to redo; practice re-applies its config.
+            if (data.State is not ScrimState.Idle)
+                await TransitionToAsync(data.State == ScrimState.Practice ? ScrimState.Practice : ScrimState.Lobby);
+            _logger.LogInformation("Scrim recovery: {State} started again.", _state);
             return;
         }
 
@@ -219,7 +230,7 @@ public sealed class ScrimManager : IScrimManager, IDisposable
     private ulong ActiveCaptainId() =>
         _captains.GetValueOrDefault(_team1Picking ? 1 : 2);
 
-    private void StartPicking()
+    private bool StartPicking()
     {
         _pickPool.Clear();
         _team1.Clear();
@@ -231,6 +242,7 @@ public sealed class ScrimManager : IScrimManager, IDisposable
 
         _pickTurn = 0;
         _team1Picking = true;
+        if (_pickPool.Count == 0) return false;
 
         _scheduler.Schedule(() =>
         {
@@ -238,6 +250,7 @@ public sealed class ScrimManager : IScrimManager, IDisposable
             Server.PrintToChatAll($" [Scrim] Picking phase started! Captain {captain1?.PlayerName ?? "Team 1"} picks first.");
             NotifyPickTurn();
         });
+        return true;
     }
 
     private void NotifyPickTurn()
@@ -479,8 +492,8 @@ public sealed class ScrimManager : IScrimManager, IDisposable
                 _logger.LogInformation("Side selection timed out. Auto-assigning sides.");
                 _scheduler.Schedule(() =>
                 {
-                    // The scrim may have been aborted or a side chosen since the timer started.
-                    if (_state != ScrimState.KnifeRound) return;
+                    // The scrim may have been aborted, a side chosen, or the map changed since the timer started.
+                    if (_state != ScrimState.KnifeRound || _waitingForPlayers) return;
                     Server.PrintToChatAll(" [Scrim] Side selection timed out. Proceeding with current sides.");
                     RunTransition(TransitionToAsync(ScrimState.Live), "start live match after side-selection timeout");
                 });
@@ -689,7 +702,8 @@ public sealed class ScrimManager : IScrimManager, IDisposable
         foreach (var kvp in data.PlayerVotes ?? []) _playerVotes[kvp.Key] = kvp.Value;
         _pickPool.Clear();
         if (data.PickPool != null) _pickPool.AddRange(data.PickPool);
-        _selectedMap = data.SelectedMap;
+        // The file is trusted as far as the map pool: the name goes into a changelevel command.
+        _selectedMap = data.SelectedMap is { } map && _config.Scrim.MapPool.Contains(map) ? map : null;
         _team1Picking = data.Team1Picking;
         _pickTurn = data.PickTurn;
         _knifeWinnerTeam = data.KnifeWinnerTeam;

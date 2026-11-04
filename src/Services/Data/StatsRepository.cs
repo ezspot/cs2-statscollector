@@ -11,7 +11,6 @@ using statsCollector.Domain;
 using statsCollector.Infrastructure.Database;
 using statsCollector.Infrastructure;
 using Polly;
-using Polly.CircuitBreaker;
 using Polly.Registry;
 
 namespace statsCollector.Services;
@@ -30,7 +29,7 @@ public interface IStatsRepository
     Task StartRoundAsync(string matchUuid, int roundNumber, CancellationToken ct);
     Task EndRoundAsync(string matchUuid, int roundNumber, int winnerTeam, int winReason, CancellationToken ct);
     Task OfficiallyEndRoundAsync(string matchUuid, int roundNumber, CancellationToken ct);
-    Task VoidRoundsAsync(string matchUuid, int fromRound, DateTime voidedAtUtc, CancellationToken ct);
+    Task VoidRoundsAsync(string matchUuid, int fromRound, CancellationToken ct);
 }
 
 public sealed class StatsRepository : IStatsRepository
@@ -139,7 +138,7 @@ public sealed class StatsRepository : IStatsRepository
                 );
             }
 
-            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_match_player_stats_uuid (row_id INT AUTO_INCREMENT PRIMARY KEY, match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, kills INT, deaths INT, assists INT, headshots INT, damage_dealt INT, mvps INT, score INT, rating2 DECIMAL(5,3), adr DECIMAL(10,2), kast DECIMAL(5,2), entry_kills INT, entry_deaths INT, entry_kill_attempts INT, entry_kill_attempt_wins INT, idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);", ct).ConfigureAwait(false);
+            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_match_player_stats_uuid (row_id INT AUTO_INCREMENT PRIMARY KEY, match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, kills INT, deaths INT, assists INT, headshots INT, damage_dealt INT, mvps INT, score INT, rating2 DECIMAL(5,3), adr DECIMAL(6,2), kast DECIMAL(5,2), entry_kills INT, entry_deaths INT, entry_kill_attempts INT, entry_kill_attempt_wins INT, idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);", ct).ConfigureAwait(false);
 
             var bulkCopy = new MySqlBulkCopy(connection)
             {
@@ -216,7 +215,7 @@ public sealed class StatsRepository : IStatsRepository
                 dataTable.Rows.Add(w.MatchUuid, w.SteamId, w.Weapon, w.Kills, w.Shots, w.Hits, w.IdempotencyKey, now, 0);
             }
 
-            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_match_weapon_stats_uuid (row_id INT AUTO_INCREMENT PRIMARY KEY, match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, weapon_name VARCHAR(64), kills INT, shots INT, hits INT, idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);", ct).ConfigureAwait(false);
+            await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_match_weapon_stats_uuid (row_id INT AUTO_INCREMENT PRIMARY KEY, match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, weapon_name VARCHAR(100), kills INT, shots INT, hits INT, idempotency_key VARCHAR(255), created_at DATETIME, retry_count INT);", ct).ConfigureAwait(false);
 
             var bulkCopy = new MySqlBulkCopy(connection)
             {
@@ -262,10 +261,12 @@ public sealed class StatsRepository : IStatsRepository
                 "INSERT IGNORE INTO players (steam_id, name) VALUES (@SteamId, @Name);",
                 list, cancellationToken: ct)).ConfigureAwait(false);
 
-            // INSERT IGNORE keeps this idempotent if the channel re-processes a buffered batch
-            // (idempotency_key is UNIQUE). match_id is resolved from the match UUID.
+            // The row is written at a disconnect, at match end and after a round restore: each later write replaces
+            // the earlier one (idempotency_key is UNIQUE), and a re-processed buffered batch writes the same values
+            // again. match_id is resolved from the match UUID. calculated_at is the server's clock, like the match and
+            // round timestamps (a UTC value from here would be read in the session time zone).
             const string sql = """
-                INSERT IGNORE INTO player_advanced_analytics
+                INSERT INTO player_advanced_analytics
                     (match_id, steam_id, calculated_at, name, rating2, kills_per_round, deaths_per_round, impact_score,
                      kast_percentage, average_damage_per_round, utility_impact_score, clutch_success_rate, trade_success_rate,
                      flash_waste, entry_kills, entry_deaths, entry_kill_attempts, entry_kill_attempt_wins, entry_success_rate,
@@ -273,14 +274,28 @@ public sealed class StatsRepository : IStatsRepository
                      grenade_effectiveness_rate, flash_effectiveness_rate, utility_usage_per_round, average_money_spent_per_round,
                      performance_score, top_weapon_by_kills, survival_rating, utility_score, clutch_points,
                      flash_assisted_kills, wallbang_kills, idempotency_key)
-                SELECT m.id, @SteamId, @CalculatedAt, @Name, @Rating2, @KillsPerRound, @DeathsPerRound, @ImpactScore,
+                SELECT m.id, @SteamId, CURRENT_TIMESTAMP, @Name, @Rating2, @KillsPerRound, @DeathsPerRound, @ImpactScore,
                      @KastPercentage, @AverageDamagePerRound, @UtilityImpactScore, @ClutchSuccessRate, @TradeSuccessRate,
                      @FlashWaste, @EntryKills, @EntryDeaths, @EntryKillAttempts, @EntryKillAttemptWins, @EntrySuccessRate,
                      @RoundsPlayed, @KdRatio, @HeadshotPercentage, @OpeningKillRatio, @TradeKillRatio,
                      @GrenadeEffectivenessRate, @FlashEffectivenessRate, @UtilityUsagePerRound, @AverageMoneySpentPerRound,
                      @PerformanceScore, @TopWeaponByKills, @SurvivalRating, @UtilityScore, @ClutchPoints,
                      @FlashAssistedKills, @WallbangKills, @IdempotencyKey
-                FROM matches m WHERE m.match_uuid = @MatchUuid;
+                FROM matches m WHERE m.match_uuid = @MatchUuid
+                ON DUPLICATE KEY UPDATE
+                    calculated_at = CURRENT_TIMESTAMP, name = @Name, rating2 = @Rating2, kills_per_round = @KillsPerRound,
+                    deaths_per_round = @DeathsPerRound, impact_score = @ImpactScore, kast_percentage = @KastPercentage,
+                    average_damage_per_round = @AverageDamagePerRound, utility_impact_score = @UtilityImpactScore,
+                    clutch_success_rate = @ClutchSuccessRate, trade_success_rate = @TradeSuccessRate, flash_waste = @FlashWaste,
+                    entry_kills = @EntryKills, entry_deaths = @EntryDeaths, entry_kill_attempts = @EntryKillAttempts,
+                    entry_kill_attempt_wins = @EntryKillAttemptWins, entry_success_rate = @EntrySuccessRate,
+                    rounds_played = @RoundsPlayed, kd_ratio = @KdRatio, headshot_percentage = @HeadshotPercentage,
+                    opening_kill_ratio = @OpeningKillRatio, trade_kill_ratio = @TradeKillRatio,
+                    grenade_effectiveness_rate = @GrenadeEffectivenessRate, flash_effectiveness_rate = @FlashEffectivenessRate,
+                    utility_usage_per_round = @UtilityUsagePerRound, average_money_spent_per_round = @AverageMoneySpentPerRound,
+                    performance_score = @PerformanceScore, top_weapon_by_kills = @TopWeaponByKills, survival_rating = @SurvivalRating,
+                    utility_score = @UtilityScore, clutch_points = @ClutchPoints, flash_assisted_kills = @FlashAssistedKills,
+                    wallbang_kills = @WallbangKills;
                 """;
 
             var written = await connection.ExecuteAsync(new CommandDefinition(sql, list, cancellationToken: ct)).ConfigureAwait(false);
@@ -322,31 +337,21 @@ public sealed class StatsRepository : IStatsRepository
             WHERE m.match_uuid = @MatchUuid AND r.round_number = @RoundNumber;
             """, new { MatchUuid = matchUuid, RoundNumber = roundNumber }, ct);
 
-    // Rows of rounds a restore voided; the replay writes them again. Position rows come from the separate position
-    // writer, so only those written before the restore go: this can run late (buffered), and the replay's must stay.
-    // The rounds rows are written on this channel, behind this delete.
-    // ponytail: position events of voided rounds still queued in the position writer at the restore are kept.
-    public async Task VoidRoundsAsync(string matchUuid, int fromRound, DateTime voidedAtUtc, CancellationToken ct)
+    // The rounds rows of rounds a restore voided; the replay writes them again. Their position rows are removed by the
+    // position writer, in its own queue order.
+    public async Task VoidRoundsAsync(string matchUuid, int fromRound, CancellationToken ct)
     {
         try
         {
-            await ExecuteResilientAsync("""
-                DELETE t FROM kill_positions t JOIN matches m ON t.match_id = m.id
-                    WHERE m.match_uuid = @MatchUuid AND t.round_number >= @FromRound AND t.created_at <= FROM_UNIXTIME(@VoidedAt);
-                DELETE t FROM death_positions t JOIN matches m ON t.match_id = m.id
-                    WHERE m.match_uuid = @MatchUuid AND t.round_number >= @FromRound AND t.created_at <= FROM_UNIXTIME(@VoidedAt);
-                DELETE t FROM utility_positions t JOIN matches m ON t.match_id = m.id
-                    WHERE m.match_uuid = @MatchUuid AND t.round_number >= @FromRound AND t.created_at <= FROM_UNIXTIME(@VoidedAt);
-                DELETE t FROM rounds t JOIN matches m ON t.match_id = m.id WHERE m.match_uuid = @MatchUuid AND t.round_number >= @FromRound;
-                """, new { MatchUuid = matchUuid, FromRound = fromRound, VoidedAt = new DateTimeOffset(voidedAtUtc, TimeSpan.Zero).ToUnixTimeSeconds() }, ct)
-                .ConfigureAwait(false);
+            await ExecuteResilientAsync(
+                "DELETE t FROM rounds t JOIN matches m ON t.match_id = m.id WHERE m.match_uuid = @MatchUuid AND t.round_number >= @FromRound;",
+                new { MatchUuid = matchUuid, FromRound = fromRound }, ct).ConfigureAwait(false);
         }
-        // Cleanup only. A delete that keeps failing (no DELETE grant, or the match_id index of migration 004 missing on a
-        // big table so it times out) must not hold up every write queued behind it; only an outage is worth a retry.
-        catch (Exception ex) when (ex is not (OperationCanceledException or BrokenCircuitException) &&
-                                   !(ex is MySqlException mysql && ResiliencePolicies.IsTransient(mysql)))
+        // Cleanup only: a delete that keeps failing (no DELETE grant) must not hold up every write queued behind it;
+        // only an outage is worth a retry.
+        catch (Exception ex) when (ex is not OperationCanceledException && !ResiliencePolicies.IsOutage(ex))
         {
-            _logger.LogWarning(ex, "Could not remove the rows of rounds {FromRound}+ of match {Match} voided by a restore; they stay next to the replayed rounds.", fromRound, matchUuid);
+            _logger.LogWarning(ex, "Could not remove the rounds {FromRound}+ of match {Match} voided by a restore; they stay next to the replayed rounds.", fromRound, matchUuid);
         }
     }
 

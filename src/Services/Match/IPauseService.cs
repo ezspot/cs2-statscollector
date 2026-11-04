@@ -16,5 +16,6 @@ public interface IPauseService
     void RequestPause(CCSPlayerController? player, PauseType type);
     void RequestUnpause(CCSPlayerController? player);
     void OnRoundEnd();
+    void OnSidesSwapped();
     void Reset();
 }

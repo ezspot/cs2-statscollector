@@ -69,7 +69,16 @@ public sealed class MatchFlowHandler : IGameHandler
         plugin.RegisterEventHandler<EventRoundEnd>(OnRoundEnd);
         plugin.RegisterEventHandler<EventRoundOfficiallyEnded>(OnRoundOfficiallyEnded);
         plugin.RegisterEventHandler<EventRoundAnnounceMatchStart>(OnRoundAnnounceMatchStart);
+        plugin.RegisterEventHandler<EventAnnouncePhaseEnd>(OnAnnouncePhaseEnd);
         plugin.RegisterEventHandler<EventCsWinPanelMatch>(OnMatchEnd);
+    }
+
+    // The halftime side swap (and each overtime half's).
+    private HookResult OnAnnouncePhaseEnd(EventAnnouncePhaseEnd @event, GameEventInfo info)
+    {
+        if (!_config.DeathmatchMode && (!_config.EnableScrim || _scrimManager.CurrentState is ScrimState.Live))
+            _pauseService.OnSidesSwapped();
+        return HookResult.Continue;
     }
 
     private void OnMapStart(string mapName)
@@ -79,6 +88,7 @@ public sealed class MatchFlowHandler : IGameHandler
         // lost and its baseline is applied to the next match.
         _matchStats.FinalizeMatch();
         _roundBackup.Reset();
+        _pauseService.Reset();
         _matchTracker.StartMatch(mapName);
         _scrimManager.HandleMapStart(mapName);
     }
@@ -94,6 +104,7 @@ public sealed class MatchFlowHandler : IGameHandler
         _matchStats.FinalizeMatch();
         _matchTracker.EndMatch();
         _roundBackup.Reset();
+        _pauseService.Reset();
         if (_config.EnableScrim) _scrimManager.HandleMatchEnd();
         _logger.LogInformation("Match ended; per-match statistics finalized.");
         return HookResult.Continue;
@@ -212,7 +223,8 @@ public sealed class MatchFlowHandler : IGameHandler
 
         if (_scrimManager.CurrentState == ScrimState.KnifeRound)
         {
-            _ = _scrimManager.HandleKnifeRoundEnd(winningTeamInt);
+            // knife.cfg ends warmup a few frames after the state changes; a warmup round is not the knife round.
+            if (!GameRulesState.IsWarmup) _ = _scrimManager.HandleKnifeRoundEnd(winningTeamInt);
             return HookResult.Continue;
         }
 
@@ -233,8 +245,10 @@ public sealed class MatchFlowHandler : IGameHandler
 
         _playerSessions.ForEachPlayer(stats =>
         {
-            // Spectators, casters and coaches have sessions too, but they did not play the round.
+            // Spectators, casters and coaches have sessions too, but they did not play the round; neither did someone
+            // who joined a team after the freeze end (which stamps the round number).
             if (stats.CurrentTeam is not (PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist)) return;
+            if (stats.Round.RoundNumber != _currentRoundNumber) return;
 
             stats.Round.RoundsPlayed++;
             if (winningTeam != PlayerTeam.Spectator && stats.CurrentTeam == winningTeam) stats.Round.RoundsWon++;
@@ -252,7 +266,8 @@ public sealed class MatchFlowHandler : IGameHandler
                 _lastTotals[stats.SteamId] = (player.Score, cashSpent);
                 if (observed)
                 {
-                    stats.Combat.Score += player.Score - last.Score;
+                    // Both engine counters restart at zero if a reconnecting player's match data is not restored.
+                    stats.Combat.Score += Math.Max(0, player.Score - last.Score);
                     stats.Economy.MoneySpent += Math.Max(0, cashSpent - last.CashSpent);
                 }
 

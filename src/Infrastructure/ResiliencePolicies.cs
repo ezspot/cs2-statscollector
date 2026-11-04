@@ -20,6 +20,10 @@ public static class ResiliencePolicies
         (ex.IsTransient && ex.InnerException is not AuthenticationException) ||
         ex.InnerException is IOException or SocketException;
 
+    // A failure that clears by itself: an unreachable or restarting database, or the breaker it opened.
+    public static bool IsOutage(Exception ex) =>
+        ex is BrokenCircuitException || (ex is MySqlException mysql && IsTransient(mysql));
+
     // Whether a failed write is worth keeping for later. Only an error in the write's own data fails the same way
     // however often it is retried. Everything else may clear: an outage, a restart, a failover's read-only window, an
     // account's connection limit, or a missing column or grant that an admin fixes. Those writes stay buffered.

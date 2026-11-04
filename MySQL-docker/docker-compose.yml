@@ -32,7 +32,8 @@ services:
       - mysql_data:/var/lib/mysql
       - ../database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p\"$$(cat /run/secrets/mysql_root_password)\" --silent"]
+      # TCP, not the socket: the entrypoint's temporary init server (which runs init.sql) answers on the socket only.
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 --protocol=tcp -uroot -p\"$$(cat /run/secrets/mysql_root_password)\" --silent"]
       interval: 10s
       timeout: 5s
       retries: 5

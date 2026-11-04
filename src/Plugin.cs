@@ -3,8 +3,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
-using CounterStrikeSharp.API.Core.Attributes.Registration;
-using CounterStrikeSharp.API.Modules.Commands;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -259,34 +257,6 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
                 _cancellationTokenSource.Dispose();
                 _serilog?.Dispose();
             }
-        }
-    }
-
-    [ConsoleCommand("css_recover_scrim", "Recover the last active scrim state after a server crash")]
-    [CommandHelper(whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
-    public void OnRecoverScrimCommand(CCSPlayerController? player, CommandInfo info)
-    {
-        if (player != null && !AdminUtils.HasPermission(player, "@css/admin"))
-        {
-            player.PrintToChat(" [Scrim] You do not have permission to run this command.");
-            return;
-        }
-
-        if (_serviceProvider == null) return;
-        var scrimManager = _serviceProvider.GetRequiredService<IScrimManager>();
-
-        _ = RecoverScrimAsync(scrimManager);
-    }
-
-    private async Task RecoverScrimAsync(IScrimManager scrimManager)
-    {
-        try
-        {
-            await scrimManager.RecoverAsync().ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error during scrim recovery command");
         }
     }
 }

@@ -277,7 +277,7 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
             }
             else
             {
-                command.ReplyToCommand($" [statsCollector] No backup of round {roundNumber}. Round backups need the -allow_round_backup_files server launch flag.");
+                command.ReplyToCommand($" [statsCollector] No backup of round {roundNumber}: the plugin must have seen it start, and round backups need the -allow_round_backup_files server launch flag.");
             }
         }
     }

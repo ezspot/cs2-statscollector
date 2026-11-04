@@ -18,6 +18,7 @@ public interface IPositionTrackingService
     Task BulkTrackKillPositionsAsync(IEnumerable<KillPositionEvent> events, CancellationToken cancellationToken = default);
     Task BulkTrackDeathPositionsAsync(IEnumerable<DeathPositionEvent> events, CancellationToken cancellationToken = default);
     Task BulkTrackUtilityPositionsAsync(IEnumerable<UtilityPositionEvent> events, CancellationToken cancellationToken = default);
+    Task VoidRoundPositionsAsync(string matchUuid, int fromRound, CancellationToken cancellationToken = default);
 }
 
 public sealed class PositionTrackingService : IPositionTrackingService
@@ -98,6 +99,10 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 JOIN matches m ON t.match_uuid = m.match_uuid;
                 """;
 
+            // The match row normally comes from the stats channel; after an outage it can still be queued there.
+            await ExecuteAsync(connection,
+                "INSERT IGNORE INTO matches (match_uuid, map_name) SELECT DISTINCT match_uuid, map_name FROM temp_kill_positions_uuid;",
+                ct).ConfigureAwait(false);
             // MySQL can't reference a TEMPORARY table twice in one statement (ERROR 1137), so one insert per side.
             await ExecuteAsync(connection,
                 "INSERT IGNORE INTO players (steam_id) SELECT DISTINCT killer_steam_id FROM temp_kill_positions_uuid;",
@@ -157,6 +162,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 JOIN matches m ON t.match_uuid = m.match_uuid;
                 """;
 
+            await ExecuteAsync(connection, "INSERT IGNORE INTO matches (match_uuid, map_name) SELECT DISTINCT match_uuid, map_name FROM temp_death_positions_uuid;", ct).ConfigureAwait(false);
             await ExecuteAsync(connection, "INSERT IGNORE INTO players (steam_id) SELECT DISTINCT steam_id FROM temp_death_positions_uuid;", ct).ConfigureAwait(false);
             var inserted = await ExecuteAsync(connection, mergeSql, ct).ConfigureAwait(false);
             if (inserted != eventList.Count) throw new InvalidOperationException("Death positions could not resolve their match UUID.");
@@ -228,12 +234,24 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 JOIN matches m ON t.match_uuid = m.match_uuid;
                 """;
 
+            await ExecuteAsync(connection, "INSERT IGNORE INTO matches (match_uuid, map_name) SELECT DISTINCT match_uuid, map_name FROM temp_utility_positions_uuid;", ct).ConfigureAwait(false);
             await ExecuteAsync(connection, "INSERT IGNORE INTO players (steam_id) SELECT DISTINCT steam_id FROM temp_utility_positions_uuid;", ct).ConfigureAwait(false);
             var inserted = await ExecuteAsync(connection, mergeSql, ct).ConfigureAwait(false);
             if (inserted != eventList.Count) throw new InvalidOperationException("Utility positions could not resolve their match UUID.");
 
         }, cancellationToken).ConfigureAwait(false);
     }
+
+    public Task VoidRoundPositionsAsync(string matchUuid, int fromRound, CancellationToken cancellationToken = default) =>
+        _resiliencePipeline.ExecuteAsync(async ct =>
+        {
+            await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            await connection.ExecuteAsync(new CommandDefinition("""
+                DELETE t FROM kill_positions t JOIN matches m ON t.match_id = m.id WHERE m.match_uuid = @MatchUuid AND t.round_number >= @FromRound;
+                DELETE t FROM death_positions t JOIN matches m ON t.match_id = m.id WHERE m.match_uuid = @MatchUuid AND t.round_number >= @FromRound;
+                DELETE t FROM utility_positions t JOIN matches m ON t.match_id = m.id WHERE m.match_uuid = @MatchUuid AND t.round_number >= @FromRound;
+                """, new { MatchUuid = matchUuid, FromRound = fromRound }, cancellationToken: ct)).ConfigureAwait(false);
+        }, cancellationToken).AsTask();
 
     private static Task<int> ExecuteAsync(MySqlConnection connection, string sql, CancellationToken cancellationToken) =>
         connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: cancellationToken));

@@ -119,7 +119,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         dispatcher.Subscribe<EventWeaponFire>((e, i) => { HandleWeaponFire(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventRoundMvp>((e, i) => { HandleRoundMvp(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventPlayerAvengedTeammate>((e, i) => { HandlePlayerAvengedTeammate(e); return HookResult.Continue; });
-        dispatcher.Subscribe<EventPlayerSpawned>((e, i) => { HandlePlayerSpawned(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventPlayerSpawn>((e, i) => { HandlePlayerSpawn(e); return HookResult.Continue; });
         dispatcher.Subscribe<EventPlayerDisconnect>((e, i) => { HandlePlayerDisconnected(e); return HookResult.Continue; });
     }
 
@@ -227,7 +227,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 _playerTeams[victimIndex] = victimTeam;
 
                 var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
-                if (victimState.PawnHandle != 0 && _config.CurrentValue.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
+                // Round 0: no freeze end seen yet (loaded mid-round), so there is no round to attribute the position to.
+                if (victimState.PawnHandle != 0 && _currentRoundNumber > 0 && _config.CurrentValue.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
                 {
                     var posEvent = _positionPersistence.GetDeathEvent();
 
@@ -250,7 +251,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 {
                     stats.Round.SurvivedThisRound = false;
                     stats.Combat.Deaths++;
-                    stats.Combat.CurrentRoundDeaths++;
                     stats.CurrentTeam = victimTeam;
 
                     // Entry Death tracking
@@ -299,7 +299,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 }
 
                 var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
-                if (attackerState.PawnHandle != 0 && victimState.PawnHandle != 0 && _config.CurrentValue.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
+                if (attackerState.PawnHandle != 0 && victimState.PawnHandle != 0 && _currentRoundNumber > 0 && _config.CurrentValue.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
                 {
                     var killDistance = @event.GetFloatValue("distance", 0f);
                     var posEvent = _positionPersistence.GetKillEvent();
@@ -364,7 +364,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
                     _playerRoundKills[attackerIndex]++;
                     var killsThisRound = _playerRoundKills[attackerIndex];
-                    stats.Combat.CurrentRoundKills = killsThisRound;
 
                     // Tiers are exact: a round moves up a tier with each kill, so a 3k is not also a 2k.
                     switch (killsThisRound)
@@ -544,7 +543,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     return;
 
                 stats.Combat.ShotsFired++;
-                stats.Combat.CurrentRoundShotsFired++;
                 // weapon_fire reports "weapon_ak47"; player_hurt/player_death report "ak47". Key shots the same way
                 // so a weapon's shots, hits and kills land in one match_weapon_stats row.
                 stats.Weapon.RecordShot(NormalizeWeaponName(weaponLower));
@@ -592,7 +590,9 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         catch (Exception ex) { _logger.LogError(ex, "Error handling player avenged teammate event"); }
     }
 
-    private void HandlePlayerSpawned(EventPlayerSpawned @event)
+    // player_spawned is a CS:GO-era event CS2 does not fire; a player spawning after the freeze end (a joiner) would
+    // otherwise stay out of the alive counts for the round.
+    private void HandlePlayerSpawn(EventPlayerSpawn @event)
     {
         try
         {
@@ -643,6 +643,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 _playerTeams[playerIndex] = PlayerTeam.Spectator;
                 _playerRoundKills[playerIndex] = 0;
                 _playerRoundNadeKills[playerIndex] = 0;
+                // A teammate leaving starts a 1vX as a death does.
+                CaptureClutchCandidate();
             }
         }
         catch (Exception ex) { _logger.LogError(ex, "Error handling player disconnected event"); }

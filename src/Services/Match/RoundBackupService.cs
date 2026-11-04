@@ -35,6 +35,7 @@ public sealed class RoundBackupService(
     IGameScheduler scheduler,
     IPlayerSessionService playerSessions,
     IPersistenceChannel persistenceChannel,
+    IPositionPersistenceService positionPersistence,
     IMatchTrackingService matchTracker,
     IMatchStatsService matchStats) : IRoundBackupService
 {
@@ -140,7 +141,10 @@ public sealed class RoundBackupService(
     private void RollBackStats(int roundNumber, RoundStart start)
     {
         if (matchTracker.CurrentMatch?.MatchUuid is { } matchUuid)
-            persistenceChannel.TryWrite(new RoundsVoidedUpdate(matchUuid, roundNumber, DateTime.UtcNow));
+        {
+            persistenceChannel.TryWrite(new RoundsVoidedUpdate(matchUuid, roundNumber));
+            positionPersistence.VoidRounds(matchUuid, roundNumber);
+        }
 
         var restarted = new List<PlayerSnapshot>();
         var left = new List<PlayerSnapshot>();

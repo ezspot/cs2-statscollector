@@ -126,8 +126,9 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         }
         finally
         {
-            // Position writes are independent of the stats channel; flush them even if its final flush failed.
-            await _positionPersistence.StopAsync(TimeSpan.FromSeconds(10), cancellationToken);
+            // Position writes are independent of the stats channel; flush them even if its final flush failed or used
+            // up the unload time.
+            await _positionPersistence.StopAsync(TimeSpan.FromSeconds(10), CancellationToken.None);
         }
 
         _logger.LogInformation("Plugin lifecycle stopped.");

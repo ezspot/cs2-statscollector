@@ -48,9 +48,6 @@ public sealed class CombatStats
     private int _mvpsBomb;
     private decimal _clutchPoints;
     private int _revenges;
-    private int _currentRoundKills;
-    private int _currentRoundDeaths;
-    private int _currentRoundShotsFired;
 
     private int _multiKillNades;
     private int _nadeKills;
@@ -114,9 +111,6 @@ public sealed class CombatStats
     public int MvpsEliminations { get => _mvpsEliminations; set { _mvpsEliminations = value; _markDirty(); } }
     public int MvpsBomb { get => _mvpsBomb; set { _mvpsBomb = value; _markDirty(); } }
     public decimal ClutchPoints { get => _clutchPoints; set { _clutchPoints = value; _markDirty(); } }
-    public int CurrentRoundKills { get => _currentRoundKills; set { _currentRoundKills = value; _markDirty(); } }
-    public int CurrentRoundDeaths { get => _currentRoundDeaths; set { _currentRoundDeaths = value; _markDirty(); } }
-    public int CurrentRoundShotsFired { get => _currentRoundShotsFired; set { _currentRoundShotsFired = value; _markDirty(); } }
 
     public int MultiKillNades { get => _multiKillNades; set { _multiKillNades = value; _markDirty(); } }
     public int NadeKills { get => _nadeKills; set { _nadeKills = value; _markDirty(); } }
@@ -139,7 +133,6 @@ public sealed class CombatStats
         _clutchPoints = 0;
         _headshotsHit = _chestHits = _stomachHits = _armHits = _legHits = 0;
         _lowImpactKills = 0;
-        _currentRoundKills = _currentRoundDeaths = _currentRoundShotsFired = 0;
         _multiKillNades = _nadeKills = _highImpactKills = 0;
         _roundSwing = _currentRoundSwing = 0;
         _markDirty();
