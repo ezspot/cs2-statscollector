@@ -5,7 +5,9 @@ A CounterStrikeSharp plugin for CS2 that collects detailed player statistics int
 ## Features
 - **Relational match tracking** — `matches` and `rounds` are tracked automatically, with optional `series_uuid` to group BO3/BO5 series.
 - **Lifetime player stats** — 100+ aggregated metrics per player (combat, utility, economy, bomb, clutch, entry). Career totals are **seeded from the database on connect**, so they accumulate correctly across reconnects and across multiple servers sharing one database (see *Multi-server* below).
-- **Per-match stats** — `match_player_stats` / `match_weapon_stats` populated at match end from start-of-match deltas, with a community Rating 2.0 approximation (HLTV's exact formula is not public).
+- **Per-match stats** — `match_player_stats` / `match_weapon_stats` populated at match end from start-of-match deltas: the whole match (rounds and sides, utility, trades, clutches by 1vX, bomb, economy, pistol rounds, per-weapon headshots, damage and deaths), with a community Rating 2.0 approximation (HLTV's exact formula is not public).
+- **Per-round rows** — `player_round_stats` holds every player's numbers for every round (kills, damage, survival, trade, clutch, bomb, MVP, money and equipment), and `rounds` the round's buy (both sides' start money and equipment value) and bomb (site, plant time, time left at the defuse).
+- **Engine cross-check** — at match end the engine's own per-match counters (`CSMatchStats_t`) are compared with the recorded ones; a difference in kills, deaths, assists or headshot kills is logged as a warning, the counters the engine defines differently as information.
 - **Spatial data** — kill / death / utility positions stored as MySQL `POINT` with spatial indexes for heatmaps.
 - **Non-blocking persistence** — game-thread events are snapshotted and written to MySQL on bounded background channels; overload is logged instead of blocking the game thread.
 - **Dirty-flag flushing** — only players whose stats changed are written on each auto-save.
@@ -84,7 +86,7 @@ See `config.sample.json` for the full set of options (persistence, trade window,
 
 For an existing database, treat `database/init.sql` as a bootstrap script rather than a migration.
 When upgrading, apply each SQL file under `database/migrations/` that has not been applied yet, in numeric
-order. 001, 002 and 005 are not idempotent (MySQL has no `ADD COLUMN IF NOT EXISTS`, so a re-run fails with error 1060);
+order. 001, 002, 005 and 006 are not idempotent (MySQL has no `ADD COLUMN IF NOT EXISTS`, so a re-run fails with error 1060);
 003 and 004 can be run again. A fresh `init.sql` already includes them, and `AutoCreateSchema` applies them itself (it
 adds missing columns and indexes and widens narrower columns before running `init.sql`). The Docker image runs
 `init.sql` only on an empty volume.
@@ -99,6 +101,13 @@ adds missing columns and indexes and widens narrower columns before running `ini
   times out, leaving the voided rounds' heatmap rows in place.
 - `005_add_engine_counters_and_clutch_split.sql` adds team kills, suicides and 1v1 to 1v5 clutch attempts and wins,
   and the engine's own kill reward, cash earned, money saved and time alive (`live_time`, the engine's `m_iLiveTime`).
+- `006_add_round_rows_side_split_and_weapon_detail.sql` adds the `player_round_stats` table; the CT/T split of kills,
+  deaths, damage, first kills and deaths and rounds won, the rounds survived and traded, the rounds with exactly one
+  kill (`multi_kill_1`), pistol rounds played, won and their kills, team damage and kill distances (meters, as
+  `player_death` reports them) to `player_stats`; the whole match to `match_player_stats`; headshots, damage and deaths
+  to `match_weapon_stats`; and the buy and bomb columns to `rounds`. It drops `player_stats.defuser_drops` and
+  `effective_smokes`, which nothing ever incremented (CS2 has no defuser-drop event, and no definition of an effective
+  smoke); a database created by an older build keeps them until the migration or `AutoCreateSchema` runs.
 - If `SHOW COLUMNS FROM player_stats LIKE 'round_swing';` returns nothing (databases created by v3.1.0 or older, which
   every lifetime write fails on), `AutoCreateSchema` adds the column. By hand, run this before migration 001, and run
   `init.sql` once more after the migrations to re-create the views:
@@ -137,9 +146,10 @@ underscore is ignored. List options such as `Scrim__MapPool__0` are appended to 
 ## Data model
 - `players` — registry with first/last seen timestamps.
 - `player_stats` — lifetime aggregated statistics, including exact KAST, multi-kill, clutch, and bomb-event counters.
-- `matches` / `rounds` — match and round lifecycle, including the official round-end timestamp.
+- `matches` / `rounds` — match and round lifecycle, including the official round-end timestamp, both sides' start money and equipment value at freeze end, and the bomb's site, plant time and the seconds left when it was defused.
+- `player_round_stats` — one row per player per round: their totals at round end minus those at round start (kills, damage, utility, trades, clutch 1vX, bomb, MVP, money, kill reward, round swing) and the round's flags (side, won, pistol round, survived, KAST). Written at round end and again at the official round end; a round restore removes the voided rounds' rows.
 - `kill_positions` / `death_positions` / `utility_positions` — spatial event data linked to a match; utility rows include entity and lifecycle event metadata.
-- `match_player_stats` / `match_weapon_stats` — per-match performance and weapon breakdowns (written at match end).
+- `match_player_stats` / `match_weapon_stats` — per-match performance (the whole match, from start-of-match deltas) and weapon breakdowns with kills, headshots, shots, hits, damage and deaths by weapon (written at match end).
 - `player_advanced_analytics` — temporal performance snapshots (Rating 2.0, Impact, KAST, ADR).
 
 ### Dashboard views
@@ -190,6 +200,8 @@ Flow: CS2 event → event processor → `PlayerSessionService` (per-player locke
 
 ## Development
 - Build: `dotnet build -c Release`
+- Test: `dotnet test tests/statsCollector.Tests` (xunit; covers the counters, the snapshot plumbing, the match and
+  round deltas, the per-match SQL column lists against `init.sql`, and the position writer's restore ordering)
 - Publish: `dotnet publish -c Release -o out`
 - Requirements: .NET 10 SDK
 

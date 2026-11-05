@@ -1,5 +1,6 @@
 using System;
 using Microsoft.Extensions.Logging;
+using statsCollector.Domain;
 
 namespace statsCollector.Services;
 
@@ -10,7 +11,8 @@ public interface IMatchTrackingService
     void StartMatch(string mapName, string? seriesUuid = null);
     void EndMatch();
     void StartRound(int roundNumber);
-    void EndRound(int roundNumber, int winnerTeam, int winType);
+    void EndRound(int roundNumber, int winnerTeam, int winType, RoundBombInfo bomb);
+    void RecordRoundEconomy(int roundNumber, RoundEconomy economy);
     float GetRoundWinProbability(int ctAlive, int tAlive);
     MatchContext? CurrentMatch { get; }
 }
@@ -84,18 +86,16 @@ public sealed class MatchTrackingService : IMatchTrackingService
         }
     }
 
-    public void EndRound(int roundNumber, int winnerTeam, int winType)
+    public void EndRound(int roundNumber, int winnerTeam, int winType, RoundBombInfo bomb)
     {
-        string? uuid;
-        lock (_lock)
-        {
-            uuid = _currentMatch?.MatchUuid;
-        }
+        if (CurrentMatch?.MatchUuid is { } uuid)
+            _persistenceChannel.TryWrite(new RoundEndUpdate(uuid, roundNumber, winnerTeam, winType, bomb));
+    }
 
-        if (uuid != null)
-        {
-            _persistenceChannel.TryWrite(new RoundEndUpdate(uuid, roundNumber, winnerTeam, winType));
-        }
+    public void RecordRoundEconomy(int roundNumber, RoundEconomy economy)
+    {
+        if (CurrentMatch?.MatchUuid is { } uuid)
+            _persistenceChannel.TryWrite(new RoundEconomyUpdate(uuid, roundNumber, economy));
     }
 
     // CT round-win rate by players alive (row = Ts alive, column = CTs alive, 1..5), measured over 400k+ CS:GO

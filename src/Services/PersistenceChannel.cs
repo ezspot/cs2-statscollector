@@ -22,8 +22,16 @@ public sealed record MatchPlayerStatsUpdate(PlayerSnapshot Snapshot, PlayerAnaly
 public sealed record RoundStartUpdate(string MatchId, int Number)
     : StatsUpdate(MatchId, Number);
 
-public sealed record RoundEndUpdate(string MatchId, int Number, int WinnerTeam, int WinReason)
+public sealed record RoundEndUpdate(string MatchId, int Number, int WinnerTeam, int WinReason, RoundBombInfo Bomb)
     : StatsUpdate(MatchId, Number);
+
+/// <summary>Both sides' money at round start and equipment value at freeze end.</summary>
+public sealed record RoundEconomyUpdate(string MatchId, int Number, RoundEconomy Economy)
+    : StatsUpdate(MatchId, Number);
+
+/// <summary>A player's totals over one round: their snapshot at round end minus the one at round start.</summary>
+public sealed record PlayerRoundStatsUpdate(PlayerSnapshot RoundDelta)
+    : StatsUpdate(RoundDelta.MatchUuid, RoundDelta.RoundNumber, RoundDelta.SteamId);
 
 public sealed record RoundOfficialEndUpdate(string MatchId, int Number)
     : StatsUpdate(MatchId, Number);
@@ -275,6 +283,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
         var matchSummaries = new List<PlayerSnapshot>();
         var weaponStats = new List<PlayerSnapshot>();
         var analytics = new List<PlayerAnalyticsSnapshot>();
+        var roundStats = new List<PlayerSnapshot>();
 
         foreach (var update in batch)
         {
@@ -291,8 +300,14 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                 case RoundStartUpdate roundStart:
                     await _repository.StartRoundAsync(roundStart.MatchId, roundStart.Number, cancellationToken).ConfigureAwait(false);
                     break;
+                case PlayerRoundStatsUpdate playerRound:
+                    roundStats.Add(playerRound.RoundDelta);
+                    break;
                 case RoundEndUpdate roundEnd:
-                    await _repository.EndRoundAsync(roundEnd.MatchId, roundEnd.Number, roundEnd.WinnerTeam, roundEnd.WinReason, cancellationToken).ConfigureAwait(false);
+                    await _repository.EndRoundAsync(roundEnd.MatchId, roundEnd.Number, roundEnd.WinnerTeam, roundEnd.WinReason, roundEnd.Bomb, cancellationToken).ConfigureAwait(false);
+                    break;
+                case RoundEconomyUpdate economy:
+                    await _repository.UpdateRoundEconomyAsync(economy.MatchId, economy.Number, economy.Economy, cancellationToken).ConfigureAwait(false);
                     break;
                 case RoundOfficialEndUpdate officialEnd:
                     await _repository.OfficiallyEndRoundAsync(officialEnd.MatchId, officialEnd.Number, cancellationToken).ConfigureAwait(false);
@@ -313,6 +328,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
         if (matchSummaries.Count > 0) await _repository.UpsertMatchSummariesAsync(matchSummaries, cancellationToken).ConfigureAwait(false);
         if (weaponStats.Count > 0) await _repository.UpsertMatchWeaponStatsAsync(weaponStats, cancellationToken).ConfigureAwait(false);
         if (analytics.Count > 0) await _repository.UpsertPlayerAnalyticsAsync(analytics, cancellationToken).ConfigureAwait(false);
+        if (roundStats.Count > 0) await _repository.UpsertPlayerRoundStatsAsync(roundStats, cancellationToken).ConfigureAwait(false);
 
         _logger.LogDebug("Processed persistence batch of {Count} items", batch.Count);
     }

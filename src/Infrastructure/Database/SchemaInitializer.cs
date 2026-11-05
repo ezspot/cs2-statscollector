@@ -130,6 +130,110 @@ public sealed class SchemaInitializer(
                 ("money_saved", "INT NOT NULL DEFAULT 0 AFTER `cash_earned`"),
                 ("live_time", "INT NOT NULL DEFAULT 0 AFTER `money_saved`")
             ], cancellationToken).ConfigureAwait(false);
+        // Migration 006: the side split, KAST parts, pistol rounds, team damage and kill distances; the whole match on
+        // match_player_stats; headshots, damage and deaths per weapon; the round's buy and bomb; and two columns nothing
+        // ever incremented go.
+        migratedColumns += await EnsureColumnsAsync(connection, databaseName, "player_stats", Chain("live_time",
+            ("team_damage", "INT NOT NULL DEFAULT 0"),
+            ("multi_kill_1", "INT NOT NULL DEFAULT 0"),
+            ("ct_kills", "INT NOT NULL DEFAULT 0"),
+            ("t_kills", "INT NOT NULL DEFAULT 0"),
+            ("ct_deaths", "INT NOT NULL DEFAULT 0"),
+            ("t_deaths", "INT NOT NULL DEFAULT 0"),
+            ("ct_damage", "INT NOT NULL DEFAULT 0"),
+            ("t_damage", "INT NOT NULL DEFAULT 0"),
+            ("ct_first_kills", "INT NOT NULL DEFAULT 0"),
+            ("t_first_kills", "INT NOT NULL DEFAULT 0"),
+            ("ct_first_deaths", "INT NOT NULL DEFAULT 0"),
+            ("t_first_deaths", "INT NOT NULL DEFAULT 0"),
+            ("rounds_survived", "INT NOT NULL DEFAULT 0"),
+            ("rounds_traded", "INT NOT NULL DEFAULT 0"),
+            ("ct_rounds_won", "INT NOT NULL DEFAULT 0"),
+            ("t_rounds_won", "INT NOT NULL DEFAULT 0"),
+            ("pistol_rounds_played", "INT NOT NULL DEFAULT 0"),
+            ("pistol_rounds_won", "INT NOT NULL DEFAULT 0"),
+            ("pistol_round_kills", "INT NOT NULL DEFAULT 0"),
+            ("kill_distance_total", "DECIMAL(12,2) NOT NULL DEFAULT 0"),
+            ("longest_kill", "DECIMAL(8,2) NOT NULL DEFAULT 0")), cancellationToken).ConfigureAwait(false);
+        migratedColumns += await DropColumnsAsync(connection, databaseName, "player_stats", ["defuser_drops", "effective_smokes"], cancellationToken).ConfigureAwait(false);
+        migratedColumns += await EnsureColumnsAsync(connection, databaseName, "match_player_stats", Chain("entry_kill_attempt_wins",
+            ("rounds_played", "INT DEFAULT 0"),
+            ("rounds_won", "INT DEFAULT 0"),
+            ("ct_rounds", "INT DEFAULT 0"),
+            ("t_rounds", "INT DEFAULT 0"),
+            ("ct_rounds_won", "INT DEFAULT 0"),
+            ("t_rounds_won", "INT DEFAULT 0"),
+            ("kast_rounds", "INT DEFAULT 0"),
+            ("rounds_survived", "INT DEFAULT 0"),
+            ("rounds_traded", "INT DEFAULT 0"),
+            ("damage_taken", "INT DEFAULT 0"),
+            ("team_damage", "INT DEFAULT 0"),
+            ("team_kills", "INT DEFAULT 0"),
+            ("suicides", "INT DEFAULT 0"),
+            ("utility_damage", "INT DEFAULT 0"),
+            ("enemies_flashed", "INT DEFAULT 0"),
+            ("flash_assists", "INT DEFAULT 0"),
+            ("flashes_thrown", "INT DEFAULT 0"),
+            ("smokes_thrown", "INT DEFAULT 0"),
+            ("he_grenades_thrown", "INT DEFAULT 0"),
+            ("molotovs_thrown", "INT DEFAULT 0"),
+            ("trade_kills", "INT DEFAULT 0"),
+            ("traded_deaths", "INT DEFAULT 0"),
+            ("first_kills", "INT DEFAULT 0"),
+            ("first_deaths", "INT DEFAULT 0"),
+            ("multi_kill_1", "INT DEFAULT 0"),
+            ("multi_kill_2", "INT DEFAULT 0"),
+            ("multi_kill_3", "INT DEFAULT 0"),
+            ("multi_kill_4", "INT DEFAULT 0"),
+            ("multi_kill_5", "INT DEFAULT 0"),
+            ("clutches_won", "INT DEFAULT 0"),
+            ("clutches_lost", "INT DEFAULT 0"),
+            ("clutch_1v1_attempts", "INT DEFAULT 0"),
+            ("clutch_1v1_wins", "INT DEFAULT 0"),
+            ("clutch_1v2_attempts", "INT DEFAULT 0"),
+            ("clutch_1v2_wins", "INT DEFAULT 0"),
+            ("clutch_1v3_attempts", "INT DEFAULT 0"),
+            ("clutch_1v3_wins", "INT DEFAULT 0"),
+            ("clutch_1v4_attempts", "INT DEFAULT 0"),
+            ("clutch_1v4_wins", "INT DEFAULT 0"),
+            ("clutch_1v5_attempts", "INT DEFAULT 0"),
+            ("clutch_1v5_wins", "INT DEFAULT 0"),
+            ("bomb_plants", "INT DEFAULT 0"),
+            ("bomb_defuses", "INT DEFAULT 0"),
+            ("shots_fired", "INT DEFAULT 0"),
+            ("shots_hit", "INT DEFAULT 0"),
+            ("wallbang_kills", "INT DEFAULT 0"),
+            ("noscope_kills", "INT DEFAULT 0"),
+            ("thru_smoke_kills", "INT DEFAULT 0"),
+            ("attacker_blind_kills", "INT DEFAULT 0"),
+            ("money_spent", "INT DEFAULT 0"),
+            ("kill_reward", "INT DEFAULT 0"),
+            ("cash_earned", "INT DEFAULT 0"),
+            ("ct_kills", "INT DEFAULT 0"),
+            ("t_kills", "INT DEFAULT 0"),
+            ("ct_deaths", "INT DEFAULT 0"),
+            ("t_deaths", "INT DEFAULT 0"),
+            ("ct_damage", "INT DEFAULT 0"),
+            ("t_damage", "INT DEFAULT 0"),
+            ("pistol_rounds_played", "INT DEFAULT 0"),
+            ("pistol_rounds_won", "INT DEFAULT 0"),
+            ("pistol_round_kills", "INT DEFAULT 0"),
+            ("kill_distance_total", "DECIMAL(12,2) DEFAULT 0"),
+            ("round_swing", "DECIMAL(10,3) DEFAULT 0")), cancellationToken).ConfigureAwait(false);
+        migratedColumns += await EnsureColumnsAsync(connection, databaseName, "match_weapon_stats",
+            [
+                ("headshots", "INT DEFAULT 0 AFTER `kills`"),
+                ("damage", "INT DEFAULT 0 AFTER `hits`"),
+                ("deaths", "INT DEFAULT 0 AFTER `damage`")
+            ], cancellationToken).ConfigureAwait(false);
+        migratedColumns += await EnsureColumnsAsync(connection, databaseName, "rounds", Chain("win_type",
+            ("ct_start_money", "INT NULL"),
+            ("t_start_money", "INT NULL"),
+            ("ct_equipment_value", "INT NULL"),
+            ("t_equipment_value", "INT NULL"),
+            ("bomb_site", "CHAR(1) NULL"),
+            ("bomb_plant_time", "DECIMAL(6,1) NULL"),
+            ("defuse_time_left", "DECIMAL(5,2) NULL")), cancellationToken).ConfigureAwait(false);
         // v3.0.0 (2026-01-01) match tables, which every match-end write needs.
         foreach (var (table, after) in new[] { ("match_player_stats", "entry_kill_attempt_wins"), ("match_weapon_stats", "hits") })
         {
@@ -171,6 +275,49 @@ public sealed class SchemaInitializer(
         return reader.ReadToEnd();
     }
 
+    // Each column placed after the previous one, the first after `after`.
+    private static (string Name, string Definition)[] Chain(string after, params (string Name, string Type)[] columns)
+    {
+        var result = new (string, string)[columns.Length];
+        for (var i = 0; i < columns.Length; i++)
+        {
+            result[i] = (columns[i].Name, $"{columns[i].Type} AFTER `{(i == 0 ? after : columns[i - 1].Name)}`");
+        }
+        return result;
+    }
+
+    private static async Task<HashSet<string>> ExistingColumnsAsync(MySqlConnection connection, string databaseName, string tableName, CancellationToken cancellationToken)
+    {
+        const string query = """
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = @DatabaseName AND TABLE_NAME = @TableName;
+            """;
+        return (await connection.QueryAsync<string>(new CommandDefinition(
+                query,
+                new { DatabaseName = databaseName, TableName = tableName },
+                cancellationToken: cancellationToken)).ConfigureAwait(false))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static async Task<int> DropColumnsAsync(
+        MySqlConnection connection,
+        string databaseName,
+        string tableName,
+        IReadOnlyList<string> columns,
+        CancellationToken cancellationToken)
+    {
+        var existing = await ExistingColumnsAsync(connection, databaseName, tableName, cancellationToken).ConfigureAwait(false);
+        var present = columns.Where(existing.Contains).ToArray();
+        if (present.Length == 0) return 0;
+
+        var clauses = string.Join(", ", present.Select(column => $"DROP COLUMN `{column}`"));
+        await connection.ExecuteAsync(new CommandDefinition(
+            $"ALTER TABLE `{tableName}` {clauses};",
+            cancellationToken: cancellationToken)).ConfigureAwait(false);
+        return present.Length;
+    }
+
     private static async Task<int> EnsureColumnsAsync(
         MySqlConnection connection,
         string databaseName,
@@ -178,16 +325,7 @@ public sealed class SchemaInitializer(
         IReadOnlyList<(string Name, string Definition)> columns,
         CancellationToken cancellationToken)
     {
-        const string query = """
-            SELECT COLUMN_NAME
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = @DatabaseName AND TABLE_NAME = @TableName;
-            """;
-        var existing = (await connection.QueryAsync<string>(new CommandDefinition(
-                query,
-                new { DatabaseName = databaseName, TableName = tableName },
-                cancellationToken: cancellationToken)).ConfigureAwait(false))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var existing = await ExistingColumnsAsync(connection, databaseName, tableName, cancellationToken).ConfigureAwait(false);
         if (existing.Count == 0) return 0; // no such table yet; the script creates it
 
         var missing = columns.Where(column => !existing.Contains(column.Name)).ToArray();

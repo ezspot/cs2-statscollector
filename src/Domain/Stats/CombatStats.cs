@@ -54,6 +54,13 @@ public sealed class CombatStats
     private int _highImpactKills;
     private int _teamKills;
     private int _suicides;
+    private int _teamDamage;
+    private int _multiKill1;
+    private int _pistolRoundKills;
+    private int _ctKills, _tKills, _ctDeaths, _tDeaths, _ctDamage, _tDamage;
+    private int _ctFirstKills, _tFirstKills, _ctFirstDeaths, _tFirstDeaths;
+    private decimal _killDistanceTotal;
+    private decimal _longestKill;
     // 1vX clutch attempts and wins by opponents alive when the player became the last of their team, index 1..5
     // (six or more opponents count as 1v5).
     private readonly int[] _clutchAttempts = new int[6];
@@ -123,6 +130,24 @@ public sealed class CombatStats
     public int HighImpactKills { get => _highImpactKills; set { _highImpactKills = value; _markDirty(); } }
     public int TeamKills { get => _teamKills; set { _teamKills = value; _markDirty(); } }
     public int Suicides { get => _suicides; set { _suicides = value; _markDirty(); } }
+    // HP removed from teammates; kept out of DamageDealt.
+    public int TeamDamage { get => _teamDamage; set { _teamDamage = value; _markDirty(); } }
+    // Rounds with exactly one kill. The tiers are exclusive: a round counts in one of MultiKill1..5.
+    public int MultiKill1 { get => _multiKill1; set { _multiKill1 = value; _markDirty(); } }
+    public int PistolRoundKills { get => _pistolRoundKills; set { _pistolRoundKills = value; _markDirty(); } }
+    public int CtKills { get => _ctKills; set { _ctKills = value; _markDirty(); } }
+    public int TKills { get => _tKills; set { _tKills = value; _markDirty(); } }
+    public int CtDeaths { get => _ctDeaths; set { _ctDeaths = value; _markDirty(); } }
+    public int TDeaths { get => _tDeaths; set { _tDeaths = value; _markDirty(); } }
+    public int CtDamage { get => _ctDamage; set { _ctDamage = value; _markDirty(); } }
+    public int TDamage { get => _tDamage; set { _tDamage = value; _markDirty(); } }
+    public int CtFirstKills { get => _ctFirstKills; set { _ctFirstKills = value; _markDirty(); } }
+    public int TFirstKills { get => _tFirstKills; set { _tFirstKills = value; _markDirty(); } }
+    public int CtFirstDeaths { get => _ctFirstDeaths; set { _ctFirstDeaths = value; _markDirty(); } }
+    public int TFirstDeaths { get => _tFirstDeaths; set { _tFirstDeaths = value; _markDirty(); } }
+    // Kill distances in meters, as player_death reports them.
+    public decimal KillDistanceTotal { get => _killDistanceTotal; set { _killDistanceTotal = value; _markDirty(); } }
+    public decimal LongestKill { get => _longestKill; set { _longestKill = value; _markDirty(); } }
     public int Clutch1v1Attempts { get => _clutchAttempts[1]; set { _clutchAttempts[1] = value; _markDirty(); } }
     public int Clutch1v1Wins { get => _clutchWins[1]; set { _clutchWins[1] = value; _markDirty(); } }
     public int Clutch1v2Attempts { get => _clutchAttempts[2]; set { _clutchAttempts[2] = value; _markDirty(); } }
@@ -138,6 +163,27 @@ public sealed class CombatStats
         var bucket = Math.Clamp(opponents, 1, 5);
         _clutchAttempts[bucket]++;
         if (won) _clutchWins[bucket]++;
+        _markDirty();
+    }
+
+    // The attacker's kill number killsThisRound in the round: the round moves up a tier with each kill.
+    public void RecordRoundKill(int killsThisRound)
+    {
+        switch (killsThisRound)
+        {
+            case 1: _multiKill1++; break;
+            case 2: _multiKill1--; _multiKill2++; break;
+            case 3: _multiKill2--; _multiKill3++; break;
+            case 4: _multiKill3--; _multiKill4++; break;
+            case 5: _multiKill4--; _multiKill5++; break;
+        }
+        _markDirty();
+    }
+
+    public void RecordKillDistance(decimal meters)
+    {
+        _killDistanceTotal += meters;
+        if (meters > _longestKill) _longestKill = meters;
         _markDirty();
     }
 
@@ -160,7 +206,10 @@ public sealed class CombatStats
         _lowImpactKills = 0;
         _multiKillNades = _nadeKills = _highImpactKills = 0;
         _roundSwing = _currentRoundSwing = 0;
-        _teamKills = _suicides = 0;
+        _teamKills = _suicides = _teamDamage = _multiKill1 = _pistolRoundKills = 0;
+        _ctKills = _tKills = _ctDeaths = _tDeaths = _ctDamage = _tDamage = 0;
+        _ctFirstKills = _tFirstKills = _ctFirstDeaths = _tFirstDeaths = 0;
+        _killDistanceTotal = _longestKill = 0m;
         Array.Clear(_clutchAttempts);
         Array.Clear(_clutchWins);
         _markDirty();

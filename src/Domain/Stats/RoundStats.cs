@@ -27,6 +27,13 @@ public sealed class RoundStats
     private int _pings;
     private int _footsteps;
     private int _liveTime;
+    private int _roundsSurvived;
+    private int _roundsTraded;
+    private int _ctRoundsWon;
+    private int _tRoundsWon;
+    private int _pistolRoundsPlayed;
+    private int _pistolRoundsWon;
+    private bool _isPistolRound;
 
     public RoundStats(Action markDirty)
     {
@@ -54,9 +61,18 @@ public sealed class RoundStats
     public int Footsteps { get => _footsteps; set { _footsteps = value; _markDirty(); } }
     // Time alive as the engine counts it (CSMatchStats_t m_iLiveTime), accrued at round end.
     public int LiveTime { get => _liveTime; set { _liveTime = value; _markDirty(); } }
+    public int RoundsSurvived { get => _roundsSurvived; set { _roundsSurvived = value; _markDirty(); } }
+    public int RoundsTraded { get => _roundsTraded; set { _roundsTraded = value; _markDirty(); } }
+    public int CtRoundsWon { get => _ctRoundsWon; set { _ctRoundsWon = value; _markDirty(); } }
+    public int TRoundsWon { get => _tRoundsWon; set { _tRoundsWon = value; _markDirty(); } }
+    public int PistolRoundsPlayed { get => _pistolRoundsPlayed; set { _pistolRoundsPlayed = value; _markDirty(); } }
+    public int PistolRoundsWon { get => _pistolRoundsWon; set { _pistolRoundsWon = value; _markDirty(); } }
+    // The engine's rule: round 1, and the first round of the second half, with mp_startmoney at most 800.
+    public bool IsPistolRound { get => _isPistolRound; set { _isPistolRound = value; _markDirty(); } }
 
     public void ResetRoundFlags()
     {
+        _isPistolRound = false;
         _hadKillThisRound = false;
         _hadAssistThisRound = false;
         _survivedThisRound = false;
@@ -73,6 +89,8 @@ public sealed class RoundStats
         _jumps = _totalSpawns = 0;
         _roundNumber = _ctRounds = _tRounds = 0;
         _liveTime = 0;
+        _roundsSurvived = _roundsTraded = _ctRoundsWon = _tRoundsWon = 0;
+        _pistolRoundsPlayed = _pistolRoundsWon = 0;
         ResetRoundFlags();
     }
 }

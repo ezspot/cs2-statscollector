@@ -1,5 +1,8 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
+using System.Linq;
+using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
 using Microsoft.Extensions.Logging;
@@ -8,7 +11,13 @@ using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public sealed class BombEventProcessor : IEventProcessor
+public interface IBombEventProcessor : IEventProcessor
+{
+    /// <summary>The bomb in the current round: its site, plant time and the time left when defused.</summary>
+    RoundBombInfo RoundBomb { get; }
+}
+
+public sealed class BombEventProcessor : IBombEventProcessor
 {
     private readonly IPlayerSessionService _playerSessions;
     private readonly ICombatEventProcessor _combatProcessor;
@@ -21,6 +30,11 @@ public sealed class BombEventProcessor : IEventProcessor
     private bool _defuseStartedAsClutch;
     // Freeze end to round end: the engine hands a T the bomb at round start, which fires bomb_pickup too.
     private bool _roundLive;
+    private DateTime _roundStartUtc;
+    private DateTime? _bombPlantedAt;
+    private RoundBombInfo _roundBomb = RoundBombInfo.None;
+
+    public RoundBombInfo RoundBomb => _roundBomb;
 
     public BombEventProcessor(
         IPlayerSessionService playerSessions,
@@ -93,6 +107,14 @@ public sealed class BombEventProcessor : IEventProcessor
         using var activity = Instrumentation.ActivitySource.StartActivity("HandleBombPlanted");
         try
         {
+            var now = _timeProvider.GetUtcNow().UtcDateTime;
+            _bombPlantedAt = now;
+            _roundBomb = _roundBomb with
+            {
+                Site = PlantedBombSite(),
+                PlantTimeSeconds = _roundStartUtc == default ? null : Math.Round((decimal)(now - _roundStartUtc).TotalSeconds, 1)
+            };
+
             var player = @event.GetPlayerOrDefault("userid");
             var playerState = PlayerControllerState.From(player);
             if (playerState.IsValid && !playerState.IsBot)
@@ -118,6 +140,8 @@ public sealed class BombEventProcessor : IEventProcessor
         using var activity = Instrumentation.ActivitySource.StartActivity("HandleBombDefused");
         try
         {
+            _roundBomb = _roundBomb with { DefuseTimeLeftSeconds = DefuseTimeLeft() };
+
             var player = @event.GetPlayerOrDefault("userid");
             var playerState = PlayerControllerState.From(player);
             if (playerState.IsValid && !playerState.IsBot)
@@ -291,6 +315,26 @@ public sealed class BombEventProcessor : IEventProcessor
     {
         ResetBombState();
         _roundLive = true;
+        _roundStartUtc = context.RoundStartUtc;
+        _bombPlantedAt = null;
+        // Kept until the next round starts: the round end reads it after the processors' round end ran.
+        _roundBomb = RoundBombInfo.None;
+    }
+
+    // The planted bomb's site index: 0 is A, 1 is B.
+    private static string? PlantedBombSite() =>
+        Utilities.FindAllEntitiesByDesignerName<CPlantedC4>("planted_c4").FirstOrDefault()?.BombSite switch { 0 => "A", 1 => "B", _ => null };
+
+    // Seconds left on the timer: the bomb's own detonation time against the server clock.
+    private decimal? DefuseTimeLeft()
+    {
+        var bomb = Utilities.FindAllEntitiesByDesignerName<CPlantedC4>("planted_c4").FirstOrDefault();
+        if (bomb is { IsValid: true }) return Math.Round(Math.Max(0m, (decimal)(bomb.C4Blow - Server.CurrentTime)), 2);
+        // ponytail: without the entity, the timer cvar against the plant time (wall clock, so a pause is not deducted).
+        if (_bombPlantedAt is { } plantedAt &&
+            decimal.TryParse(GameRulesState.ConVarValue("mp_c4timer"), NumberStyles.Number, CultureInfo.InvariantCulture, out var timer))
+            return Math.Round(Math.Max(0m, timer - (decimal)(_timeProvider.GetUtcNow().UtcDateTime - plantedAt).TotalSeconds), 2);
+        return null;
     }
 
     public void OnRoundEnd(int winnerTeam, int winReason)

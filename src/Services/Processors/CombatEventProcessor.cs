@@ -205,6 +205,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             var attackerBlind = @event.GetBoolValue("attackerblind", false);
             var flashAssisted = @event.GetBoolValue("assistedflash", false);
             var penetrated = @event.GetIntValue("penetrated", 0) > 0;
+            // Meters, as player_death reports it.
+            var killDistance = @event.GetFloatValue("distance", 0f);
 
             var now = _timeProvider.GetUtcNow().UtcDateTime;
             var tradeWindowSeconds = _config.CurrentValue.TradeWindowSeconds;
@@ -258,6 +260,9 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 {
                     stats.Round.SurvivedThisRound = false;
                     stats.Combat.Deaths++;
+                    stats.Weapon.RecordDeath(weaponName);
+                    if (victimTeam == PlayerTeam.CounterTerrorist) stats.Combat.CtDeaths++;
+                    else if (victimTeam == PlayerTeam.Terrorist) stats.Combat.TDeaths++;
                     if (isSuicide) stats.Combat.Suicides++;
                     stats.CurrentTeam = victimTeam;
 
@@ -311,7 +316,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
                 if (attackerState.PawnHandle != 0 && victimState.PawnHandle != 0 && _currentRoundNumber > 0 && _config.CurrentValue.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
                 {
-                    var killDistance = @event.GetFloatValue("distance", 0f);
                     var posEvent = _positionPersistence.GetKillEvent();
 
                     posEvent.MatchUuid = matchUuid;
@@ -356,14 +360,21 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 {
                     stats.Round.HadKillThisRound = true;
                     stats.Combat.Kills++;
+                    if (attackerTeam == PlayerTeam.CounterTerrorist) stats.Combat.CtKills++; else stats.Combat.TKills++;
+                    if (stats.Round.IsPistolRound) stats.Combat.PistolRoundKills++;
+                    if (killDistance > 0f) stats.Combat.RecordKillDistance((decimal)killDistance);
                     if (swingDelta != 0m) stats.Combat.CurrentRoundSwing += swingDelta;
                     stats.Combat.Headshots += isHeadshot ? 1 : 0;
-                    stats.Weapon.RecordKill(weaponName);
+                    stats.Weapon.RecordKill(weaponName, isHeadshot);
                     stats.CurrentTeam = attackerTeam;
 
                     if (isClutchKill) stats.Combat.ClutchKills++;
 
-                    if (isFirstKillOfRound) stats.Combat.FirstKills++;
+                    if (isFirstKillOfRound)
+                    {
+                        stats.Combat.FirstKills++;
+                        if (attackerTeam == PlayerTeam.CounterTerrorist) stats.Combat.CtFirstKills++; else stats.Combat.TFirstKills++;
+                    }
 
                     // Entry Kill tracking
                     if (_firstEngagementAttackerIndex == attackerIndex && _firstEngagementVictimIndex == victimIndex)
@@ -375,14 +386,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     _playerRoundKills[attackerIndex]++;
                     var killsThisRound = _playerRoundKills[attackerIndex];
 
-                    // Tiers are exact: a round moves up a tier with each kill, so a 3k is not also a 2k.
-                    switch (killsThisRound)
-                    {
-                        case 2: stats.Combat.MultiKill2++; break;
-                        case 3: stats.Combat.MultiKill2--; stats.Combat.MultiKill3++; break;
-                        case 4: stats.Combat.MultiKill3--; stats.Combat.MultiKill4++; break;
-                        case 5: stats.Combat.MultiKill4--; stats.Combat.MultiKill5++; break;
-                    }
+                    // Tiers are exact: a round moves up a tier with each kill, so a 3k is not also a 2k (or a 1k).
+                    stats.Combat.RecordRoundKill(killsThisRound);
 
                     if (noscope) stats.Combat.Noscopes++;
                     if (thruSmoke) stats.Combat.ThroughSmokeKills++;
@@ -416,7 +421,11 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             {
                 if (isFirstKillOfRound)
                 {
-                    _playerSessions.MutatePlayer(victimState.SteamId, stats => stats.Combat.FirstDeaths++);
+                    _playerSessions.MutatePlayer(victimState.SteamId, stats =>
+                    {
+                        stats.Combat.FirstDeaths++;
+                        if (victimTeam == PlayerTeam.CounterTerrorist) stats.Combat.CtFirstDeaths++; else stats.Combat.TFirstDeaths++;
+                    });
                 }
 
                 // Remember whom the enemy killer (a bot counts) took down, so killing it can trade this death.
@@ -487,6 +496,14 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 attackerState.Team is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist &&
                 victimState.Team is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist;
 
+            // Friendly fire: HP removed from a teammate, kept apart from the damage dealt.
+            if (attackerState.IsValid && !attackerState.IsBot && victimState.IsValid &&
+                attackerState.SteamId != victimState.SteamId && attackerState.Team == victimState.Team &&
+                attackerState.Team is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist)
+            {
+                _playerSessions.MutatePlayer(attackerState.SteamId, stats => stats.Combat.TeamDamage += damage);
+            }
+
             if (isEnemyDamage)
             {
                 _playerSessions.MutatePlayer(victimState.SteamId, stats =>
@@ -503,6 +520,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 {
                     stats.Combat.DamageDealt += damage;
                     stats.Combat.DamageArmor += damageArmor;
+                    if (attackerState.Team == PlayerTeam.CounterTerrorist) stats.Combat.CtDamage += damage; else stats.Combat.TDamage += damage;
+                    stats.Weapon.RecordDamage(weapon, damage);
 
                     if (isUtilityDamage)
                     {

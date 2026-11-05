@@ -12,7 +12,12 @@
     <Description>Comprehensive CS2 stats collection to MySQL</Description>
     <Version>3.1.0</Version>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <!-- The test project lives under tests/; keep its sources out of the plugin's default compile glob. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);tests/**</DefaultItemExcludes>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="statsCollector.Tests" />
+  </ItemGroup>
   <ItemGroup>
     <!-- Microsoft.Extensions.* and Serilog come transitively from CounterStrikeSharp.API: CSS loads its own
          copies of those at runtime (shared types), so compile against exactly those versions. ExcludeAssets keeps

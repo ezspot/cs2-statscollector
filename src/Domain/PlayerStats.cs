@@ -165,6 +165,21 @@ public sealed class PlayerStats
         Combat.Clutch1v4Wins += r.Clutch1v4Wins;
         Combat.Clutch1v5Attempts += r.Clutch1v5Attempts;
         Combat.Clutch1v5Wins += r.Clutch1v5Wins;
+        Combat.TeamDamage += r.TeamDamage;
+        Combat.MultiKill1 += r.MultiKill1;
+        Combat.PistolRoundKills += r.PistolRoundKills;
+        Combat.CtKills += r.CtKills;
+        Combat.TKills += r.TKills;
+        Combat.CtDeaths += r.CtDeaths;
+        Combat.TDeaths += r.TDeaths;
+        Combat.CtDamage += r.CtDamage;
+        Combat.TDamage += r.TDamage;
+        Combat.CtFirstKills += r.CtFirstKills;
+        Combat.TFirstKills += r.TFirstKills;
+        Combat.CtFirstDeaths += r.CtFirstDeaths;
+        Combat.TFirstDeaths += r.TFirstDeaths;
+        Combat.KillDistanceTotal += r.KillDistanceTotal;
+        Combat.LongestKill = Math.Max(Combat.LongestKill, r.LongestKill);
         Round.RoundsPlayed += r.RoundsPlayed;
         Round.RoundsWon += r.RoundsWon;
         Round.TotalSpawns += r.TotalSpawns;
@@ -174,6 +189,12 @@ public sealed class PlayerStats
         Round.Pings += r.Pings;
         Round.Footsteps += r.Footsteps;
         Round.LiveTime += r.LiveTime;
+        Round.RoundsSurvived += r.RoundsSurvived;
+        Round.RoundsTraded += r.RoundsTraded;
+        Round.CtRoundsWon += r.CtRoundsWon;
+        Round.TRoundsWon += r.TRoundsWon;
+        Round.PistolRoundsPlayed += r.PistolRoundsPlayed;
+        Round.PistolRoundsWon += r.PistolRoundsWon;
         // kast_rounds is exact, but rows written before it existed (0) or by an older build sharing the
         // database (stale, while kast_percentage kept updating) must fall back to the stored percentage.
         // The DECIMAL(5,2) percentage reproduces the exact count below 5,000 rounds, so any difference there
@@ -198,7 +219,6 @@ public sealed class PlayerStats
         Utility.UtilityDamage += r.UtilityDamageDealt;
         Utility.UtilityDamageTaken += r.UtilityDamageTaken;
         Utility.EffectiveFlashes += r.EffectiveFlashes;
-        Utility.EffectiveSmokes += r.EffectiveSmokes;
         Utility.EffectiveHEGrenades += r.EffectiveHeGrenades;
         Utility.EffectiveMolotovs += r.EffectiveMolotovs;
         Utility.WastedFlashes += r.FlashWaste;
@@ -214,7 +234,6 @@ public sealed class PlayerStats
         Bomb.BombDefuseWithoutKit += r.BombDefuseWithoutKit;
         Bomb.BombDrops += r.BombDrops;
         Bomb.BombPickups += r.BombPickups;
-        Bomb.DefuserDrops += r.DefuserDrops;
         Bomb.DefuserPickups += r.DefuserPickups;
         Bomb.ClutchDefuses += r.ClutchDefuses;
         Bomb.TotalPlantTime += r.TotalPlantTime;

@@ -163,6 +163,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddSingleton<IEventProcessor>(sp => sp.GetRequiredService<CommunicationEventProcessor>());
 
         services.AddSingleton<ICombatEventProcessor>(sp => sp.GetRequiredService<CombatEventProcessor>());
+        services.AddSingleton<IBombEventProcessor>(sp => sp.GetRequiredService<BombEventProcessor>());
         services.AddSingleton<IPositionTrackingService, PositionTrackingService>();
         services.AddSingleton<IPositionPersistenceService, PositionPersistenceService>();
         services.AddSingleton<IGameScheduler, GameScheduler>();

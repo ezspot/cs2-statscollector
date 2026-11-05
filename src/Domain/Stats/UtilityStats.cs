@@ -21,7 +21,6 @@ public sealed class UtilityStats
     private float _totalBlindTimeInflicted;
     private int _utilityDamageTaken;
     private int _effectiveFlashes;
-    private int _effectiveSmokes;
     private int _effectiveHeGrenades;
     private int _effectiveMolotovs;
 
@@ -46,7 +45,6 @@ public sealed class UtilityStats
     public float TotalBlindTimeInflicted { get => _totalBlindTimeInflicted; set { _totalBlindTimeInflicted = value; _markDirty(); } }
     public int UtilityDamageTaken { get => _utilityDamageTaken; set { _utilityDamageTaken = value; _markDirty(); } }
     public int EffectiveFlashes { get => _effectiveFlashes; set { _effectiveFlashes = value; _markDirty(); } }
-    public int EffectiveSmokes { get => _effectiveSmokes; set { _effectiveSmokes = value; _markDirty(); } }
     public int EffectiveHEGrenades { get => _effectiveHeGrenades; set { _effectiveHeGrenades = value; _markDirty(); } }
     public int EffectiveMolotovs { get => _effectiveMolotovs; set { _effectiveMolotovs = value; _markDirty(); } }
 
@@ -59,7 +57,7 @@ public sealed class UtilityStats
         _totalBlindTime = 0f;
         _totalBlindTimeInflicted = 0f;
         _utilityDamageTaken = 0;
-        _effectiveFlashes = _effectiveSmokes = _effectiveHeGrenades = _effectiveMolotovs = 0;
+        _effectiveFlashes = _effectiveHeGrenades = _effectiveMolotovs = 0;
         _markDirty();
     }
 }

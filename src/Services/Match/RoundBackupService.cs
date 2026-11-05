@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -21,6 +22,9 @@ public interface IRoundBackupService
     bool ApplyRestore(int roundNumber, bool roundNumberWentBack);
 
     IReadOnlyList<int> GetAvailableRounds();
+
+    /// <summary>A player's totals at the start of a recorded round of this match, or null.</summary>
+    PlayerSnapshot? GetRoundStart(int roundNumber, ulong steamId);
 }
 
 /// <summary>
@@ -177,5 +181,10 @@ public sealed class RoundBackupService(
     public IReadOnlyList<int> GetAvailableRounds()
     {
         lock (_rounds) return _rounds.Keys.OrderBy(r => r).ToList();
+    }
+
+    public PlayerSnapshot? GetRoundStart(int roundNumber, ulong steamId)
+    {
+        lock (_rounds) return _rounds.TryGetValue(roundNumber, out var start) ? Array.Find(start.Players, p => p.SteamId == steamId) : null;
     }
 }

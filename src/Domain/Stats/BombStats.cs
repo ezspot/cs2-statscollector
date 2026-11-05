@@ -17,7 +17,6 @@ public sealed class BombStats
     private int _bombDefuseWithoutKit;
     private int _bombDrops;
     private int _bombPickups;
-    private int _defuserDrops;
     private int _defuserPickups;
     private int _bombKills;
     private int _bombDeaths;
@@ -41,7 +40,6 @@ public sealed class BombStats
     public int BombDefuseWithoutKit { get => _bombDefuseWithoutKit; set { _bombDefuseWithoutKit = value; _markDirty(); } }
     public int BombDrops { get => _bombDrops; set { _bombDrops = value; _markDirty(); } }
     public int BombPickups { get => _bombPickups; set { _bombPickups = value; _markDirty(); } }
-    public int DefuserDrops { get => _defuserDrops; set { _defuserDrops = value; _markDirty(); } }
     public int DefuserPickups { get => _defuserPickups; set { _defuserPickups = value; _markDirty(); } }
     public int BombKills { get => _bombKills; set { _bombKills = value; _markDirty(); } }
     public int BombDeaths { get => _bombDeaths; set { _bombDeaths = value; _markDirty(); } }
@@ -53,7 +51,7 @@ public sealed class BombStats
     {
         _bombPlants = _bombDefuses = _bombExplosions = _bombPlantAttempts = _bombDefuseAttempts = 0;
         _bombPlantAborts = _bombDefuseAborts = _bombDefuseWithKit = _bombDefuseWithoutKit = 0;
-        _bombDrops = _bombPickups = _defuserDrops = _defuserPickups = 0;
+        _bombDrops = _bombPickups = _defuserPickups = 0;
         _bombKills = _bombDeaths = _clutchDefuses = 0;
         _totalPlantTime = _totalDefuseTime = 0;
         _markDirty();

@@ -48,7 +48,6 @@ public sealed record LifetimePlayerStatsRow
     public int UtilityDamageDealt { get; init; }
     public int UtilityDamageTaken { get; init; }
     public int EffectiveFlashes { get; init; }
-    public int EffectiveSmokes { get; init; }
     public int EffectiveHeGrenades { get; init; }
     public int EffectiveMolotovs { get; init; }
     public int FlashWaste { get; init; }
@@ -64,7 +63,6 @@ public sealed record LifetimePlayerStatsRow
     public int BombDefuseWithoutKit { get; init; }
     public int BombDrops { get; init; }
     public int BombPickups { get; init; }
-    public int DefuserDrops { get; init; }
     public int DefuserPickups { get; init; }
     public int ClutchDefuses { get; init; }
     public int TotalPlantTime { get; init; }
@@ -132,4 +130,25 @@ public sealed record LifetimePlayerStatsRow
     public int CashEarned { get; init; }
     public int MoneySaved { get; init; }
     public int LiveTime { get; init; }
+    public int TeamDamage { get; init; }
+    public int MultiKill1 { get; init; }
+    public int CtKills { get; init; }
+    public int TKills { get; init; }
+    public int CtDeaths { get; init; }
+    public int TDeaths { get; init; }
+    public int CtDamage { get; init; }
+    public int TDamage { get; init; }
+    public int CtFirstKills { get; init; }
+    public int TFirstKills { get; init; }
+    public int CtFirstDeaths { get; init; }
+    public int TFirstDeaths { get; init; }
+    public int RoundsSurvived { get; init; }
+    public int RoundsTraded { get; init; }
+    public int CtRoundsWon { get; init; }
+    public int TRoundsWon { get; init; }
+    public int PistolRoundsPlayed { get; init; }
+    public int PistolRoundsWon { get; init; }
+    public int PistolRoundKills { get; init; }
+    public decimal KillDistanceTotal { get; init; }
+    public decimal LongestKill { get; init; }
 }
