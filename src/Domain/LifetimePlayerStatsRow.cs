@@ -4,8 +4,7 @@ namespace statsCollector.Domain;
 /// Flat projection of a player's persisted lifetime row (<c>player_stats</c>), read back on connect to
 /// seed the in-memory session. Only the raw cumulative counters are carried — derived ratings
 /// (kd_ratio, hltv_rating, kast_percentage, …) are recomputed from these, so they are not seeded
-/// directly. <c>KastPercentage</c> remains as a compatibility fallback for rows created before exact
-/// KAST rounds were stored; <c>PlaytimeSeconds</c> restores the session time origin.
+/// directly. <c>PlaytimeSeconds</c> restores the session time origin.
 /// Column names map via Dapper's underscore matching.
 /// </summary>
 public sealed record LifetimePlayerStatsRow
@@ -32,7 +31,6 @@ public sealed record LifetimePlayerStatsRow
     public int Jumps { get; init; }
     public int Pings { get; init; }
     public int Footsteps { get; init; }
-    public decimal KastPercentage { get; init; }
 
     public int FlashesThrown { get; init; }
     public int SmokesThrown { get; init; }
@@ -89,7 +87,6 @@ public sealed record LifetimePlayerStatsRow
     public int TradedDeaths { get; init; }
     public int HighImpactKills { get; init; }
     public int LowImpactKills { get; init; }
-    public int MultiKills { get; init; }
     public int MultiKill2 { get; init; }
     public int MultiKill3 { get; init; }
     public int MultiKill4 { get; init; }

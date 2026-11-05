@@ -66,11 +66,10 @@ public class SchemaTests
         Assert.Contains($"SELECT m.id, {string.Join(", ", data.Select(c => $"t.{c}"))}", sql);
         Assert.Contains($"FROM temp_{table}_uuid t", sql);
         var update = sql[sql.IndexOf("ON DUPLICATE KEY UPDATE", StringComparison.Ordinal)..];
-        foreach (var column in data.Where(c => !keys.Contains(c) && c is not ("idempotency_key" or "created_at" or "retry_count")))
+        foreach (var column in data.Where(c => !keys.Contains(c)))
             Assert.Contains($" {column} = t.{column}", update);
-        foreach (var column in keys.Concat(["match_uuid", "idempotency_key", "created_at"]))
+        foreach (var column in keys.Append("match_uuid"))
             Assert.DoesNotContain($" {column} = t.{column}", update);
-        Assert.Equal(data.Contains("retry_count"), update.Contains($"retry_count = {table}.retry_count + 1"));
     }
 
     [Fact]

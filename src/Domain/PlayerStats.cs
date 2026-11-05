@@ -122,17 +122,10 @@ public sealed class PlayerStats
         Combat.TradedDeaths += r.TradedDeaths;
         Combat.HighImpactKills += r.HighImpactKills;
         Combat.LowImpactKills += r.LowImpactKills;
-        if (r.MultiKill2 + r.MultiKill3 + r.MultiKill4 + r.MultiKill5 > 0)
-        {
-            Combat.MultiKill2 += r.MultiKill2;
-            Combat.MultiKill3 += r.MultiKill3;
-            Combat.MultiKill4 += r.MultiKill4;
-            Combat.MultiKill5 += r.MultiKill5;
-        }
-        else
-        {
-            Combat.MultiKill2 += r.MultiKills;
-        }
+        Combat.MultiKill2 += r.MultiKill2;
+        Combat.MultiKill3 += r.MultiKill3;
+        Combat.MultiKill4 += r.MultiKill4;
+        Combat.MultiKill5 += r.MultiKill5;
         Combat.FirstKills += r.OpeningDuelsWon;
         Combat.FirstDeaths += r.OpeningDuelsLost;
         Combat.Noscopes += r.NoscopeKills;
@@ -195,15 +188,7 @@ public sealed class PlayerStats
         Round.TRoundsWon += r.TRoundsWon;
         Round.PistolRoundsPlayed += r.PistolRoundsPlayed;
         Round.PistolRoundsWon += r.PistolRoundsWon;
-        // kast_rounds is exact, but rows written before it existed (0) or by an older build sharing the
-        // database (stale, while kast_percentage kept updating) must fall back to the stored percentage.
-        // The DECIMAL(5,2) percentage reproduces the exact count below 5,000 rounds, so any difference there
-        // means the column is stale; above that, rounding can account for about one round per 5,000.
-        var kastFromPercentage = (int)Math.Round(r.KastPercentage / 100m * r.RoundsPlayed);
-        var kastTolerance = r.RoundsPlayed / 5_000;
-        Round.KASTRounds += r.KastRounds > 0 && Math.Abs(r.KastRounds - kastFromPercentage) <= kastTolerance
-            ? r.KastRounds
-            : kastFromPercentage;
+        Round.KASTRounds += r.KastRounds;
 
         Utility.FlashbangsThrown += r.FlashesThrown;
         Utility.SmokesThrown += r.SmokesThrown;

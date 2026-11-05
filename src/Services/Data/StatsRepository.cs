@@ -130,12 +130,11 @@ public sealed class StatsRepository : IStatsRepository
                 .Select(weapon => new WeaponRow(s.MatchUuid!, s.SteamId, weapon,
                     s.WeaponKills.GetValueOrDefault(weapon), s.WeaponHeadshots.GetValueOrDefault(weapon),
                     s.WeaponShots.GetValueOrDefault(weapon), s.WeaponHits.GetValueOrDefault(weapon),
-                    s.WeaponDamage.GetValueOrDefault(weapon), s.WeaponDeaths.GetValueOrDefault(weapon),
-                    $"{s.MatchUuid}_{s.RoundNumber}_{s.SteamId}_Weapon_{weapon}"))).ToList();
+                    s.WeaponDamage.GetValueOrDefault(weapon), s.WeaponDeaths.GetValueOrDefault(weapon)))).ToList();
         return MergeByMatchUuidAsync("match_weapon_stats", MatchWeaponColumns, rows, ["steam_id", "weapon_name"], cancellationToken);
     }
 
-    internal sealed record WeaponRow(string MatchUuid, ulong SteamId, string Weapon, int Kills, int Headshots, int Shots, int Hits, int Damage, int Deaths, string IdempotencyKey);
+    internal sealed record WeaponRow(string MatchUuid, ulong SteamId, string Weapon, int Kills, int Headshots, int Shots, int Hits, int Damage, int Deaths);
 
     // A column of a per-match table: its name, the DataTable (CLR) type, the MySQL type of the staging table, and the
     // value it takes from a row. One list per table keeps the staging table, the bulk copy and the merge aligned.
@@ -193,10 +192,7 @@ public sealed class StatsRepository : IStatsRepository
         Int<PlayerSnapshot>("pistol_rounds_played", s => s.PistolRoundsPlayed), Int<PlayerSnapshot>("pistol_rounds_won", s => s.PistolRoundsWon),
         Int<PlayerSnapshot>("pistol_round_kills", s => s.PistolRoundKills),
         Dec<PlayerSnapshot>("kill_distance_total", "DECIMAL(12,2)", s => s.KillDistanceTotal),
-        Dec<PlayerSnapshot>("round_swing", "DECIMAL(10,3)", s => s.RoundSwing),
-        Str<PlayerSnapshot>("idempotency_key", "VARCHAR(255)", s => $"{s.MatchUuid}_{s.RoundNumber}_{s.SteamId}_Summary"),
-        new("created_at", typeof(DateTime), "DATETIME", _ => DateTime.UtcNow),
-        Int<PlayerSnapshot>("retry_count", _ => 0)
+        Dec<PlayerSnapshot>("round_swing", "DECIMAL(10,3)", s => s.RoundSwing)
     ];
 
     internal static readonly Column<WeaponRow>[] MatchWeaponColumns =
@@ -206,10 +202,7 @@ public sealed class StatsRepository : IStatsRepository
         Str<WeaponRow>("weapon_name", "VARCHAR(100)", w => w.Weapon),
         Int<WeaponRow>("kills", w => w.Kills), Int<WeaponRow>("headshots", w => w.Headshots),
         Int<WeaponRow>("shots", w => w.Shots), Int<WeaponRow>("hits", w => w.Hits),
-        Int<WeaponRow>("damage", w => w.Damage), Int<WeaponRow>("deaths", w => w.Deaths),
-        Str<WeaponRow>("idempotency_key", "VARCHAR(255)", w => w.IdempotencyKey),
-        new("created_at", typeof(DateTime), "DATETIME", _ => DateTime.UtcNow),
-        Int<WeaponRow>("retry_count", _ => 0)
+        Int<WeaponRow>("damage", w => w.Damage), Int<WeaponRow>("deaths", w => w.Deaths)
     ];
 
     // The player's totals over one round (MatchStatsService.Delta against the round start), plus the round flags and
@@ -249,7 +242,7 @@ public sealed class StatsRepository : IStatsRepository
 
     // Bulk-copies the rows into a staging table keyed by match UUID, makes sure their players rows exist, then inserts
     // them with the match id resolved, replacing the data columns of a row with the same key (the table's UNIQUE KEY on
-    // match_id and the key columns). idempotency_key and created_at keep the first write's values.
+    // match_id and the key columns).
     private async Task MergeByMatchUuidAsync<T>(string table, IReadOnlyList<Column<T>> columns, IReadOnlyList<T> rows, string[] keyColumns, CancellationToken cancellationToken)
     {
         if (rows.Count == 0) return;
@@ -300,9 +293,7 @@ public sealed class StatsRepository : IStatsRepository
     {
         var staging = $"temp_{table}_uuid";
         var data = columns.Where(c => c != "match_uuid").ToList();
-        var updates = data.Where(c => !keyColumns.Contains(c) && c is not ("idempotency_key" or "created_at" or "retry_count"))
-            .Select(c => $"{c} = t.{c}").ToList();
-        if (data.Contains("retry_count")) updates.Add($"retry_count = {table}.retry_count + 1");
+        var updates = data.Where(c => !keyColumns.Contains(c)).Select(c => $"{c} = t.{c}").ToList();
         return $"""
             INSERT INTO {table} (match_id, {string.Join(", ", data)})
             SELECT m.id, {string.Join(", ", data.Select(c => $"t.{c}"))}

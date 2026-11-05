@@ -42,13 +42,11 @@ A CounterStrikeSharp plugin for CS2 that collects detailed player statistics int
 A MySQL 9.7 LTS stack is provided under `MySQL-docker/`. Copy both `*.example` files in
 `MySQL-docker/secrets/` to matching `*.txt` files, replace their contents, then run
 `docker compose up -d`. phpMyAdmin is optional: `docker compose --profile tools up -d`; it asks for a login (use
-the `cs2_statscollector` account). A volume created by the earlier `mysql:9.6` image upgrades in place on the first
-9.7 start and cannot be downgraded afterwards, so back up the `mysql_data` volume first.
+the `cs2_statscollector` account).
 MySQL and phpMyAdmin bind to loopback by default. Set `MYSQL_BIND_ADDRESS` only when game servers connect from
 another host, and then to this host's private-network address, never `0.0.0.0`: Docker publishes ports ahead of
 ufw/`INPUT` firewall rules, so filter the port in the `DOCKER-USER` chain. `root` can only log in from inside the
-container (`MYSQL_ROOT_HOST=localhost`); a volume created before that setting still has `root@'%'`, so run
-`DROP USER 'root'@'%';` on it once.
+container (`MYSQL_ROOT_HOST=localhost`).
 
 ## Installation
 1. Install [CounterStrikeSharp](https://docs.cssharp.dev/) on your CS2 server.
@@ -71,7 +69,7 @@ The bundled Docker stack already satisfies these. For your own MySQL server:
   with error 3948 while it is off, which is MySQL's default. The plugin checks it at startup and logs a Critical line
   with the fix; while it is off, each bulk write is dropped (and logged) instead of holding up every later write.
 - Grants on the database: `SELECT, INSERT, UPDATE, DELETE, CREATE TEMPORARY TABLES`; with `AutoCreateSchema` also
-  `CREATE, ALTER, INDEX, REFERENCES, CREATE VIEW, DROP`.
+  `CREATE, REFERENCES, CREATE VIEW, DROP`.
 
 ### Minimal config
 ```json
@@ -92,57 +90,17 @@ hostname check), or `VerifyFull` with a certificate issued for `DatabaseHost`. `
 MySQL's default `caching_sha2_password` rejects non-TLS remote logins after every server restart.
 See `config.sample.json` for the full set of options (persistence, trade window, clutch weighting, scrim settings).
 
-For an existing database, treat `database/init.sql` as a bootstrap script rather than a migration.
-When upgrading, apply each SQL file under `database/migrations/` that has not been applied yet, in numeric
-order. 001, 002 and 005 are not idempotent (MySQL has no `ADD COLUMN IF NOT EXISTS`, so a re-run fails with error 1060);
-003, 004, 006 and 007 check `information_schema` first and can be run again (a run of 006 that failed midway picks up
-where it stopped). A fresh `init.sql` already includes them, and `AutoCreateSchema` applies them itself (it adds missing
-columns and indexes and widens narrower columns before running `init.sql`; it never drops a column). The Docker image
-runs `init.sql` only on an empty volume.
-- This release deletes the rows of rounds voided by `.restore`, so the plugin's account also needs `DELETE`
-  (`GRANT DELETE ON cs2_statscollector.* TO 'cs2_statscollector'@'%';`; the Docker stack's account already has it).
-- `002_add_exact_player_event_counters.sql` preserves exact KAST rounds, multi-kill tiers, clutch kills, and bomb
-  explosions across reconnects.
-- `003_widen_decimal_totals.sql` widens the lifetime `clutch_points` and `round_swing` totals; MySQL silently caps a
-  value that does not fit, so a database created before 2026-07-18 kept every player's clutch points at 99.999.
-- `004_index_position_match_ids.sql` adds the `match_id` index that databases created before 2026-07-18 lack on the
-  position tables. Without it, removing a restored round's rows scans and locks those whole tables, and on large ones
-  times out, leaving the voided rounds' heatmap rows in place.
-- `005_add_engine_counters_and_clutch_split.sql` adds team kills, suicides and 1v1 to 1v5 clutch attempts and wins,
-  and the engine's own kill reward, cash earned, money saved and time alive (`live_time`, the engine's `m_iLiveTime`).
-- `006_add_round_rows_side_split_and_weapon_detail.sql` adds the `player_round_stats` table; the CT/T split of kills,
-  deaths, damage, first kills and deaths and rounds won, the rounds survived and traded, the rounds with exactly one
-  kill (`multi_kill_1`), pistol rounds played, won and their kills, team damage and kill distances (meters, as
-  `player_death` reports them) to `player_stats`; the whole match to `match_player_stats`; headshots, damage and deaths
-  to `match_weapon_stats`; and the buy and bomb columns to `rounds`. It drops `player_stats.defuser_drops` and
-  `effective_smokes`, which nothing ever incremented (CS2 has no defuser-drop event, and no definition of an effective
-  smoke); a database created by an older build keeps them until this migration is run by hand. `AutoCreateSchema`
-  leaves the two unused columns in place: dropping them would break a server still on the previous build sharing the
-  database, whose bulk copy maps them by name.
-- `007_single_analytics_key_and_wider_ratios.sql` drops the second UNIQUE key of `player_advanced_analytics`
-  (`steam_id`, `calculated_at`), which merged two rows of one player written in the same second, and keeps a plain index
-  for the per-player lookups; widens the lifetime `kd_ratio`, `impact_rating`, `survival_rating` and `utility_score`,
-  which DECIMAL(5,3) silently capped at 99.999; and makes `total_blind_time` and `total_blind_time_inflicted`
-  DECIMAL(10,2) where they stayed INT (whole seconds). `AutoCreateSchema` applies all three.
-- If `SHOW COLUMNS FROM player_stats LIKE 'round_swing';` returns nothing (databases created before 2026-06-21, which
-  every lifetime write fails on), `AutoCreateSchema` adds the column. By hand, run this before migration 001, and run
-  `init.sql` once more after the migrations to re-create the views:
-  `ALTER TABLE player_stats ADD COLUMN round_swing DECIMAL(10,3) DEFAULT 0 AFTER utility_score;`
-- Databases created on the 2026-01-01 schema also lack three columns of the match tables, which `AutoCreateSchema` adds.
-  By hand: `ALTER TABLE match_player_stats ADD COLUMN idempotency_key VARCHAR(255) NULL AFTER entry_kill_attempt_wins,
-  ADD COLUMN created_at DATETIME NULL AFTER idempotency_key, ADD COLUMN retry_count INT DEFAULT 0 AFTER created_at;`
-  and the same for `match_weapon_stats` with `AFTER hits` for the first column. Databases from before 2026-01-01 cannot
-  be upgraded; create a new one.
-
-New match foreign keys in `init.sql` apply automatically only to clean installations. Validate and remove
-any orphaned rows before adding those constraints to an existing database.
+`database/init.sql` is the whole schema; there are no migrations. Run it once on an empty database
+(`mysql -u <user> -p cs2_statscollector < database/init.sql`), or let `AutoCreateSchema` run it at startup. The
+Docker image runs it only on an empty volume.
 
 Any option can be overridden by an environment variable prefixed with `STATSCOLLECTOR_`
 (e.g. `STATSCOLLECTOR_DatabasePassword`). Nested options use `__` (`STATSCOLLECTOR_Scrim__PlayersPerTeam`); a single
 underscore is ignored. List options such as `Scrim__MapPool__0` are appended to the configured list, not replaced.
 
 ### Notable toggles
-- `AutoCreateSchema` (default `false`) — apply the embedded schema and compatible column migrations on startup.
+- `AutoCreateSchema` (default `false`) — run the embedded `database/init.sql` on startup (creates the database and any
+  missing tables and views).
 - `EnablePositionTracking` (default `true`) — records the X/Y/Z coordinates of every kill, death, and
   utility throw into `kill_positions` / `death_positions` / `utility_positions` (the data behind
   heatmaps and spatial queries). **Performance:** this is the heaviest write path — it generates the
@@ -166,7 +124,7 @@ underscore is ignored. List options such as `Scrim__MapPool__0` are appended to 
 - `matches` / `rounds` — match and round lifecycle, including the official round-end timestamp, both sides' start money and equipment value at freeze end, and the bomb's site, plant time and the seconds left when it was defused.
 - `player_round_stats` — one row per player per round: their totals at round end minus those at round start (kills, damage, utility, trades, clutch 1vX, bomb, MVP, money, kill reward, round swing) and the round's flags (side, won, pistol round, survived, KAST). Written at round end, at the official round end, and once more at the next round start (the engine credits the survivors' live time only then); a round restore removes the voided rounds' rows.
 - `kill_positions` / `death_positions` / `utility_positions` — spatial event data linked to a match; utility rows include entity and lifecycle event metadata.
-- `match_player_stats` / `match_weapon_stats` — per-match performance (the whole match, from start-of-match deltas) and weapon breakdowns with kills, headshots, shots, hits, damage and deaths by weapon (written at match end; their `created_at` is the plugin's UTC clock, every other timestamp is the server's `CURRENT_TIMESTAMP`).
+- `match_player_stats` / `match_weapon_stats` — per-match performance (the whole match, from start-of-match deltas) and weapon breakdowns with kills, headshots, shots, hits, damage and deaths by weapon (written at match end).
 - `player_advanced_analytics` — temporal performance snapshots (Rating 2.0, Impact, KAST, ADR).
 
 ### Dashboard views
@@ -184,8 +142,6 @@ Several CS2 servers (target: up to ~5) can run this plugin against one MySQL dat
 - **Per-match rows** (`match_player_stats`, `match_weapon_stats`, `rounds`, position tables) are immutable per `(match_id, …)`, so every server records its own matches independently.
 
 > **Connection budget:** each server opens its own MySqlConnector pool (max **50** connections per server). For *N* servers, make sure MySQL `max_connections` comfortably exceeds `N × 50` — e.g. for 5 servers set `max_connections >= 300`.
-
-> **Existing-data note:** after migration 002, KAST rounds, multi-kill tiers, and clutch kills are restored exactly across reconnects. Multi-kill tiers are exclusive (a 3k round counts only as a 3k). Rows written before the migration have no tiers, and their `multi_kills` reflects only the player's most recent session, counted the old way (a 3k round also counted as a 2k); it is carried into `multi_kill_2` on the player's next connect. Pre-migration tiers and clutch kills cannot be recovered; KAST rounds are reconstructed from the stored KAST%.
 
 ## Round Swing
 

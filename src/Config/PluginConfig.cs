@@ -60,7 +60,7 @@ public sealed class PluginConfig : BasePluginConfig
     [JsonPropertyName("DeathmatchMode")]
     public bool DeathmatchMode { get; set; } = false;
 
-    // Run database/init.sql and compatible column migrations automatically on startup.
+    // Run the embedded database/init.sql on startup (creates the database and any missing tables and views).
     [JsonPropertyName("AutoCreateSchema")]
     public bool AutoCreateSchema { get; set; } = false;
 

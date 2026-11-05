@@ -88,10 +88,8 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         _logger.LogInformation("Background persistence services started.");
     }
 
-    // A failed schema step used to abort startup, leaving the plugin loaded but recording nothing until the
-    // next restart. Wait out an unreachable database (e.g. MySQL still starting after a host reboot) and another
-    // server's schema lock (a TimeoutException from SchemaInitializer: it may be mid-ALTER); for anything else
-    // (such as a missing privilege) carry on against the existing schema.
+    // Wait out an unreachable database (e.g. MySQL still starting after a host reboot); for anything else (such as a
+    // missing privilege) carry on against the existing schema rather than stay loaded and record nothing.
     private async Task EnsureSchemaAsync(CancellationToken ct)
     {
         while (true)
@@ -101,9 +99,9 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
                 await _schemaInitializer.EnsureSchemaAsync(ct);
                 return;
             }
-            catch (Exception ex) when (!ct.IsCancellationRequested && (ex is TimeoutException || (ex is MySqlException mysql && ResiliencePolicies.IsTransient(mysql))))
+            catch (MySqlException ex) when (!ct.IsCancellationRequested && ResiliencePolicies.IsTransient(ex))
             {
-                _logger.LogWarning(ex, "Database unreachable or locked for schema initialization; retrying in {Delay}s.", SchemaRetryDelay.TotalSeconds);
+                _logger.LogWarning(ex, "Database unreachable for schema initialization; retrying in {Delay}s.", SchemaRetryDelay.TotalSeconds);
                 await Task.Delay(SchemaRetryDelay, ct);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)

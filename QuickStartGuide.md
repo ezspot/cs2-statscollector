@@ -41,7 +41,7 @@ it up as in the README's *Database prerequisites* (`local_infile=ON`, `DELETE` a
 }
 ```
    To have the plugin create the schema for you, set `"AutoCreateSchema": true` instead of running
-   `init.sql` manually (the DB user also needs `CREATE, ALTER, INDEX, REFERENCES, CREATE VIEW, DROP`).
+   `init.sql` manually (the DB user also needs `CREATE, REFERENCES, CREATE VIEW, DROP`).
    For a remote database, use `DatabaseSslMode: "VerifyCA"` with `DatabaseSslCa` (see the README).
 4. Start the server and verify with `css_plugins list`.
 
