@@ -163,7 +163,8 @@ public sealed class RoundBackupService(
             }
 
             restarted.Add(totals);
-            if (playerSessions.TryRemovePlayer(totals.SteamId))
+            // A held session (its player left before its seed caught up) is written by the seed, voided rounds included.
+            if (!playerSessions.IsHeld(totals.SteamId) && playerSessions.TryRemovePlayer(totals.SteamId))
                 playerSessions.EnsurePlayer(PlayerControllerState.From(null) with { SteamId = totals.SteamId, PlayerName = totals.Name });
             else
                 left.Add(totals);

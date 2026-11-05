@@ -59,8 +59,11 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
     private int _currentRoundNumber;
     private DateTime _currentRoundStartUtc;
+    // Between round_end and the next freeze end: the round's survivors were counted at its end.
+    private bool _roundEnded;
 
-    // EntityIndex-based state arrays for performance
+    // EntityIndex-based state arrays for performance. Bots are in them too (SteamID 0): they are the opponents of a
+    // clutch, the first kill of a round and the teammates a trade avenges, but no stat credit goes to them.
     private readonly bool[] _isPlayerAlive = new bool[MaxPlayers];
     private readonly ulong[] _playerSteamIds = new ulong[MaxPlayers];
     // Last known team per entity index, so alive-count cleanup on disconnect does not depend on the
@@ -79,8 +82,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     // Tracks whether the first kill of the round has occurred (O(1) replacement for an array scan).
     private bool _firstKillHappened;
 
-    // Per killer entity index (bots included): the player they last killed and when. Killing that enemy within
-    // the trade window trades the death, however many other deaths happened in between.
+    // Per killer entity index (bots included): the player they last killed (SteamID, 0 for a bot) and when (default:
+    // nobody). Killing that enemy within the trade window trades the death, however many other deaths happened in between.
     private readonly ulong[] _lastVictimOf = new ulong[MaxPlayers];
     private readonly DateTime[] _lastKillAt = new DateTime[MaxPlayers];
     private readonly Dictionary<PlayerTeam, (ulong SteamId, int Opponents)> _clutchCandidates = [];
@@ -127,13 +130,14 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     {
         _currentRoundNumber = context.RoundNumber;
         _currentRoundStartUtc = context.RoundStartUtc;
+        _roundEnded = false;
         ResetRoundStats();
 
-        foreach (var steamId in _playerSessions.GetActiveSteamIds())
+        // Everyone connected, bots included: a session is not needed to be alive.
+        foreach (var player in Utilities.GetPlayers())
         {
-            var player = Utilities.GetPlayerFromSteamId64(steamId);
             var state = PlayerControllerState.From(player);
-            if (!state.IsValid || state.IsBot || player is null) continue;
+            if (!state.IsValid) continue;
 
             var index = (int)player.Index;
             if (index < 0 || index >= MaxPlayers) continue;
@@ -165,7 +169,24 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         _firstKillHappened = false;
 
         Array.Clear(_lastVictimOf);
+        Array.Clear(_lastKillAt);
         _clutchCandidates.Clear();
+    }
+
+    /// <summary>How a death is scored, as the engine's PlayerKilled scores it: the bomb's kill is not scored at all; a
+    /// death with no scorer, or with the victim as the scorer, is a suicide; a bot is a scorer like anyone else (its
+    /// kill is an enemy kill, the first of the round if nobody's came before), but no credit goes to a bot, so only a
+    /// human's kill of a teammate is a team kill.</summary>
+    internal static (bool Suicide, bool TeamKill, bool EnemyKill) ClassifyKill(
+        PlayerControllerState attacker, PlayerControllerState victim, bool isSelfKill, bool killedByBomb)
+    {
+        if (killedByBomb) return (false, false, false);
+        var suicide = !attacker.IsValid || isSelfKill;
+        var teamKill = !suicide && !attacker.IsBot && victim.IsValid && attacker.Team == victim.Team &&
+            victim.Team is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist;
+        var enemyKill = !suicide && attacker.Team != victim.Team &&
+            attacker.Team is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist;
+        return (suicide, teamKill, enemyKill);
     }
 
     private void HandlePlayerDeath(EventPlayerDeath @event)
@@ -185,18 +206,25 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             var victimState = PlayerControllerState.From(victim);
             var attackerState = PlayerControllerState.From(attacker);
             var assisterState = PlayerControllerState.From(assister);
-
-            // Handle Entry Kill tracking for insta-kills (no player_hurt event preceded this)
-            if (!_firstEngagementHappened && attackerState.IsValid && victimState.IsValid && attackerState.Team != victimState.Team && !attackerState.IsBot && !victimState.IsBot)
-            {
-                _firstEngagementHappened = true;
-                _firstEngagementAttackerIndex = (int)attacker!.Index;
-                _firstEngagementVictimIndex = victimIndex;
-                _playerSessions.MutatePlayer(attackerState.SteamId, stats => stats.Combat.EntryKillAttempts++);
-            }
+            // Bots have no SteamID, so the killer is told apart from the victim by entity index.
+            var attackerIndex = attackerState.IsValid ? (int)attacker!.Index : -1;
+            if (attackerIndex >= MaxPlayers) return;
+            var isSelfKill = attackerIndex == victimIndex;
 
             var weaponName = @event.GetStringValue("weapon", "unknown") ?? "unknown";
             var isHeadshot = @event.GetBoolValue("headshot", false);
+            // The planter is the attacker of the bomb's kills; the engine scores none of it (PlayerKilled skips it).
+            var killedByBomb = weaponName == "planted_c4";
+            var (isSuicide, isTeamKill, isEnemyKill) = ClassifyKill(attackerState, victimState, isSelfKill, killedByBomb);
+
+            // Handle Entry Kill tracking for insta-kills (no player_hurt event preceded this)
+            if (!_firstEngagementHappened && isEnemyKill && victimState.IsValid)
+            {
+                _firstEngagementHappened = true;
+                _firstEngagementAttackerIndex = attackerIndex;
+                _firstEngagementVictimIndex = victimIndex;
+                if (!attackerState.IsBot) _playerSessions.MutatePlayer(attackerState.SteamId, stats => stats.Combat.EntryKillAttempts++);
+            }
 
             var noscope = @event.GetBoolValue("noscope", false);
             // CS2 player_death keys are "thrusmoke"/"attackerblind" (no underscore); the underscored
@@ -219,59 +247,56 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
             bool isGrenadeKill = GrenadeWeaponNames.Contains(NormalizeWeaponName(weaponName));
             // The entry duel is lost only to the player who opened it, as EntryKills counts it.
-            bool killedByEngager = attacker is { IsValid: true } && (int)attacker.Index == _firstEngagementAttackerIndex;
-            bool isFirstKillOfRound = !_firstKillHappened &&
-                attackerState.IsValid && !attackerState.IsBot &&
-                attackerState.SteamId != victimState.SteamId && attackerState.Team != victimTeam;
-            // A suicide has no attacker or the victim as attacker; the bomb is neither a suicide nor a team kill (the game
-            // does not penalise it either).
-            bool killedByBomb = weaponName == "planted_c4";
-            bool isSuicide = !killedByBomb && (!attackerState.IsValid || attackerState.SteamId == victimState.SteamId);
-            bool isTeamKill = !killedByBomb && attackerState.IsValid && !attackerState.IsBot && victimState.IsValid &&
-                attackerState.SteamId != victimState.SteamId && attackerState.Team == victimTeam &&
-                victimTeam is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist;
+            bool killedByEngager = attackerIndex >= 0 && attackerIndex == _firstEngagementAttackerIndex;
+            // Whoever made it, a bot too: the kills after it are not the round's first.
+            bool isFirstKillOfRound = !_firstKillHappened && isEnemyKill;
+            if (isFirstKillOfRound) _firstKillHappened = true;
 
-            if (victimState.IsValid && !victimState.IsBot)
+            if (victimState.IsValid)
             {
                 _playerTeams[victimIndex] = victimTeam;
 
-                var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
-                // Round 0: no freeze end seen yet (loaded mid-round), so there is no round to attribute the position to.
-                if (victimState.PawnHandle != 0 && _currentRoundNumber > 0 && _config.CurrentValue.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
+                if (!victimState.IsBot)
                 {
-                    var posEvent = _positionPersistence.GetDeathEvent();
-
-                    posEvent.MatchUuid = matchUuid;
-                    posEvent.SteamId = victimState.SteamId;
-                    posEvent.X = victimState.Position.X;
-                    posEvent.Y = victimState.Position.Y;
-                    posEvent.Z = victimState.Position.Z;
-                    posEvent.CauseOfDeath = weaponName;
-                    posEvent.IsHeadshot = isHeadshot;
-                    posEvent.Team = (int)victimTeam;
-                    posEvent.MapName = Server.MapName;
-                    posEvent.RoundNumber = _currentRoundNumber;
-                    posEvent.RoundTime = (int)(now - _currentRoundStartUtc).TotalSeconds;
-
-                    _positionPersistence.TryEnqueue(posEvent);
-                }
-
-                _playerSessions.MutatePlayer(victimState.SteamId, stats =>
-                {
-                    stats.Round.SurvivedThisRound = false;
-                    stats.Combat.Deaths++;
-                    stats.Weapon.RecordDeath(weaponName);
-                    if (victimTeam == PlayerTeam.CounterTerrorist) stats.Combat.CtDeaths++;
-                    else if (victimTeam == PlayerTeam.Terrorist) stats.Combat.TDeaths++;
-                    if (isSuicide) stats.Combat.Suicides++;
-                    stats.CurrentTeam = victimTeam;
-
-                    // Entry Death tracking
-                    if (_firstEngagementVictimIndex == victimIndex && killedByEngager)
+                    var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
+                    // Round 0: no freeze end seen yet (loaded mid-round), so there is no round to attribute the position to.
+                    if (victimState.HasPawn && _currentRoundNumber > 0 && _config.CurrentValue.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
                     {
-                        stats.Combat.EntryDeaths++;
+                        var posEvent = _positionPersistence.GetDeathEvent();
+
+                        posEvent.MatchUuid = matchUuid;
+                        posEvent.SteamId = victimState.SteamId;
+                        posEvent.X = victimState.Position.X;
+                        posEvent.Y = victimState.Position.Y;
+                        posEvent.Z = victimState.Position.Z;
+                        posEvent.CauseOfDeath = weaponName;
+                        posEvent.IsHeadshot = isHeadshot;
+                        posEvent.Team = (int)victimTeam;
+                        posEvent.MapName = Server.MapName;
+                        posEvent.RoundNumber = _currentRoundNumber;
+                        posEvent.RoundTime = (int)(now - _currentRoundStartUtc).TotalSeconds;
+
+                        _positionPersistence.TryEnqueue(posEvent);
                     }
-                });
+
+                    _playerSessions.MutatePlayer(victimState.SteamId, stats =>
+                    {
+                        // The round's survivors were counted at its end; a death after that is not this round's.
+                        if (!_roundEnded) stats.Round.SurvivedThisRound = false;
+                        stats.Combat.Deaths++;
+                        stats.Weapon.RecordDeath(weaponName);
+                        if (victimTeam == PlayerTeam.CounterTerrorist) stats.Combat.CtDeaths++;
+                        else if (victimTeam == PlayerTeam.Terrorist) stats.Combat.TDeaths++;
+                        if (isSuicide) stats.Combat.Suicides++;
+                        stats.CurrentTeam = victimTeam;
+
+                        // Entry Death tracking
+                        if (_firstEngagementVictimIndex == victimIndex && killedByEngager)
+                        {
+                            stats.Combat.EntryDeaths++;
+                        }
+                    });
+                }
 
                 if (_isPlayerAlive[victimIndex])
                 {
@@ -284,21 +309,14 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
             if (isTeamKill) _playerSessions.MutatePlayer(attackerState.SteamId, stats => stats.Combat.TeamKills++);
 
-            if (attackerState.IsValid && !attackerState.IsBot && attackerState.SteamId != victimState.SteamId &&
-                attackerState.Team != victimTeam && attackerState.Team is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist)
+            // The kill's credit, to a human only.
+            if (isEnemyKill && !attackerState.IsBot)
             {
-                var attackerIndex = (int)attacker!.Index;
-                if (attackerIndex < 0 || attackerIndex >= MaxPlayers) return;
                 var attackerTeam = attackerState.Team;
                 _playerTeams[attackerIndex] = attackerTeam;
                 var (ctAlive, tAlive) = GetAliveCounts();
                 var enemyAlive = attackerTeam == PlayerTeam.CounterTerrorist ? tAlive : ctAlive;
                 var teammatesAlive = attackerTeam == PlayerTeam.CounterTerrorist ? ctAlive : tAlive;
-
-                if (isFirstKillOfRound)
-                {
-                    _firstKillHappened = true;
-                }
 
                 // Counts are post-kill: the victim was a living enemy, so the kill that wins the clutch counts too.
                 // A dead attacker (fire, grenade) is not the one clutching.
@@ -314,7 +332,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 }
 
                 var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
-                if (attackerState.PawnHandle != 0 && victimState.PawnHandle != 0 && _currentRoundNumber > 0 && _config.CurrentValue.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
+                if (attackerState.HasPawn && victimState.HasPawn && _currentRoundNumber > 0 && _config.CurrentValue.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
                 {
                     var posEvent = _positionPersistence.GetKillEvent();
 
@@ -345,7 +363,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 // the pre-kill state had one more player on the victim's team.) Credited at round end
                 // only if the team wins the round.
                 decimal swingDelta = 0m;
-                if (!victimState.IsBot && attackerTeam != victimTeam && victimTeam is PlayerTeam.CounterTerrorist or PlayerTeam.Terrorist)
+                if (victimTeam is PlayerTeam.CounterTerrorist or PlayerTeam.Terrorist)
                 {
                     var ctBefore = ctAlive;
                     var tBefore = tAlive;
@@ -406,20 +424,21 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     else if (teammatesAlive >= enemyAlive + 3) stats.Combat.LowImpactKills++;
                 });
 
-                // A trade: the enemy just killed had killed one of the attacker's teammates within the window.
+                // A trade: the enemy just killed had killed one of the attacker's teammates (a bot too) within the window.
                 var tradedSteamId = _lastVictimOf[victimIndex];
-                if (tradedSteamId != 0 && tradedSteamId != attackerState.SteamId &&
+                if (_lastKillAt[victimIndex] != default && tradedSteamId != attackerState.SteamId &&
                     (now - _lastKillAt[victimIndex]).TotalSeconds <= tradeWindowSeconds)
                 {
                     _playerSessions.MutatePlayer(attackerState.SteamId, stats => { stats.Combat.TradeKills++; stats.Round.DidTradeThisRound = true; });
-                    _playerSessions.MutatePlayer(tradedSteamId, stats => { stats.Combat.TradedDeaths++; stats.Round.WasTradedThisRound = true; });
+                    if (tradedSteamId != 0) _playerSessions.MutatePlayer(tradedSteamId, stats => { stats.Combat.TradedDeaths++; stats.Round.WasTradedThisRound = true; });
                     _lastVictimOf[victimIndex] = 0;
+                    _lastKillAt[victimIndex] = default;
                 }
             }
 
-            if (victimState.IsValid && !victimState.IsBot && victimTeam is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist)
+            if (victimState.IsValid && victimTeam is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist)
             {
-                if (isFirstKillOfRound)
+                if (isFirstKillOfRound && !victimState.IsBot)
                 {
                     _playerSessions.MutatePlayer(victimState.SteamId, stats =>
                     {
@@ -428,11 +447,11 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     });
                 }
 
-                // Remember whom the enemy killer (a bot counts) took down, so killing it can trade this death.
-                if (attacker is { IsValid: true } && (PlayerTeam)attacker.TeamNum != victimTeam && attacker.Index < MaxPlayers)
+                // Remember whom the enemy killer (a bot counts, as the victim) took down, so killing it can trade this death.
+                if (isEnemyKill)
                 {
-                    _lastVictimOf[attacker.Index] = victimState.SteamId;
-                    _lastKillAt[attacker.Index] = now;
+                    _lastVictimOf[attackerIndex] = victimState.SteamId;
+                    _lastKillAt[attackerIndex] = now;
                 }
             }
 
@@ -471,6 +490,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
             var victimState = PlayerControllerState.From(victim);
             var attackerState = PlayerControllerState.From(attacker);
+            // Bots have no SteamID, so self-damage is told by entity index.
+            var isSelfDamage = attackerState.IsValid && attacker!.Index == victim.Index;
 
             var weapon = (@event.GetStringValue("weapon", "unknown") ?? "unknown").ToLowerInvariant();
             var damage = ClampToRemainingHealth(victimIndex, victimState.SteamId, @event.GetIntValue("dmg_health", 0), @event.GetIntValue("health", 0));
@@ -479,32 +500,32 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             var hitgroup = @event.GetIntValue("hitgroup", 0);
             var isUtilityDamage = UtilityDamageWeapons.Contains(weapon);
 
-            // Entry Kill Attempt Tracking
-            if (!_firstEngagementHappened && attackerState.IsValid && victimState.IsValid && attackerState.Team != victimState.Team && !attackerState.IsBot && !victimState.IsBot)
+            // Entry Kill Attempt Tracking (a bot opens the duel too; the attempt is credited to a human only)
+            if (!_firstEngagementHappened && attackerState.IsValid && victimState.IsValid && attackerState.Team != victimState.Team)
             {
                 _firstEngagementHappened = true;
                 _firstEngagementAttackerIndex = (int)attacker!.Index;
                 _firstEngagementVictimIndex = victimIndex;
 
-                _playerSessions.MutatePlayer(attackerState.SteamId, stats => stats.Combat.EntryKillAttempts++);
+                if (!attackerState.IsBot) _playerSessions.MutatePlayer(attackerState.SteamId, stats => stats.Combat.EntryKillAttempts++);
                 _logger.LogDebug("First engagement of round {Round}: {Attacker} vs {Victim}", _currentRoundNumber, attackerState.PlayerName, victimState.PlayerName);
             }
 
-            var isEnemyDamage = attackerState.IsValid && !attackerState.IsBot &&
-                victimState.IsValid && !victimState.IsBot &&
-                attackerState.SteamId != victimState.SteamId && attackerState.Team != victimState.Team &&
+            // Damage between enemies, bots included: a bot's is taken, and damage to a bot is dealt.
+            var isEnemyDamage = attackerState.IsValid && victimState.IsValid && !isSelfDamage &&
+                attackerState.Team != victimState.Team &&
                 attackerState.Team is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist &&
                 victimState.Team is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist;
 
             // Friendly fire: HP removed from a teammate, kept apart from the damage dealt.
             if (attackerState.IsValid && !attackerState.IsBot && victimState.IsValid &&
-                attackerState.SteamId != victimState.SteamId && attackerState.Team == victimState.Team &&
+                !isSelfDamage && attackerState.Team == victimState.Team &&
                 attackerState.Team is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist)
             {
                 _playerSessions.MutatePlayer(attackerState.SteamId, stats => stats.Combat.TeamDamage += damage);
             }
 
-            if (isEnemyDamage)
+            if (isEnemyDamage && !victimState.IsBot)
             {
                 _playerSessions.MutatePlayer(victimState.SteamId, stats =>
                 {
@@ -513,7 +534,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 });
             }
 
-            if (isEnemyDamage)
+            if (isEnemyDamage && !attackerState.IsBot)
             {
                 _damageReport.RecordDamage(attackerState.SteamId, victimState.SteamId, damage);
                 _playerSessions.MutatePlayer(attackerState.SteamId, stats =>
@@ -631,20 +652,22 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             if (playerIndex < 0 || playerIndex >= MaxPlayers) return;
 
             var playerState = PlayerControllerState.From(player);
-            if (playerState.IsValid && !playerState.IsBot)
-            {
-                if (!_isPlayerAlive[playerIndex])
-                {
-                    if (playerState.Team == PlayerTeam.CounterTerrorist) _ctAliveCount++;
-                    else if (playerState.Team == PlayerTeam.Terrorist) _tAliveCount++;
-                }
+            if (!playerState.IsValid) return;
 
-                _isPlayerAlive[playerIndex] = true;
-                _playerHealth[playerIndex] = playerState.Health;
-                _playerSteamIds[playerIndex] = playerState.SteamId;
-                _playerTeams[playerIndex] = playerState.Team;
-                _playerSessions.MutatePlayer(playerState.SteamId, stats => { stats.Round.SurvivedThisRound = true; stats.CurrentTeam = playerState.Team; });
+            if (!_isPlayerAlive[playerIndex])
+            {
+                if (playerState.Team == PlayerTeam.CounterTerrorist) _ctAliveCount++;
+                else if (playerState.Team == PlayerTeam.Terrorist) _tAliveCount++;
             }
+
+            _isPlayerAlive[playerIndex] = true;
+            _playerHealth[playerIndex] = playerState.Health;
+            _playerSteamIds[playerIndex] = playerState.SteamId;
+            _playerTeams[playerIndex] = playerState.Team;
+            // The respawn for the next round comes before round_start, while the ended round's rows are still to be
+            // re-sent: it must not mark the dead as survivors. Freeze end marks who starts the new round.
+            if (!playerState.IsBot)
+                _playerSessions.MutatePlayer(playerState.SteamId, stats => { if (!_roundEnded) stats.Round.SurvivedThisRound = true; stats.CurrentTeam = playerState.Team; });
         }
         catch (Exception ex) { _logger.LogError(ex, "Error handling player spawned event"); }
     }
@@ -668,6 +691,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 _isPlayerAlive[playerIndex] = false;
                 _playerHealth[playerIndex] = 0;
                 _lastVictimOf[playerIndex] = 0;
+                _lastKillAt[playerIndex] = default;
                 _playerSteamIds[playerIndex] = 0;
                 _playerTeams[playerIndex] = PlayerTeam.Spectator;
                 _playerRoundKills[playerIndex] = 0;
@@ -681,6 +705,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
     public void OnRoundEnd(int winnerTeam, int winReason)
     {
+        _roundEnded = true;
         var winningTeam = winnerTeam switch { 2 => PlayerTeam.Terrorist, 3 => PlayerTeam.CounterTerrorist, _ => PlayerTeam.Spectator };
 
         // Round Swing is only credited to the team that won the round; everyone's per-round tally is
@@ -729,6 +754,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
         CaptureClutchCandidate(PlayerTeam.Terrorist, _tAliveCount, _ctAliveCount);
     }
 
+    // A lone bot (SteamID 0) is never a candidate: there is no session to credit. Opponents are counted bots included.
     private void CaptureClutchCandidate(PlayerTeam team, int alliesAlive, int opponentsAlive)
     {
         if (alliesAlive != 1 || opponentsAlive < 1 || _clutchCandidates.ContainsKey(team)) return;

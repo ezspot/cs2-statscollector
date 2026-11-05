@@ -21,6 +21,17 @@ public interface IPlayerSessionService
     /// is ignored, since it read the row the replacement must not start from.</summary>
     void HydrateLifetime(ulong steamId, long sessionId, LifetimePlayerStatsRow? lifetime);
     bool TryRemovePlayer(ulong steamId);
+
+    /// <summary>Marks the session as left so <see cref="TryRemoveDisconnected"/> can drop it. An unseeded session is
+    /// kept, marked, until its seed completes (nothing of it may be persisted before); a reconnect clears the mark.</summary>
+    void MarkDisconnected(ulong steamId);
+
+    /// <summary>Removes a session that is marked disconnected and seeded, returning its final snapshot. False while
+    /// the session is unseeded, when the player is back, or when it is already gone.</summary>
+    bool TryRemoveDisconnected(ulong steamId, out PlayerSnapshot snapshot, string? matchUuid = null);
+
+    /// <summary>True while a session is kept after its player left (see <see cref="MarkDisconnected"/>).</summary>
+    bool IsHeld(ulong steamId);
     void MutatePlayer(ulong steamId, Action<PlayerStats> mutation);
     T WithPlayer<T>(ulong steamId, Func<PlayerStats, T> accessor, T defaultValue = default!);
     void ForEachPlayer(Action<PlayerStats> action);
@@ -57,6 +68,8 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
         wrapper.Lock.EnterWriteLock();
         try
         {
+            // A reconnect before a held session's seed caught up continues that session.
+            wrapper.DisconnectedUtc = null;
             if (wrapper.Stats.Name != player.PlayerName)
             {
                 _logger.LogDebug("Updating player name in session: {OldName} -> {NewName} (SteamID: {SteamID})", wrapper.Stats.Name, player.PlayerName, player.SteamId);
@@ -92,11 +105,65 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
         }
     }
 
-    public bool TryRemovePlayer(ulong steamId)
+    // The wrapper's lock is not disposed here: a seed on a pool thread may hold it (ReaderWriterLockSlim.Dispose
+    // throws SynchronizationLockException then, on the game thread); it is collected with the wrapper.
+    public bool TryRemovePlayer(ulong steamId) => _playerStats.TryRemove(steamId, out _);
+
+    public void MarkDisconnected(ulong steamId)
     {
-        var removed = _playerStats.TryRemove(steamId, out var wrapper);
-        wrapper?.Dispose();
-        return removed;
+        if (!_playerStats.TryGetValue(steamId, out var wrapper)) return;
+
+        wrapper.Lock.EnterWriteLock();
+        try
+        {
+            wrapper.DisconnectedUtc ??= DateTime.UtcNow;
+        }
+        finally
+        {
+            wrapper.Lock.ExitWriteLock();
+        }
+    }
+
+    public bool IsHeld(ulong steamId)
+    {
+        if (!_playerStats.TryGetValue(steamId, out var wrapper)) return false;
+
+        wrapper.Lock.EnterReadLock();
+        try
+        {
+            return wrapper.DisconnectedUtc is not null;
+        }
+        finally
+        {
+            wrapper.Lock.ExitReadLock();
+        }
+    }
+
+    public bool TryRemoveDisconnected(ulong steamId, out PlayerSnapshot snapshot, string? matchUuid = null)
+    {
+        snapshot = null!;
+        if (!_playerStats.TryGetValue(steamId, out var wrapper)) return false;
+
+        wrapper.Lock.EnterWriteLock();
+        try
+        {
+            // The disconnect handler and the seed loop can both get here: removing this wrapper (not whatever a
+            // reconnect put under the key) under its lock lets exactly one of them take the snapshot.
+            if (wrapper.DisconnectedUtc is not { } leftUtc || !wrapper.Stats.LifetimeSeeded ||
+                !_playerStats.TryRemove(new KeyValuePair<ulong, PlayerStatsWrapper>(steamId, wrapper)))
+            {
+                return false;
+            }
+
+            // Playtime ended at the disconnect, not when the seed caught up.
+            var taken = _analytics.CreateSnapshot(wrapper.Stats, matchUuid);
+            snapshot = taken with { PlaytimeSeconds = taken.PlaytimeSeconds - (int)(DateTime.UtcNow - leftUtc).TotalSeconds };
+            return true;
+        }
+        finally
+        {
+            wrapper.Lock.ExitWriteLock();
+        }
     }
 
     public void MutatePlayer(ulong steamId, Action<PlayerStats> mutation)
@@ -225,6 +292,8 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
         public PlayerStats Stats { get; }
         public ReaderWriterLockSlim Lock { get; }
         public long Id { get; } = Interlocked.Increment(ref _lastId);
+        // When the player left while this session was still held; guarded by Lock.
+        public DateTime? DisconnectedUtc { get; set; }
 
         public PlayerStatsWrapper(PlayerStats stats)
         {
@@ -234,7 +303,14 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
 
         public void Dispose()
         {
-            Lock?.Dispose();
+            // A seed on a pool thread may still hold the lock at unload; it is then left to the collector.
+            try
+            {
+                Lock.Dispose();
+            }
+            catch (SynchronizationLockException)
+            {
+            }
         }
     }
 }

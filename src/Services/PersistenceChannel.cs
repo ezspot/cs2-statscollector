@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -11,6 +13,18 @@ using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
+// Serialisable: the retry buffer is kept on disk across a restart (PersistenceChannel.SpillFailedBatches).
+[JsonPolymorphic]
+[JsonDerivedType(typeof(PlayerStatsUpdate), "player")]
+[JsonDerivedType(typeof(MatchPlayerStatsUpdate), "matchPlayer")]
+[JsonDerivedType(typeof(RoundStartUpdate), "roundStart")]
+[JsonDerivedType(typeof(RoundEndUpdate), "roundEnd")]
+[JsonDerivedType(typeof(RoundEconomyUpdate), "roundEconomy")]
+[JsonDerivedType(typeof(PlayerRoundStatsUpdate), "playerRound")]
+[JsonDerivedType(typeof(RoundOfficialEndUpdate), "roundOfficialEnd")]
+[JsonDerivedType(typeof(RoundsVoidedUpdate), "roundsVoided")]
+[JsonDerivedType(typeof(MatchStartUpdate), "matchStart")]
+[JsonDerivedType(typeof(MatchEndUpdate), "matchEnd")]
 public abstract record StatsUpdate(string? MatchUuid = null, int? RoundNumber = null, ulong? SteamId = null);
 
 public sealed record PlayerStatsUpdate(PlayerSnapshot Snapshot)
@@ -65,6 +79,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
     private readonly ILogger<PersistenceChannel> _logger;
     private readonly IStatsRepository _repository;
     private readonly Queue<List<StatsUpdate>> _failedBatches = new();
+    private readonly string _spillPath;
     private const long MaxBufferSize = 50 * 1024 * 1024;
     private long _currentBufferSize;
     // Open from construction: the channel buffers writes made before the worker's first read.
@@ -73,10 +88,13 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
     public PersistenceChannel(
         ILogger<PersistenceChannel> logger,
         IStatsRepository repository,
-        IOptionsMonitor<PluginConfig> config)
+        IOptionsMonitor<PluginConfig> config,
+        string? spillPath = null)
     {
         _logger = logger;
         _repository = repository;
+        // Unwritten batches kept across a restart, next to the scrim state. Resolved here, on the game thread (a native call).
+        _spillPath = spillPath ?? Path.Combine(JsonRecoveryService.PluginDirectory, "pending_stats.json");
         _channel = Channel.CreateBounded<PersistenceMessage>(new BoundedChannelOptions(config.CurrentValue.PersistenceChannelCapacity)
         {
             FullMode = BoundedChannelFullMode.Wait,
@@ -107,6 +125,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
         var batch = new List<StatsUpdate>(100);
         try
         {
+            await RestoreSpilledBatchesAsync(stoppingToken).ConfigureAwait(false);
             while (await _channel.Reader.WaitToReadAsync(stoppingToken).ConfigureAwait(false))
             {
                 while (_channel.Reader.TryRead(out var message))
@@ -171,12 +190,64 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                 }
             }
 
-            if (batch.Count > 0)
+            if (batch.Count > 0 && _failedBatches.Count > 0)
+            {
+                // An outage is on: retrying now would spend the unload budget before the spill below gets its turn.
+                BufferFailedBatch([.. batch]);
+            }
+            else if (batch.Count > 0)
             {
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                await ProcessBatchAsync(batch, timeout.Token).ConfigureAwait(false);
+                try
+                {
+                    await ProcessBatchAsync(batch, timeout.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    BufferFailedBatch([.. batch]);
+                }
             }
+            SpillFailedBatches();
         }
+    }
+
+    // What an outage left in the retry buffer at unload is kept on disk and written at the next start.
+    private void SpillFailedBatches()
+    {
+        if (_failedBatches.Count == 0) return;
+        var updates = _failedBatches.Sum(batch => batch.Count);
+        try
+        {
+            File.WriteAllText(_spillPath + ".tmp", JsonSerializer.Serialize(_failedBatches));
+            File.Move(_spillPath + ".tmp", _spillPath, true);
+            _logger.LogWarning("Kept {Batches} unwritten persistence batches ({Updates} updates) in {Path} for the next start.",
+                _failedBatches.Count, updates, _spillPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogCritical(ex, "Could not keep {Updates} unwritten updates in {Path}; they are lost.", updates, _spillPath);
+        }
+    }
+
+    private async Task RestoreSpilledBatchesAsync(CancellationToken cancellationToken)
+    {
+        if (!File.Exists(_spillPath)) return;
+        List<List<StatsUpdate>> batches;
+        try
+        {
+            batches = JsonSerializer.Deserialize<List<List<StatsUpdate>>>(File.ReadAllText(_spillPath)) ?? [];
+            File.Delete(_spillPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Could not read the unwritten updates kept in {Path}; the file is left in place.", _spillPath);
+            return;
+        }
+
+        foreach (var batch in batches) BufferFailedBatch(batch);
+        _logger.LogInformation("Restored {Batches} unwritten persistence batches ({Updates} updates) from {Path}.",
+            batches.Count, batches.Sum(batch => batch.Count), _spillPath);
+        await ProcessRetryQueueAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task FlushAsync(ulong? steamId = null, CancellationToken cancellationToken = default)
@@ -237,7 +308,8 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
 
     // A deterministic error (bad data, a missing column or privilege) fails the same way on every retry; buffered, the
     // batch would block every later write behind it. Write such a batch one update at a time and drop only the updates
-    // that fail that way. Throws only for errors a retry can fix, so the batch is buffered.
+    // that fail that way; a server that refuses every LOAD DATA LOCAL (local_infile=OFF) fails each of them the same
+    // way, so that batch is dropped whole. Throws only for errors a retry can fix, so the batch is buffered.
     private async Task WriteAsync(IReadOnlyList<StatsUpdate> batch, CancellationToken cancellationToken)
     {
         try
@@ -245,13 +317,14 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
             await ProcessBatchCoreAsync(batch, cancellationToken).ConfigureAwait(false);
             return;
         }
-        catch (Exception ex) when (IsPermanent(ex) && batch.Count > 1)
+        catch (Exception ex) when (IsPermanent(ex) && batch.Count > 1 && !ResiliencePolicies.IsLocalInfileDisabled(ex))
         {
             _logger.LogWarning(ex, "Persistence batch of {Count} updates failed permanently; writing its updates one at a time.", batch.Count);
         }
         catch (Exception ex) when (IsPermanent(ex))
         {
-            LogDropped(batch[0], ex);
+            if (batch.Count == 1) LogDropped(batch[0], ex);
+            else _logger.LogCritical(ex, "Dropped {Count} updates: the server refuses LOAD DATA LOCAL (local_infile=OFF). Run SET GLOBAL local_infile = 1;", batch.Count);
             return;
         }
 
@@ -313,6 +386,8 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                     await _repository.OfficiallyEndRoundAsync(officialEnd.MatchId, officialEnd.Number, cancellationToken).ConfigureAwait(false);
                     break;
                 case RoundsVoidedUpdate voided:
+                    // Rows of the voided rounds queued before the void would otherwise be written after its delete.
+                    roundStats.RemoveAll(s => s.MatchUuid == voided.MatchId && s.RoundNumber >= voided.FromRound);
                     await _repository.VoidRoundsAsync(voided.MatchId, voided.FromRound, cancellationToken).ConfigureAwait(false);
                     break;
                 case MatchStartUpdate matchStart:

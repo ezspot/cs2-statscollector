@@ -70,6 +70,12 @@ public sealed class PlayerLifecycleHandler : IGameHandler
                 await _persistenceChannel.FlushAsync(steamId, _stoppingToken).ConfigureAwait(false);
                 var lifetime = await _statsRepository.GetLifetimePlayerStatsAsync(steamId, _stoppingToken).ConfigureAwait(false);
                 _playerSessions.HydrateLifetime(steamId, sessionId, lifetime);
+                // The player left while the seed was waiting on the database: their session was held for this write.
+                if (_playerSessions.TryRemoveDisconnected(steamId, out var snapshot, _matchTracker.CurrentMatch?.MatchUuid))
+                {
+                    _persistenceChannel.TryWrite(new PlayerStatsUpdate(snapshot));
+                    return;
+                }
                 _matchStats.EnsureBaseline(steamId);
                 return;
             }
@@ -96,47 +102,66 @@ public sealed class PlayerLifecycleHandler : IGameHandler
     public void Register(BasePlugin plugin)
     {
         plugin.RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
+        plugin.RegisterListener<Listeners.OnClientAuthorized>((slot, _) => OnClientAuthorized(slot));
         plugin.RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
         plugin.RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
         plugin.RegisterEventHandler<EventPlayerTeam>(OnPlayerTeam);
     }
 
+    // The controller's SteamID is what the client claimed. Steam validates it after the connect, and until then
+    // AuthorizedSteamID is null (CounterStrikeSharp 1.0.379 CCSPlayerController.cs:293-302); a session keyed on the
+    // claim could credit someone else's account. A LAN server (sv_lan 1) never validates, so the claim is all it has.
+    internal static bool IsAuthorized(CCSPlayerController player) =>
+        player.AuthorizedSteamID is not null || GameRulesState.ConVarBool("sv_lan", false);
+
     private HookResult OnPlayerConnectFull(EventPlayerConnectFull @event, GameEventInfo info)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        if (player != null && !player.IsBot && player.SteamID != 0)
-        {
-            _logger.LogInformation("Player {Name} fully connected. SteamID: {SteamID}", player.PlayerName, player.SteamID);
-
-            var state = PlayerControllerState.From(player);
-            _playerSessions.EnsurePlayer(state);
-
-            if (_scrimManager.CurrentState is ScrimState.Live)
-            {
-                _logger.LogInformation("Late-joiner detected: {Name}.", player.PlayerName);
-            }
-            _scrimManager.HandlePlayerConnected(player.SteamID);
-        }
+        if (player != null && !player.IsBot && player.SteamID != 0 && IsAuthorized(player)) StartSession(player);
         return HookResult.Continue;
+    }
+
+    // Validation that completes after player_connect_full starts the session here; before it, connect_full does.
+    private void OnClientAuthorized(int slot)
+    {
+        var player = Utilities.GetPlayerFromSlot(slot);
+        if (player is { IsValid: true, IsBot: false, SteamID: not 0 } && player.Connected == PlayerConnectedState.Connected)
+            StartSession(player);
+    }
+
+    private void StartSession(CCSPlayerController player)
+    {
+        _logger.LogInformation("Player {Name} fully connected. SteamID: {SteamID}", player.PlayerName, player.SteamID);
+
+        _playerSessions.EnsurePlayer(PlayerControllerState.From(player));
+
+        if (_scrimManager.CurrentState is ScrimState.Live)
+        {
+            _logger.LogInformation("Late-joiner detected: {Name}.", player.PlayerName);
+        }
+        _scrimManager.HandlePlayerConnected(player.SteamID);
     }
 
     private HookResult OnPlayerDisconnect(EventPlayerDisconnect @event, GameEventInfo info)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        if (player != null && !player.IsBot && player.SteamID != 0)
-        {
-            var steamId = player.SteamID;
-            // A map change disconnects every client, and they reconnect on the new map; only a real disconnect may
-            // abort the scrim (the knife round is played after the change to the voted map).
-            if (!IsMapChangeDisconnect(@event.Reason)) _scrimManager.HandleDisconnect(steamId);
+        if (player is { IsBot: true }) return HookResult.Continue;
+        // The controller is already gone for some disconnects; the event's xuid still names the player (0 for a bot).
+        var steamId = player?.SteamID ?? @event.Xuid;
+        if (steamId == 0) return HookResult.Continue;
 
-            var match = _matchTracker.CurrentMatch;
-            _matchStats.FinalizePlayer(steamId);
-            if (_playerSessions.TryGetSnapshot(steamId, out var snapshot, match?.MatchUuid))
-            {
-                _persistenceChannel.TryWrite(new PlayerStatsUpdate(snapshot));
-            }
-            _playerSessions.TryRemovePlayer(steamId);
+        // A map change disconnects every client, and they reconnect on the new map; only a real disconnect may
+        // abort the scrim (the knife round is played after the change to the voted map).
+        if (!IsMapChangeDisconnect(@event.Reason)) _scrimManager.HandleDisconnect(steamId);
+
+        var match = _matchTracker.CurrentMatch;
+        _matchStats.FinalizePlayer(steamId);
+        // An unseeded session (its seed is waiting on the database) has nothing persistable yet: it stays, marked,
+        // until SeedLifetimeAsync has seeded it and writes it from there.
+        _playerSessions.MarkDisconnected(steamId);
+        if (_playerSessions.TryRemoveDisconnected(steamId, out var snapshot, match?.MatchUuid))
+        {
+            _persistenceChannel.TryWrite(new PlayerStatsUpdate(snapshot));
         }
         return HookResult.Continue;
     }
@@ -148,7 +173,7 @@ public sealed class PlayerLifecycleHandler : IGameHandler
     private HookResult OnPlayerSpawn(EventPlayerSpawn @event, GameEventInfo info)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        if (player is { IsBot: false, SteamID: not 0 })
+        if (player is { IsBot: false, SteamID: not 0 } && IsAuthorized(player))
         {
             var state = PlayerControllerState.From(player);
             _playerSessions.EnsurePlayer(state);

@@ -1,4 +1,4 @@
-# statsCollector — Quick Start (v3.1.0)
+# statsCollector — Quick Start (v1.0.0)
 
 Get up and running fast. For full details, see [README.md](README.md).
 
@@ -46,9 +46,10 @@ it up as in the README's *Database prerequisites* (`local_infile=ON`, `DELETE` a
 4. Start the server and verify with `css_plugins list`.
 
 ## Verify
-- **Console / logs**: look for `statsCollector v3.1.0 loading...` (console and `addons/counterstrikesharp/logs/log-statsCollector*.txt`) and `Background persistence services started.` (`plugins/statsCollector/logs/statscollector-*.log`).
+- **Console / logs**: look for `statsCollector v1.0.0 loading...` (console and `addons/counterstrikesharp/logs/log-statsCollector*.txt`) and `Background persistence services started.` (`plugins/statsCollector/logs/statscollector-*.log`).
 - **Matches**: `SELECT * FROM matches;`
 - **Round completion**: `SELECT round_number, end_time, official_end_time FROM rounds;`
+- **Per-round rows**: `SELECT round_number, steam_id, kills, damage_dealt, survived, kast FROM player_round_stats;`
 - **Utility lifecycle**: `SELECT utility_type, lifecycle_start_event, lifecycle_end_event, lifecycle_duration_ms FROM utility_positions;`
 - **Exact lifetime counters**: `SELECT kast_rounds, multi_kill_2, multi_kill_3, multi_kill_4, multi_kill_5, clutch_kills, bomb_explosions FROM player_stats;`
 - **Players**: `SELECT * FROM view_player_profile;`

@@ -4,6 +4,7 @@ using System.Linq;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Utils;
+using statsCollector.Domain;
 using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
@@ -38,15 +39,14 @@ public sealed class DamageReportService : IDamageReportService
 
     public void ReportToPlayers()
     {
+        var players = PlayerControllerState.HumansBySteamId();
         foreach (var (attackerId, victims) in _damageDealt)
         {
-            var attacker = Utilities.GetPlayerFromSteamId64(attackerId);
-            if (attacker == null || !attacker.IsValid) continue;
+            if (!players.TryGetValue(attackerId, out var attacker)) continue;
 
             foreach (var victimEntry in victims)
             {
-                var victim = Utilities.GetPlayerFromSteamId64(victimEntry.Key);
-                if (victim == null || !victim.IsValid) continue;
+                if (!players.TryGetValue(victimEntry.Key, out var victim)) continue;
 
                 var info = victimEntry.Value;
                 attacker.PrintToChat($" {ChatColors.Green}[Damage]{ChatColors.Default} To {ChatColors.Blue}{victim.PlayerName}{ChatColors.Default}: {ChatColors.Red}{info.Damage}{ChatColors.Default} in {ChatColors.Yellow}{info.Hits}{ChatColors.Default} hits");

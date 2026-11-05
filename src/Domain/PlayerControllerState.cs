@@ -1,4 +1,5 @@
 using System.Numerics;
+using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using Vector = CounterStrikeSharp.API.Modules.Utils.Vector;
 
@@ -20,11 +21,12 @@ public sealed record PlayerControllerState
     public required int EquipmentValue { get; init; }
     public required bool IsValid { get; init; }
     public required bool IsBot { get; init; }
-    public required uint PawnHandle { get; init; }
+    public required bool HasPawn { get; init; }
 
     public static PlayerControllerState From(CCSPlayerController? player)
     {
-        if (player == null || !player.IsValid || player.SteamID == 0)
+        // A bot (FL_FAKECLIENT) has no SteamID and is a player all the same; a human without one is not here yet.
+        if (player == null || !player.IsValid || (player.SteamID == 0 && !player.IsBot))
         {
             return new PlayerControllerState
             {
@@ -38,7 +40,7 @@ public sealed record PlayerControllerState
                 EquipmentValue = 0,
                 IsValid = false,
                 IsBot = false,
-                PawnHandle = 0
+                HasPawn = false
             };
         }
 
@@ -57,8 +59,21 @@ public sealed record PlayerControllerState
             EquipmentValue = pawn?.CurrentEquipmentValue ?? 0,
             IsValid = true,
             IsBot = player.IsBot,
-            PawnHandle = (uint)(pawn?.Handle ?? 0)
+            HasPawn = pawn is { IsValid: true }
         };
+    }
+
+    /// <summary>The connected humans by SteamID: one pass over the player slots for a loop that looks several up.</summary>
+    public static Dictionary<ulong, CCSPlayerController> HumansBySteamId() => HumansBySteamId(Utilities.GetPlayers());
+
+    public static Dictionary<ulong, CCSPlayerController> HumansBySteamId(IEnumerable<CCSPlayerController> everyone)
+    {
+        var players = new Dictionary<ulong, CCSPlayerController>();
+        foreach (var player in everyone)
+        {
+            if (!player.IsBot && player.SteamID != 0) players.TryAdd(player.SteamID, player);
+        }
+        return players;
     }
 
     // Schema vectors are views over entity memory, so read the values now rather than keep the view.

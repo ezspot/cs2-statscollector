@@ -35,7 +35,9 @@ public sealed class ConnectionFactory : IConnectionFactory
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to open database connection to {Host}:{Port}", configVal.DatabaseHost, configVal.DatabasePort);
+            // Callers log the failure once, after their retries.
+            _logger.LogDebug(ex, "Failed to open database connection to {Host}:{Port}", configVal.DatabaseHost, configVal.DatabasePort);
+            await connection.DisposeAsync().ConfigureAwait(false);
             throw;
         }
     }

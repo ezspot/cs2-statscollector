@@ -39,7 +39,9 @@ public sealed class PauseService(
             {
                 if (_tacticalPausesUsed[team] >= (_config.Scrim.MaxTacticalPauses > 0 ? _config.Scrim.MaxTacticalPauses : 4))
                 {
-                    _scheduler.Schedule(() => player.PrintToChat(" [Scrim] Your team has no tactical pauses left."));
+                    // The command callback runs on the game thread; printing now avoids holding the controller for a
+                    // later frame, when the player may be gone.
+                    player.PrintToChat(" [Scrim] Your team has no tactical pauses left.");
                     return;
                 }
             }
@@ -138,8 +140,8 @@ public sealed class PauseService(
         _tacticalPausesUsed[3] = 0;
     }
 
-    // Plugin.Unload calls this on the game thread (killing a timer is a native call); the container's later call on a
-    // pool thread then finds nothing to kill.
+    // Plugin.Unload calls this on the game thread (killing a timer is a native call, which CounterStrikeSharp does not
+    // guard against other threads); the container's later call on a pool thread then finds nothing to kill.
     public void Dispose()
     {
         _pauseTimer?.Kill();

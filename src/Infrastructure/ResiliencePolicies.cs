@@ -13,23 +13,24 @@ namespace statsCollector.Infrastructure;
 public static class ResiliencePolicies
 {
     // Failures a later attempt can fix: connectivity (MySqlConnector reports a dropped connection with ErrorCode
-    // None and an IO/socket inner exception), too many connections, deadlocks and lock waits. A deterministic
-    // error (bad SQL, missing column or privilege, local_infile disabled) fails the same way every time, and so
-    // does a rejected TLS certificate, which MySqlConnector reports as "unable to connect".
+    // None and an IO/socket inner exception; a drop while sending escapes as the raw IOException or SocketException),
+    // too many connections, deadlocks and lock waits. A deterministic error (bad SQL, missing column or privilege,
+    // local_infile disabled) fails the same way every time, and so does a rejected TLS certificate, which
+    // MySqlConnector reports as "unable to connect".
     public static bool IsTransient(MySqlException ex) =>
         (ex.IsTransient && ex.InnerException is not AuthenticationException) ||
         ex.InnerException is IOException or SocketException;
 
     // A failure that clears by itself: an unreachable or restarting database, or the breaker it opened.
     public static bool IsOutage(Exception ex) =>
-        ex is BrokenCircuitException || (ex is MySqlException mysql && IsTransient(mysql));
+        ex is BrokenCircuitException or IOException or SocketException || (ex is MySqlException mysql && IsTransient(mysql));
 
     // Whether a failed write is worth keeping for later. Only an error in the write's own data fails the same way
     // however often it is retried. Everything else may clear: an outage, a restart, a failover's read-only window, an
     // account's connection limit, or a missing column or grant that an admin fixes. Those writes stay buffered.
     public static bool IsRetryable(Exception ex) => ex switch
     {
-        MySqlException mysql => !IsDataError(mysql),
+        MySqlException mysql => !IsDataError(mysql) && !IsLocalInfileDisabled(mysql),
         ObjectDisposedException => true,
         // The plugin's own checks (rows the bulk copy mangled, a match row that does not exist), bad values, and bugs.
         InvalidOperationException or ArgumentException or FormatException or InvalidCastException or OverflowException
@@ -44,6 +45,11 @@ public static class ResiliencePolicies
             or MySqlErrorCode.NoReferencedRow2 or MySqlErrorCode.DataOutOfRange
         || ex.Number == 3819; // ER_CHECK_CONSTRAINT_VIOLATED
 
+    // The server refuses LOAD DATA LOCAL: local_infile=OFF (3948, ER_CLIENT_LOCAL_FILES_DISABLED) or the command itself
+    // (1148, ER_NOT_ALLOWED_COMMAND). Every bulk copy fails the same way until an admin changes the server, so a batch
+    // that hits it is dropped rather than buffered in front of every later write.
+    public static bool IsLocalInfileDisabled(Exception ex) => ex is MySqlException { Number: 3948 or 1148 };
+
     public static ResiliencePipeline CreateDatabasePipeline(ILogger logger)
     {
         ArgumentNullException.ThrowIfNull(logger);
@@ -52,7 +58,9 @@ public static class ResiliencePolicies
         var transient = new PredicateBuilder()
             .Handle<MySqlException>(IsTransient)
             .Handle<TimeoutRejectedException>()
-            .Handle<TimeoutException>();
+            .Handle<TimeoutException>()
+            .Handle<IOException>()
+            .Handle<SocketException>();
 
         // Strategies run outermost-first. The timeout is innermost so it bounds each attempt and the retry
         // and circuit breaker see TimeoutRejectedException; as the outer strategy, a hung call surfaced to

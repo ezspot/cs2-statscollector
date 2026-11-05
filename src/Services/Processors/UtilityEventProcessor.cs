@@ -112,13 +112,14 @@ public sealed class UtilityEventProcessor : IEventProcessor
     {
         try
         {
-            var victimState = PlayerControllerState.From(@event.GetPlayerOrDefault("userid"));
+            var victim = @event.GetPlayerOrDefault("userid");
+            var victimState = PlayerControllerState.From(victim);
             var attackerState = PlayerControllerState.From(@event.GetPlayerOrDefault("attacker"));
             var blindDuration = @event.GetFloatValue("blind_duration", 0f);
             // The engine blinds dead players and spectators in range too; that flashes nobody.
             if (victimState.Health <= 0 || victimState.Team is not (PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist)) return;
 
-            if (victimState.IsValid && !victimState.IsBot)
+            if (!victimState.IsBot)
             {
                 _playerSessions.MutatePlayer(victimState.SteamId, stats =>
                 {
@@ -130,7 +131,7 @@ public sealed class UtilityEventProcessor : IEventProcessor
             if (!attackerState.IsValid || attackerState.IsBot || attackerState.SteamId == victimState.SteamId) return;
 
             var pending = FindPending(attackerState.SteamId, UtilityType.Flash, @event.GetIntValue("entityid"));
-            pending?.RecordAffected(victimState);
+            pending?.RecordAffected(victimState, (int)victim!.Index);
 
             _playerSessions.MutatePlayer(attackerState.SteamId, stats =>
             {
@@ -166,7 +167,7 @@ public sealed class UtilityEventProcessor : IEventProcessor
 
             var pending = FindPending(attackerState.SteamId, type, 0);
             if (pending is null) return;
-            pending.RecordAffected(victimState);
+            pending.RecordAffected(victimState, (int)victim!.Index);
             if (victimState.Team != pending.OwnerTeam)
             {
                 // Overkill is not damage: a lethal 98 on a 20 HP player removed 20, as ADR counts it.
@@ -383,8 +384,9 @@ public sealed class UtilityEventProcessor : IEventProcessor
         UtilityType type,
         Vector3 throwPosition)
     {
-        private readonly HashSet<ulong> _opponentsAffected = [];
-        private readonly HashSet<ulong> _teammatesAffected = [];
+        // By entity index: a bot (no SteamID) blinded or burned is an opponent affected too, once.
+        private readonly HashSet<int> _opponentsAffected = [];
+        private readonly HashSet<int> _teammatesAffected = [];
 
         public ulong OwnerSteamId { get; } = ownerSteamId;
         public PlayerTeam OwnerTeam { get; } = ownerTeam;
@@ -404,12 +406,12 @@ public sealed class UtilityEventProcessor : IEventProcessor
         public int OpponentsAffected => _opponentsAffected.Count;
         public int TeammatesAffected => _teammatesAffected.Count;
 
-        public void RecordAffected(PlayerControllerState victim)
+        public void RecordAffected(PlayerControllerState victim, int victimIndex)
         {
             // The thrower hurting themselves is not a teammate affected.
-            if (!victim.IsValid || victim.IsBot || victim.SteamId == OwnerSteamId) return;
-            if (victim.Team == OwnerTeam) _teammatesAffected.Add(victim.SteamId);
-            else _opponentsAffected.Add(victim.SteamId);
+            if (!victim.IsValid || victim.SteamId == OwnerSteamId) return;
+            if (victim.Team == OwnerTeam) _teammatesAffected.Add(victimIndex);
+            else _opponentsAffected.Add(victimIndex);
         }
     }
 }

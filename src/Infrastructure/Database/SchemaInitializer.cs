@@ -3,6 +3,7 @@ using System.Data;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Dapper;
@@ -77,7 +78,8 @@ public sealed class SchemaInitializer(
                 }
             }
         }
-        catch (Exception ex)
+        // A cancellation is not a failure, and the caller waits out the lock (TimeoutException) and tries again.
+        catch (Exception ex) when (ex is not (OperationCanceledException or TimeoutException))
         {
             _logger.LogError(ex, "AutoCreateSchema failed; ensure database/init.sql has been applied manually.");
             throw;
@@ -91,10 +93,22 @@ public sealed class SchemaInitializer(
         await connection.ChangeDatabaseAsync(databaseName, cancellationToken).ConfigureAwait(false);
 
         // Existing tables are upgraded before the script runs: its views use the newer columns, and the first view
-        // that fails stops the script. New databases have no tables yet, so the script creates them complete.
+        // that fails stops the script. New databases have no tables yet, so the script creates them complete. One
+        // batch per table; a column goes after the one before it in init.sql, added in the same statement if need be.
         var migratedColumns = 0;
         migratedColumns += await EnsureColumnsAsync(connection, databaseName, "rounds",
-            [("official_end_time", "TIMESTAMP NULL AFTER `end_time`")], cancellationToken).ConfigureAwait(false);
+            [
+                ("official_end_time", "TIMESTAMP NULL AFTER `end_time`"),
+                // Migration 006: the round's buy and bomb.
+                .. Chain("win_type",
+                    ("ct_start_money", "INT NULL"),
+                    ("t_start_money", "INT NULL"),
+                    ("ct_equipment_value", "INT NULL"),
+                    ("t_equipment_value", "INT NULL"),
+                    ("bomb_site", "CHAR(1) NULL"),
+                    ("bomb_plant_time", "DECIMAL(6,1) NULL"),
+                    ("defuse_time_left", "DECIMAL(5,2) NULL"))
+            ], cancellationToken).ConfigureAwait(false);
         migratedColumns += await EnsureColumnsAsync(connection, databaseName, "utility_positions",
             [
                 ("entity_id", "INT NOT NULL DEFAULT 0 AFTER `utility_type`"),
@@ -128,34 +142,35 @@ public sealed class SchemaInitializer(
                 ("kill_reward", "INT NOT NULL DEFAULT 0 AFTER `clutch_1v5_wins`"),
                 ("cash_earned", "INT NOT NULL DEFAULT 0 AFTER `kill_reward`"),
                 ("money_saved", "INT NOT NULL DEFAULT 0 AFTER `cash_earned`"),
-                ("live_time", "INT NOT NULL DEFAULT 0 AFTER `money_saved`")
+                ("live_time", "INT NOT NULL DEFAULT 0 AFTER `money_saved`"),
+                // Migration 006: the side split, KAST parts, pistol rounds, team damage and kill distances. The two columns
+                // it drops (defuser_drops, effective_smokes) stay: a server still on the previous build sharing the
+                // database maps them by name in its bulk copy. The migration, run by hand, drops them.
+                .. Chain("live_time",
+                    ("team_damage", "INT NOT NULL DEFAULT 0"),
+                    ("multi_kill_1", "INT NOT NULL DEFAULT 0"),
+                    ("ct_kills", "INT NOT NULL DEFAULT 0"),
+                    ("t_kills", "INT NOT NULL DEFAULT 0"),
+                    ("ct_deaths", "INT NOT NULL DEFAULT 0"),
+                    ("t_deaths", "INT NOT NULL DEFAULT 0"),
+                    ("ct_damage", "INT NOT NULL DEFAULT 0"),
+                    ("t_damage", "INT NOT NULL DEFAULT 0"),
+                    ("ct_first_kills", "INT NOT NULL DEFAULT 0"),
+                    ("t_first_kills", "INT NOT NULL DEFAULT 0"),
+                    ("ct_first_deaths", "INT NOT NULL DEFAULT 0"),
+                    ("t_first_deaths", "INT NOT NULL DEFAULT 0"),
+                    ("rounds_survived", "INT NOT NULL DEFAULT 0"),
+                    ("rounds_traded", "INT NOT NULL DEFAULT 0"),
+                    ("ct_rounds_won", "INT NOT NULL DEFAULT 0"),
+                    ("t_rounds_won", "INT NOT NULL DEFAULT 0"),
+                    ("pistol_rounds_played", "INT NOT NULL DEFAULT 0"),
+                    ("pistol_rounds_won", "INT NOT NULL DEFAULT 0"),
+                    ("pistol_round_kills", "INT NOT NULL DEFAULT 0"),
+                    ("kill_distance_total", "DECIMAL(12,2) NOT NULL DEFAULT 0"),
+                    ("longest_kill", "DECIMAL(8,2) NOT NULL DEFAULT 0"))
             ], cancellationToken).ConfigureAwait(false);
-        // Migration 006: the side split, KAST parts, pistol rounds, team damage and kill distances; the whole match on
-        // match_player_stats; headshots, damage and deaths per weapon; the round's buy and bomb; and two columns nothing
-        // ever incremented go.
-        migratedColumns += await EnsureColumnsAsync(connection, databaseName, "player_stats", Chain("live_time",
-            ("team_damage", "INT NOT NULL DEFAULT 0"),
-            ("multi_kill_1", "INT NOT NULL DEFAULT 0"),
-            ("ct_kills", "INT NOT NULL DEFAULT 0"),
-            ("t_kills", "INT NOT NULL DEFAULT 0"),
-            ("ct_deaths", "INT NOT NULL DEFAULT 0"),
-            ("t_deaths", "INT NOT NULL DEFAULT 0"),
-            ("ct_damage", "INT NOT NULL DEFAULT 0"),
-            ("t_damage", "INT NOT NULL DEFAULT 0"),
-            ("ct_first_kills", "INT NOT NULL DEFAULT 0"),
-            ("t_first_kills", "INT NOT NULL DEFAULT 0"),
-            ("ct_first_deaths", "INT NOT NULL DEFAULT 0"),
-            ("t_first_deaths", "INT NOT NULL DEFAULT 0"),
-            ("rounds_survived", "INT NOT NULL DEFAULT 0"),
-            ("rounds_traded", "INT NOT NULL DEFAULT 0"),
-            ("ct_rounds_won", "INT NOT NULL DEFAULT 0"),
-            ("t_rounds_won", "INT NOT NULL DEFAULT 0"),
-            ("pistol_rounds_played", "INT NOT NULL DEFAULT 0"),
-            ("pistol_rounds_won", "INT NOT NULL DEFAULT 0"),
-            ("pistol_round_kills", "INT NOT NULL DEFAULT 0"),
-            ("kill_distance_total", "DECIMAL(12,2) NOT NULL DEFAULT 0"),
-            ("longest_kill", "DECIMAL(8,2) NOT NULL DEFAULT 0")), cancellationToken).ConfigureAwait(false);
-        migratedColumns += await DropColumnsAsync(connection, databaseName, "player_stats", ["defuser_drops", "effective_smokes"], cancellationToken).ConfigureAwait(false);
+        // Migration 006: the whole match; then the three columns the 2026-01-01 schema lacked, which every match-end
+        // write needs.
         migratedColumns += await EnsureColumnsAsync(connection, databaseName, "match_player_stats", Chain("entry_kill_attempt_wins",
             ("rounds_played", "INT DEFAULT 0"),
             ("rounds_won", "INT DEFAULT 0"),
@@ -219,34 +234,30 @@ public sealed class SchemaInitializer(
             ("pistol_rounds_won", "INT DEFAULT 0"),
             ("pistol_round_kills", "INT DEFAULT 0"),
             ("kill_distance_total", "DECIMAL(12,2) DEFAULT 0"),
-            ("round_swing", "DECIMAL(10,3) DEFAULT 0")), cancellationToken).ConfigureAwait(false);
+            ("round_swing", "DECIMAL(10,3) DEFAULT 0"),
+            ("idempotency_key", "VARCHAR(255) NULL"),
+            ("created_at", "DATETIME NULL"),
+            ("retry_count", "INT DEFAULT 0")), cancellationToken).ConfigureAwait(false);
+        // Migration 006: headshots, damage and deaths per weapon; then the 2026-01-01 schema's columns.
         migratedColumns += await EnsureColumnsAsync(connection, databaseName, "match_weapon_stats",
             [
                 ("headshots", "INT DEFAULT 0 AFTER `kills`"),
-                ("damage", "INT DEFAULT 0 AFTER `hits`"),
-                ("deaths", "INT DEFAULT 0 AFTER `damage`")
+                .. Chain("hits",
+                    ("damage", "INT DEFAULT 0"),
+                    ("deaths", "INT DEFAULT 0"),
+                    ("idempotency_key", "VARCHAR(255) NULL"),
+                    ("created_at", "DATETIME NULL"),
+                    ("retry_count", "INT DEFAULT 0"))
             ], cancellationToken).ConfigureAwait(false);
-        migratedColumns += await EnsureColumnsAsync(connection, databaseName, "rounds", Chain("win_type",
-            ("ct_start_money", "INT NULL"),
-            ("t_start_money", "INT NULL"),
-            ("ct_equipment_value", "INT NULL"),
-            ("t_equipment_value", "INT NULL"),
-            ("bomb_site", "CHAR(1) NULL"),
-            ("bomb_plant_time", "DECIMAL(6,1) NULL"),
-            ("defuse_time_left", "DECIMAL(5,2) NULL")), cancellationToken).ConfigureAwait(false);
-        // v3.0.0 (2026-01-01) match tables, which every match-end write needs.
-        foreach (var (table, after) in new[] { ("match_player_stats", "entry_kill_attempt_wins"), ("match_weapon_stats", "hits") })
-        {
-            migratedColumns += await EnsureColumnsAsync(connection, databaseName, table,
-                [
-                    ("idempotency_key", $"VARCHAR(255) NULL AFTER `{after}`"),
-                    ("created_at", "DATETIME NULL AFTER `idempotency_key`"),
-                    ("retry_count", "INT DEFAULT 0 AFTER `created_at`")
-                ], cancellationToken).ConfigureAwait(false);
-        }
-        // Migration 003: lifetime totals that a narrower column would silently cap (MySQL clamps out-of-range values).
+        // Migrations 003 and 007: lifetime totals and ratios a narrower column would silently cap (MySQL clamps
+        // out-of-range values), and the blind times that stayed INT (whole seconds) on databases from early 2026.
         migratedColumns += await WidenDecimalsAsync(connection, databaseName, "player_stats",
-            [("clutch_points", "DECIMAL(10,3) DEFAULT 0"), ("round_swing", "DECIMAL(10,3) DEFAULT 0")], cancellationToken).ConfigureAwait(false);
+            [
+                ("clutch_points", "DECIMAL(10,3) DEFAULT 0"), ("round_swing", "DECIMAL(10,3) DEFAULT 0"),
+                ("total_blind_time", "DECIMAL(10,2) DEFAULT 0"), ("total_blind_time_inflicted", "DECIMAL(10,2) DEFAULT 0"),
+                ("kd_ratio", "DECIMAL(8,3) DEFAULT 0"), ("impact_rating", "DECIMAL(8,3) DEFAULT 0"),
+                ("survival_rating", "DECIMAL(8,3) DEFAULT 0"), ("utility_score", "DECIMAL(8,3) DEFAULT 0")
+            ], cancellationToken).ConfigureAwait(false);
         migratedColumns += await WidenDecimalsAsync(connection, databaseName, "player_advanced_analytics",
             [("clutch_points", "DECIMAL(10,3) NOT NULL")], cancellationToken).ConfigureAwait(false);
         // Migration 004: before 2026-07-18 the position tables had no match_id foreign key, and so no index for removing
@@ -255,6 +266,7 @@ public sealed class SchemaInitializer(
         {
             migratedColumns += await EnsureMatchIndexAsync(connection, databaseName, table, cancellationToken).ConfigureAwait(false);
         }
+        migratedColumns += await ReplaceAnalyticsUniqueKeyAsync(connection, databaseName, cancellationToken).ConfigureAwait(false);
         if (migratedColumns > 0)
             _logger.LogInformation("Applied {Count} schema upgrades.", migratedColumns);
 
@@ -298,24 +310,6 @@ public sealed class SchemaInitializer(
                 new { DatabaseName = databaseName, TableName = tableName },
                 cancellationToken: cancellationToken)).ConfigureAwait(false))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-    }
-
-    private static async Task<int> DropColumnsAsync(
-        MySqlConnection connection,
-        string databaseName,
-        string tableName,
-        IReadOnlyList<string> columns,
-        CancellationToken cancellationToken)
-    {
-        var existing = await ExistingColumnsAsync(connection, databaseName, tableName, cancellationToken).ConfigureAwait(false);
-        var present = columns.Where(existing.Contains).ToArray();
-        if (present.Length == 0) return 0;
-
-        var clauses = string.Join(", ", present.Select(column => $"DROP COLUMN `{column}`"));
-        await connection.ExecuteAsync(new CommandDefinition(
-            $"ALTER TABLE `{tableName}` {clauses};",
-            cancellationToken: cancellationToken)).ConfigureAwait(false);
-        return present.Length;
     }
 
     private static async Task<int> EnsureColumnsAsync(
@@ -363,6 +357,31 @@ public sealed class SchemaInitializer(
         return 1;
     }
 
+    // Migration 007: a second UNIQUE key (steam_id, calculated_at) on player_advanced_analytics made ON DUPLICATE KEY
+    // UPDATE merge two rows of one player written in the same second. idempotency_key (match and player) is the row's
+    // one identity; the per-player lookup keeps a plain index, which the steam_id foreign key needs anyway.
+    private static async Task<int> ReplaceAnalyticsUniqueKeyAsync(MySqlConnection connection, string databaseName, CancellationToken cancellationToken)
+    {
+        const string query = """
+            SELECT DISTINCT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+            WHERE TABLE_SCHEMA = @DatabaseName AND TABLE_NAME = 'player_advanced_analytics';
+            """;
+        var indexes = (await connection.QueryAsync<string>(new CommandDefinition(
+                query, new { DatabaseName = databaseName }, cancellationToken: cancellationToken)).ConfigureAwait(false))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!indexes.Contains("uq_player_analytics_steam_calculated")) return 0;
+
+        var replacement = indexes.Contains("idx_player_analytics_steam_calculated")
+            ? ""
+            : "ADD INDEX `idx_player_analytics_steam_calculated` (`steam_id`, `calculated_at`), ";
+        await connection.ExecuteAsync(new CommandDefinition(
+            $"ALTER TABLE `player_advanced_analytics` {replacement}DROP INDEX `uq_player_analytics_steam_calculated`;",
+            cancellationToken: cancellationToken)).ConfigureAwait(false);
+        return 1;
+    }
+
+    // Widens a column narrower, in digits or in decimals, than its DECIMAL(p,s) definition: an INT (precision 10,
+    // scale 0) loses the fraction a DECIMAL(10,2) keeps.
     private static async Task<int> WidenDecimalsAsync(
         MySqlConnection connection,
         string databaseName,
@@ -371,17 +390,22 @@ public sealed class SchemaInitializer(
         CancellationToken cancellationToken)
     {
         const string query = """
-            SELECT COLUMN_NAME, CAST(NUMERIC_PRECISION AS SIGNED)
+            SELECT COLUMN_NAME, CAST(NUMERIC_PRECISION AS SIGNED), CAST(NUMERIC_SCALE AS SIGNED)
             FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_SCHEMA = @DatabaseName AND TABLE_NAME = @TableName;
             """;
-        var precision = (await connection.QueryAsync<(string Name, long? Precision)>(new CommandDefinition(
+        var widths = (await connection.QueryAsync<(string Name, long? Precision, long? Scale)>(new CommandDefinition(
                 query,
                 new { DatabaseName = databaseName, TableName = tableName },
                 cancellationToken: cancellationToken)).ConfigureAwait(false))
-            .ToDictionary(column => column.Name, column => column.Precision, StringComparer.OrdinalIgnoreCase);
+            .ToDictionary(column => column.Name, column => (column.Precision, column.Scale), StringComparer.OrdinalIgnoreCase);
 
-        var narrow = columns.Where(column => precision.GetValueOrDefault(column.Name) < 10).ToArray();
+        var narrow = columns.Where(column =>
+        {
+            var wanted = Regex.Match(column.Definition, @"DECIMAL\((\d+),(\d+)\)");
+            var (precision, scale) = widths.GetValueOrDefault(column.Name);
+            return precision < long.Parse(wanted.Groups[1].Value) || scale < long.Parse(wanted.Groups[2].Value);
+        }).ToArray();
         if (narrow.Length == 0) return 0;
 
         var clauses = string.Join(", ", narrow.Select(column => $"MODIFY COLUMN `{column.Name}` {column.Definition}"));

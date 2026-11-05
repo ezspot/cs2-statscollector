@@ -21,8 +21,11 @@ public sealed class JsonRecoveryService(ILogger<JsonRecoveryService> logger) : I
     private static readonly JsonSerializerOptions SerializerOptions = new() { WriteIndented = true };
     private readonly SemaphoreSlim _fileGate = new(1, 1);
     private readonly ILogger<JsonRecoveryService> _logger = logger;
-    private readonly string _filePath = Path.Combine(Server.GameDirectory, "csgo", "addons", "counterstrikesharp", "plugins", "statsCollector", "scrim_state.json");
-    private readonly string _tempPath = Path.Combine(Server.GameDirectory, "csgo", "addons", "counterstrikesharp", "plugins", "statsCollector", "scrim_state.json.tmp");
+    private readonly string _filePath = Path.Combine(PluginDirectory, "scrim_state.json");
+    private readonly string _tempPath = Path.Combine(PluginDirectory, "scrim_state.json.tmp");
+
+    /// <summary>Where the plugin keeps its recovery files. A native call: read it on the game thread (constructors).</summary>
+    internal static string PluginDirectory => Path.Combine(Server.GameDirectory, "csgo", "addons", "counterstrikesharp", "plugins", "statsCollector");
 
     public async Task SaveScrimStateAsync<T>(T data)
     {

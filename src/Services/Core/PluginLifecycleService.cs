@@ -26,6 +26,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     private readonly IPersistenceChannel _persistenceChannel;
     private readonly ISchemaInitializer _schemaInitializer;
     private readonly IMatchStatsService _matchStats;
+    private readonly IStatsRepository _statsRepository;
 
     public PluginLifecycleService(
         ILogger<PluginLifecycleService> logger,
@@ -36,7 +37,8 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         IGameEventHandlerService eventHandler,
         IPersistenceChannel persistenceChannel,
         ISchemaInitializer schemaInitializer,
-        IMatchStatsService matchStats)
+        IMatchStatsService matchStats,
+        IStatsRepository statsRepository)
     {
         _logger = logger;
         _config = config;
@@ -47,6 +49,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         _persistenceChannel = persistenceChannel;
         _schemaInitializer = schemaInitializer;
         _matchStats = matchStats;
+        _statsRepository = statsRepository;
     }
 
     public void Initialize(BasePlugin plugin)
@@ -64,6 +67,15 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     {
         await EnsureSchemaAsync(ct);
 
+        try
+        {
+            await _statsRepository.CheckLocalInfileAsync(ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Could not check the database server's local_infile setting.");
+        }
+
         await _positionPersistence.StartAsync(ct);
 
         if (_persistenceChannel is IHostedService hosted)
@@ -77,8 +89,9 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     }
 
     // A failed schema step used to abort startup, leaving the plugin loaded but recording nothing until the
-    // next restart. Wait out an unreachable database (e.g. MySQL still starting after a host reboot); for
-    // anything else (such as a missing privilege) carry on against the existing schema.
+    // next restart. Wait out an unreachable database (e.g. MySQL still starting after a host reboot) and another
+    // server's schema lock (a TimeoutException from SchemaInitializer: it may be mid-ALTER); for anything else
+    // (such as a missing privilege) carry on against the existing schema.
     private async Task EnsureSchemaAsync(CancellationToken ct)
     {
         while (true)
@@ -88,9 +101,9 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
                 await _schemaInitializer.EnsureSchemaAsync(ct);
                 return;
             }
-            catch (MySqlException ex) when (!ct.IsCancellationRequested && ResiliencePolicies.IsTransient(ex))
+            catch (Exception ex) when (!ct.IsCancellationRequested && (ex is TimeoutException || (ex is MySqlException mysql && ResiliencePolicies.IsTransient(mysql))))
             {
-                _logger.LogWarning(ex, "Database unreachable for schema initialization; retrying in {Delay}s.", SchemaRetryDelay.TotalSeconds);
+                _logger.LogWarning(ex, "Database unreachable or locked for schema initialization; retrying in {Delay}s.", SchemaRetryDelay.TotalSeconds);
                 await Task.Delay(SchemaRetryDelay, ct);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -126,9 +139,9 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
         }
         finally
         {
-            // Position writes are independent of the stats channel; flush them even if its final flush failed or used
-            // up the unload time.
-            await _positionPersistence.StopAsync(TimeSpan.FromSeconds(10), CancellationToken.None);
+            // Position writes are independent of the stats channel; flush them even if its final flush failed, within
+            // what is left of the one unload budget (Plugin.Unload blocks the game thread on it).
+            await _positionPersistence.StopAsync(TimeSpan.FromSeconds(10), cancellationToken);
         }
 
         _logger.LogInformation("Plugin lifecycle stopped.");

@@ -33,6 +33,8 @@ public interface IStatsRepository
     Task UpdateRoundEconomyAsync(string matchUuid, int roundNumber, RoundEconomy economy, CancellationToken ct);
     Task OfficiallyEndRoundAsync(string matchUuid, int roundNumber, CancellationToken ct);
     Task VoidRoundsAsync(string matchUuid, int fromRound, CancellationToken ct);
+    /// <summary>Logs Critical when the server has local_infile=OFF, which makes every bulk write fail.</summary>
+    Task CheckLocalInfileAsync(CancellationToken ct);
 }
 
 public sealed class StatsRepository : IStatsRepository
@@ -82,6 +84,22 @@ public sealed class StatsRepository : IStatsRepository
                 throw;
             }
         }, cancellationToken);
+    }
+
+    // Every bulk write is a LOAD DATA LOCAL; with local_infile=OFF (MySQL's default) the server rejects each one with
+    // error 3948 and nothing is ever stored. Said once here at startup; the writes themselves are dropped as they fail.
+    public async Task CheckLocalInfileAsync(CancellationToken cancellationToken)
+    {
+        var enabled = await _resiliencePipeline.ExecuteAsync(async ct =>
+        {
+            await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            return await connection.ExecuteScalarAsync<long>(new CommandDefinition("SELECT @@GLOBAL.local_infile;", cancellationToken: ct)).ConfigureAwait(false);
+        }, cancellationToken);
+        if (enabled == 0)
+        {
+            _logger.LogCritical("The database server has local_infile=OFF: every bulk write (LOAD DATA LOCAL) fails with error 3948 and no statistics are stored. " +
+                                "Run SET GLOBAL local_infile = 1; (or set local_infile=1 under [mysqld] in my.cnf) and reload the plugin.");
+        }
     }
 
     public async Task<LifetimePlayerStatsRow?> GetLifetimePlayerStatsAsync(ulong steamId, CancellationToken cancellationToken)
@@ -256,8 +274,26 @@ public sealed class StatsRepository : IStatsRepository
             await ExecuteAsync(connection, $"INSERT IGNORE INTO players (steam_id) SELECT DISTINCT steam_id FROM {staging};", ct).ConfigureAwait(false);
             await ExecuteAsync(connection, MergeSql(table, columns.Select(c => c.Name).ToList(), keyColumns), ct).ConfigureAwait(false);
 
-            _logger.LogInformation("Bulk upserted {Count} rows into {Table}", rows.Count, table);
+            var matchUuid = columns.First(c => c.Name == "match_uuid");
+            var unwritten = await LogUnwrittenAsync(connection, table, rows.Select(row => (string)matchUuid.Value(row)!).ToList(), ct).ConfigureAwait(false);
+            _logger.LogInformation("Bulk upserted {Count} rows into {Table}", rows.Count - unwritten, table);
         }, cancellationToken);
+    }
+
+    // INSERT ... SELECT ... JOIN matches writes nothing for a row whose match has no matches row, and a retry never
+    // will: said here instead of counted as written. Returns how many of the rows that was.
+    private async Task<int> LogUnwrittenAsync(MySqlConnection connection, string table, IReadOnlyList<string> matchUuids, CancellationToken cancellationToken)
+    {
+        var known = (await connection.QueryAsync<string>(new CommandDefinition(
+            "SELECT match_uuid FROM matches WHERE match_uuid IN @Uuids;",
+            new { Uuids = matchUuids.Distinct().ToList() }, cancellationToken: cancellationToken)).ConfigureAwait(false)).ToHashSet();
+        var unwritten = matchUuids.Where(uuid => !known.Contains(uuid)).ToList();
+        if (unwritten.Count > 0)
+        {
+            _logger.LogCritical("{Count} rows for {Table} were not written: no matches row for {Matches}.",
+                unwritten.Count, table, string.Join(", ", unwritten.Distinct()));
+        }
+        return unwritten.Count;
     }
 
     internal static string MergeSql(string table, IReadOnlyList<string> columns, string[] keyColumns)
@@ -285,7 +321,7 @@ public sealed class StatsRepository : IStatsRepository
         {
             using var activity = Instrumentation.ActivitySource.StartActivity("UpsertPlayerAnalyticsAsync");
 
-            await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
 
             // Ensure parent rows exist for the steam_id FK before inserting analytics.
             await connection.ExecuteAsync(new CommandDefinition(
@@ -329,15 +365,20 @@ public sealed class StatsRepository : IStatsRepository
                     wallbang_kills = @WallbangKills;
                 """;
 
-            var written = await connection.ExecuteAsync(new CommandDefinition(sql, list, cancellationToken: ct)).ConfigureAwait(false);
-            _logger.LogInformation("Persisted {Count} player analytics snapshots", written);
+            await connection.ExecuteAsync(new CommandDefinition(sql, list, cancellationToken: ct)).ConfigureAwait(false);
+            var unwritten = await LogUnwrittenAsync(connection, "player_advanced_analytics", list.Select(s => s.MatchUuid).ToList(), ct).ConfigureAwait(false);
+            _logger.LogInformation("Persisted {Count} player analytics snapshots", list.Count - unwritten);
         }, cancellationToken);
     }
 
+    // The position writer may have created the row first (INSERT IGNORE with the map only): fill in what it left
+    // empty, keep what is set. Row alias form (MySQL 8.0.19+); the VALUES() function is deprecated.
     public Task StartMatchAsync(string mapName, string? matchUuid, string? seriesUuid, CancellationToken ct) =>
-        ExecuteResilientAsync(
-            "INSERT INTO matches (match_uuid, series_uuid, map_name, status) VALUES (@MatchUuid, @SeriesUuid, @MapName, 'IN_PROGRESS') ON DUPLICATE KEY UPDATE status = 'IN_PROGRESS';",
-            new { MatchUuid = matchUuid, SeriesUuid = seriesUuid, MapName = mapName }, ct);
+        ExecuteResilientAsync("""
+            INSERT INTO matches (match_uuid, series_uuid, map_name, status) VALUES (@MatchUuid, @SeriesUuid, @MapName, 'IN_PROGRESS') AS new
+            ON DUPLICATE KEY UPDATE status = 'IN_PROGRESS', series_uuid = COALESCE(matches.series_uuid, new.series_uuid),
+                map_name = COALESCE(NULLIF(matches.map_name, ''), new.map_name);
+            """, new { MatchUuid = matchUuid, SeriesUuid = seriesUuid, MapName = mapName }, ct);
 
     // COALESCE: a retried batch must not move end_time to the retry time.
     public Task EndMatchAsync(string matchUuid, CancellationToken ct) =>
@@ -345,12 +386,16 @@ public sealed class StatsRepository : IStatsRepository
             "UPDATE matches SET end_time = COALESCE(end_time, CURRENT_TIMESTAMP), status = 'COMPLETED' WHERE match_uuid = @MatchUuid",
             new { MatchUuid = matchUuid }, ct);
 
-    public Task StartRoundAsync(string matchUuid, int roundNumber, CancellationToken ct) =>
-        ExecuteResilientAsync("""
+    // Found rows (MySqlConnector's default, UseAffectedRows=false): 0 only when no matches row matched the UUID.
+    public async Task StartRoundAsync(string matchUuid, int roundNumber, CancellationToken ct)
+    {
+        var found = await ExecuteResilientAsync("""
             INSERT INTO rounds (match_id, round_number)
             SELECT id, @RoundNumber FROM matches WHERE match_uuid = @MatchUuid
             ON DUPLICATE KEY UPDATE round_number = rounds.round_number;
-            """, new { MatchUuid = matchUuid, RoundNumber = roundNumber }, ct);
+            """, new { MatchUuid = matchUuid, RoundNumber = roundNumber }, ct).ConfigureAwait(false);
+        if (found == 0) _logger.LogCritical("Round {Round} of match {Match} was not written: no matches row.", roundNumber, matchUuid);
+    }
 
     public Task EndRoundAsync(string matchUuid, int roundNumber, int winnerTeam, int winReason, RoundBombInfo bomb, CancellationToken ct) =>
         ExecuteResilientAsync("""
@@ -408,11 +453,11 @@ public sealed class StatsRepository : IStatsRepository
         }
     }
 
-    private Task ExecuteResilientAsync(string sql, object parameters, CancellationToken cancellationToken) =>
+    private Task<int> ExecuteResilientAsync(string sql, object parameters, CancellationToken cancellationToken) =>
         _resiliencePipeline.ExecuteAsync(async ct =>
         {
             await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
-            await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)).ConfigureAwait(false);
+            return await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)).ConfigureAwait(false);
         }, cancellationToken).AsTask();
 
     // MySqlBulkCopy maps DataTable columns to the destination by ordinal unless told otherwise.

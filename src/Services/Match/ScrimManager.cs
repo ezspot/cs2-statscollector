@@ -69,7 +69,8 @@ public sealed class ScrimManager : IScrimManager, IDisposable
 
     private async Task TransitionToAsync(ScrimState target)
     {
-        // Every transition starts on the game thread, where the timers can be killed.
+        // Every transition starts on the game thread: killing a timer is a native call, and CounterStrikeSharp does not
+        // guard natives against other threads (an off-thread call races the engine instead of failing).
         if (target is not (ScrimState.KnifeRound or ScrimState.Live)) ClearPhaseState();
 
         var from = _state;
@@ -165,8 +166,13 @@ public sealed class ScrimManager : IScrimManager, IDisposable
         {
             // After a restart nobody is connected, so the saved ready-ups, votes and picks are of players who may never
             // return and could never be completed. Those phases are quick to redo; practice re-applies its config.
+            // The load above continued on a pool thread; the transition kills timers and clears the phase collections
+            // the handlers read, so it starts on the game thread like every other one.
             if (data.State is not ScrimState.Idle)
-                await TransitionToAsync(data.State == ScrimState.Practice ? ScrimState.Practice : ScrimState.Lobby);
+            {
+                var target = data.State == ScrimState.Practice ? ScrimState.Practice : ScrimState.Lobby;
+                await RunOnGameThreadAsync(() => RunTransition(TransitionToAsync(target), $"restart recovered scrim {target}"));
+            }
             _logger.LogInformation("Scrim recovery: {State} started again.", _state);
             return;
         }
@@ -194,8 +200,9 @@ public sealed class ScrimManager : IScrimManager, IDisposable
     }
 
     // The wait after a map change and the side choice belong to the knife round and match. Game thread only: killing a
-    // CounterStrikeSharp timer is a native call. Fields are cleared because the engine frees a one-shot timer once it
-    // fires, and killing that stale pointer later could kill whichever timer was given the same address.
+    // CounterStrikeSharp timer is a native call that is not guarded against other threads (it would race the engine, not
+    // fail). Fields are cleared because the engine frees a one-shot timer once it fires, and killing that stale pointer
+    // later could kill whichever timer was given the same address.
     private void ClearPhaseState()
     {
         _waitingForPlayers = false;

@@ -1,10 +1,10 @@
-# statsCollector v3.1.0
+# statsCollector v1.0.0
 
 A CounterStrikeSharp plugin for CS2 that collects detailed player statistics into MySQL, with non-blocking persistence and a scrim/match management system.
 
 ## Features
 - **Relational match tracking** — `matches` and `rounds` are tracked automatically, with optional `series_uuid` to group BO3/BO5 series.
-- **Lifetime player stats** — 100+ aggregated metrics per player (combat, utility, economy, bomb, clutch, entry). Career totals are **seeded from the database on connect**, so they accumulate correctly across reconnects and across multiple servers sharing one database (see *Multi-server* below).
+- **Lifetime player stats** — 100+ aggregated metrics per player (combat, utility, economy, bomb, clutch, entry). Career totals are **seeded from the database once Steam has validated the client** (at once on a LAN server, `sv_lan 1`), so they accumulate correctly across reconnects and across multiple servers sharing one database (see *Multi-server* below).
 - **Per-match stats** — `match_player_stats` / `match_weapon_stats` populated at match end from start-of-match deltas: the whole match (rounds and sides, utility, trades, clutches by 1vX, bomb, economy, pistol rounds, per-weapon headshots, damage and deaths), with a community Rating 2.0 approximation (HLTV's exact formula is not public).
 - **Per-round rows** — `player_round_stats` holds every player's numbers for every round (kills, damage, survival, trade, clutch, bomb, MVP, money and equipment), and `rounds` the round's buy (both sides' start money and equipment value) and bomb (site, plant time, time left at the defuse).
 - **Engine cross-check** — at match end the engine's own per-match counters (`CSMatchStats_t`) are compared with the recorded ones; a difference in kills, deaths, assists or headshot kills is logged as a warning, the counters the engine defines differently as information.
@@ -14,6 +14,13 @@ A CounterStrikeSharp plugin for CS2 that collects detailed player statistics int
 - **Resilience** — Polly v8 pipeline (retry + circuit breaker + timeout) wraps every repository operation. Writes that
   fail while the database is unreachable, restarting or read-only (or missing a column or grant) stay buffered and are
   written once it recovers; a write whose own data is rejected is logged and dropped instead of blocking the queue.
+  Batches still unwritten when the plugin unloads are spilled to `pending_stats.json` in the plugin directory and
+  replayed at the next start. At startup the plugin checks the server's `local_infile` and logs a critical message
+  with the fix when it is off (every bulk write needs it).
+- **Bots** — bots count in the round state (alive counts, first kill, trades, clutch odds) but get no stats of their
+  own: a human's kills, damage and team kills on bots count, and a bot's kill is recorded as a death, not a suicide.
+- **Restarts** — `mp_restartgame` after rounds were played ends the recorded match and starts a new one; the
+  aborted round is not written.
 - **Bulk writes** — player and position batches are written with `MySqlBulkCopy` into a temporary table, then merged.
 - **Scrim management** — lobby/ready-up, captain assignment, map vote, player picking, knife round + side selection.
   After the change to the voted map, the knife round or match waits in warmup until the picked players are back
@@ -61,7 +68,8 @@ shown in the in-game prompts.
 ### Database prerequisites
 The bundled Docker stack already satisfies these. For your own MySQL server:
 - `local_infile=ON` (`SET PERSIST local_infile = ON;`). All bulk writes use `LOAD DATA LOCAL INFILE` and fail
-  with error 3948 while it is off, which is MySQL's default.
+  with error 3948 while it is off, which is MySQL's default. The plugin checks it at startup and logs a Critical line
+  with the fix; while it is off, each bulk write is dropped (and logged) instead of holding up every later write.
 - Grants on the database: `SELECT, INSERT, UPDATE, DELETE, CREATE TEMPORARY TABLES`; with `AutoCreateSchema` also
   `CREATE, ALTER, INDEX, REFERENCES, CREATE VIEW, DROP`.
 
@@ -86,10 +94,11 @@ See `config.sample.json` for the full set of options (persistence, trade window,
 
 For an existing database, treat `database/init.sql` as a bootstrap script rather than a migration.
 When upgrading, apply each SQL file under `database/migrations/` that has not been applied yet, in numeric
-order. 001, 002, 005 and 006 are not idempotent (MySQL has no `ADD COLUMN IF NOT EXISTS`, so a re-run fails with error 1060);
-003 and 004 can be run again. A fresh `init.sql` already includes them, and `AutoCreateSchema` applies them itself (it
-adds missing columns and indexes and widens narrower columns before running `init.sql`). The Docker image runs
-`init.sql` only on an empty volume.
+order. 001, 002 and 005 are not idempotent (MySQL has no `ADD COLUMN IF NOT EXISTS`, so a re-run fails with error 1060);
+003, 004, 006 and 007 check `information_schema` first and can be run again (a run of 006 that failed midway picks up
+where it stopped). A fresh `init.sql` already includes them, and `AutoCreateSchema` applies them itself (it adds missing
+columns and indexes and widens narrower columns before running `init.sql`; it never drops a column). The Docker image
+runs `init.sql` only on an empty volume.
 - This release deletes the rows of rounds voided by `.restore`, so the plugin's account also needs `DELETE`
   (`GRANT DELETE ON cs2_statscollector.* TO 'cs2_statscollector'@'%';`; the Docker stack's account already has it).
 - `002_add_exact_player_event_counters.sql` preserves exact KAST rounds, multi-kill tiers, clutch kills, and bomb
@@ -107,15 +116,22 @@ adds missing columns and indexes and widens narrower columns before running `ini
   `player_death` reports them) to `player_stats`; the whole match to `match_player_stats`; headshots, damage and deaths
   to `match_weapon_stats`; and the buy and bomb columns to `rounds`. It drops `player_stats.defuser_drops` and
   `effective_smokes`, which nothing ever incremented (CS2 has no defuser-drop event, and no definition of an effective
-  smoke); a database created by an older build keeps them until the migration or `AutoCreateSchema` runs.
-- If `SHOW COLUMNS FROM player_stats LIKE 'round_swing';` returns nothing (databases created by v3.1.0 or older, which
+  smoke); a database created by an older build keeps them until this migration is run by hand. `AutoCreateSchema`
+  leaves the two unused columns in place: dropping them would break a server still on the previous build sharing the
+  database, whose bulk copy maps them by name.
+- `007_single_analytics_key_and_wider_ratios.sql` drops the second UNIQUE key of `player_advanced_analytics`
+  (`steam_id`, `calculated_at`), which merged two rows of one player written in the same second, and keeps a plain index
+  for the per-player lookups; widens the lifetime `kd_ratio`, `impact_rating`, `survival_rating` and `utility_score`,
+  which DECIMAL(5,3) silently capped at 99.999; and makes `total_blind_time` and `total_blind_time_inflicted`
+  DECIMAL(10,2) where they stayed INT (whole seconds). `AutoCreateSchema` applies all three.
+- If `SHOW COLUMNS FROM player_stats LIKE 'round_swing';` returns nothing (databases created before 2026-06-21, which
   every lifetime write fails on), `AutoCreateSchema` adds the column. By hand, run this before migration 001, and run
   `init.sql` once more after the migrations to re-create the views:
   `ALTER TABLE player_stats ADD COLUMN round_swing DECIMAL(10,3) DEFAULT 0 AFTER utility_score;`
-- Databases created by v3.0.0 (2026-01-01) also lack three columns of the match tables, which `AutoCreateSchema` adds.
+- Databases created on the 2026-01-01 schema also lack three columns of the match tables, which `AutoCreateSchema` adds.
   By hand: `ALTER TABLE match_player_stats ADD COLUMN idempotency_key VARCHAR(255) NULL AFTER entry_kill_attempt_wins,
   ADD COLUMN created_at DATETIME NULL AFTER idempotency_key, ADD COLUMN retry_count INT DEFAULT 0 AFTER created_at;`
-  and the same for `match_weapon_stats` with `AFTER hits` for the first column. Databases from before v3.0.0 cannot
+  and the same for `match_weapon_stats` with `AFTER hits` for the first column. Databases from before 2026-01-01 cannot
   be upgraded; create a new one.
 
 New match foreign keys in `init.sql` apply automatically only to clean installations. Validate and remove
@@ -139,7 +155,8 @@ underscore is ignored. List options such as `Scrim__MapPool__0` are appended to 
   analytical value is low, so it is off by default. When off, these handlers aren't even subscribed
   (zero per-event cost); enable it only if you specifically want movement counters.
 - `EnableScrim` (default `true`) — scrim/match-management commands. When `false`, stat tracking runs on
-  every round without needing a scrim to be started (plain stats server). Warmup is never tracked.
+  every round without needing a scrim to be started (plain stats server). Warmup is never tracked. The `.pause`,
+  `.unpause` and `.restore` commands exist only when it is `true`.
 - `DeathmatchMode` (default `false`) — set on deathmatch servers: nothing is recorded there, because kills without
   rounds would distort the lifetime ratings that competitive servers share.
 
@@ -147,9 +164,9 @@ underscore is ignored. List options such as `Scrim__MapPool__0` are appended to 
 - `players` — registry with first/last seen timestamps.
 - `player_stats` — lifetime aggregated statistics, including exact KAST, multi-kill, clutch, and bomb-event counters.
 - `matches` / `rounds` — match and round lifecycle, including the official round-end timestamp, both sides' start money and equipment value at freeze end, and the bomb's site, plant time and the seconds left when it was defused.
-- `player_round_stats` — one row per player per round: their totals at round end minus those at round start (kills, damage, utility, trades, clutch 1vX, bomb, MVP, money, kill reward, round swing) and the round's flags (side, won, pistol round, survived, KAST). Written at round end and again at the official round end; a round restore removes the voided rounds' rows.
+- `player_round_stats` — one row per player per round: their totals at round end minus those at round start (kills, damage, utility, trades, clutch 1vX, bomb, MVP, money, kill reward, round swing) and the round's flags (side, won, pistol round, survived, KAST). Written at round end, at the official round end, and once more at the next round start (the engine credits the survivors' live time only then); a round restore removes the voided rounds' rows.
 - `kill_positions` / `death_positions` / `utility_positions` — spatial event data linked to a match; utility rows include entity and lifecycle event metadata.
-- `match_player_stats` / `match_weapon_stats` — per-match performance (the whole match, from start-of-match deltas) and weapon breakdowns with kills, headshots, shots, hits, damage and deaths by weapon (written at match end).
+- `match_player_stats` / `match_weapon_stats` — per-match performance (the whole match, from start-of-match deltas) and weapon breakdowns with kills, headshots, shots, hits, damage and deaths by weapon (written at match end; their `created_at` is the plugin's UTC clock, every other timestamp is the server's `CURRENT_TIMESTAMP`).
 - `player_advanced_analytics` — temporal performance snapshots (Rating 2.0, Impact, KAST, ADR).
 
 ### Dashboard views
@@ -163,7 +180,7 @@ Several CS2 servers (target: up to ~5) can run this plugin against one MySQL dat
 
 - **Player identity** is the SteamID64 (`player_stats.steam_id`, primary key) — globally unique, so a player has exactly one lifetime row no matter which server they play on.
 - **Match identity** is a per-server generated UUID (`matches.match_uuid`, `UNIQUE`); the integer `matches.id` is assigned by the database. No cross-server collisions, so match UUIDs do not need to be a primary key.
-- **Lifetime stats are seeded on connect** — when a player joins, their existing `player_stats` row is loaded into the in-memory session (off the game thread) *before* new stats accumulate, then written back. Since a Steam account can only be on one server at a time there is no write race on a row, and moving between servers never overwrites history with a single session. The exception is a database outage: snapshots a server buffers while MySQL is down are written when it recovers, and can overwrite newer totals if the player has since played on another server.
+- **Lifetime stats are seeded once the client is validated** — when a player joins (and Steam has validated them, or at once on a LAN server), their existing `player_stats` row is loaded off the game thread and added to whatever the session has already counted, then written back. Since a Steam account can only be on one server at a time there is no write race on a row, and moving between servers never overwrites history with a single session. The exception is a database outage: snapshots a server buffers while MySQL is down are written when it recovers, and can overwrite newer totals if the player has since played on another server. A player who leaves while the database is unreachable keeps their session in memory until it has been seeded, and it is written then (their playtime ends at the disconnect).
 - **Per-match rows** (`match_player_stats`, `match_weapon_stats`, `rounds`, position tables) are immutable per `(match_id, …)`, so every server records its own matches independently.
 
 > **Connection budget:** each server opens its own MySqlConnector pool (max **50** connections per server). For *N* servers, make sure MySQL `max_connections` comfortably exceeds `N × 50` — e.g. for 5 servers set `max_connections >= 300`.

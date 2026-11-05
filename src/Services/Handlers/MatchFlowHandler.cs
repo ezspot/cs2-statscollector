@@ -28,6 +28,10 @@ public sealed class MatchFlowHandler : IGameHandler
 
     private PluginConfig _config => _configMonitor.CurrentValue;
     private int _currentRoundNumber = 0;
+    // A round_end was seen for the current round, and one for the current match. A restart (mp_restartgame, the end of
+    // warmup) fires round_officially_ended with no round_end and then resets every engine counter.
+    private bool _roundEndSeen;
+    private bool _matchHadRoundEnd;
     // The engine's per-match counters per player at the last observation: the previous round_end or official round
     // end, or this round_start when there is none. Each observation adds the change since the previous one to the
     // lifetime totals, so points or money awarded after a round ended (exit frags, round-end payouts) count in that
@@ -73,6 +77,7 @@ public sealed class MatchFlowHandler : IGameHandler
         plugin.RegisterListener<Listeners.OnMapStart>(OnMapStart);
         plugin.RegisterListener<Listeners.OnMapEnd>(GameRulesState.Reset);
         plugin.RegisterEventHandler<EventRoundStart>(OnRoundStart);
+        plugin.RegisterEventHandler<EventRoundPoststart>(OnRoundPoststart);
         plugin.RegisterEventHandler<EventRoundFreezeEnd>(OnRoundFreezeEnd);
         plugin.RegisterEventHandler<EventRoundEnd>(OnRoundEnd);
         plugin.RegisterEventHandler<EventRoundOfficiallyEnded>(OnRoundOfficiallyEnded);
@@ -81,9 +86,11 @@ public sealed class MatchFlowHandler : IGameHandler
         plugin.RegisterEventHandler<EventCsWinPanelMatch>(OnMatchEnd);
     }
 
-    // The halftime side swap (and each overtime half's).
+    // The halftime side swap (and each overtime half's). The same announcement comes when regulation ends in a tie and
+    // the match goes to overtime, and at the end of the match, without a swap: the game rules say whether sides switch.
     private HookResult OnAnnouncePhaseEnd(EventAnnouncePhaseEnd @event, GameEventInfo info)
     {
+        if (!GameRulesState.SwitchingTeamsAtRoundReset) return HookResult.Continue;
         if (!_config.DeathmatchMode && (!_config.EnableScrim || _scrimManager.CurrentState is ScrimState.Live))
             _pauseService.OnSidesSwapped();
         return HookResult.Continue;
@@ -98,6 +105,8 @@ public sealed class MatchFlowHandler : IGameHandler
         _roundBackup.Reset();
         _pauseService.Reset();
         _matchStartTotals.Clear();
+        _roundEndSeen = false;
+        _matchHadRoundEnd = false;
         _matchTracker.StartMatch(mapName);
         _scrimManager.HandleMapStart(mapName);
     }
@@ -112,19 +121,22 @@ public sealed class MatchFlowHandler : IGameHandler
             _persistenceChannel.TryWrite(new RoundOfficialEndUpdate(matchUuid, _currentRoundNumber));
         // The final round's round-end awards land after its round_end, and no later observation picks them up. The
         // same reading, against the match start, is the engine's account of the match.
+        var players = PlayerControllerState.HumansBySteamId();
         var engine = new Dictionary<ulong, EngineMatchStats>();
         _playerSessions.ForEachPlayer(stats =>
         {
-            if (Utilities.GetPlayerFromSteamId64(stats.SteamId) is not { IsValid: true } player) return;
+            if (!players.TryGetValue(stats.SteamId, out var player)) return;
             engine[stats.SteamId] = Observe(stats, player) - _matchStartTotals.GetValueOrDefault(stats.SteamId);
         });
         // The final round's lifetime and round rows, with those awards.
-        SaveStatsAtRoundEnd();
+        SaveStats(_currentRoundNumber);
         _matchStats.FinalizeMatch(engine);
         _matchTracker.EndMatch();
         _roundBackup.Reset();
         _pauseService.Reset();
         _matchStartTotals.Clear();
+        _roundEndSeen = false;
+        _matchHadRoundEnd = false;
         if (_config.EnableScrim) _scrimManager.HandleMatchEnd();
         _logger.LogInformation("Match ended; per-match statistics finalized.");
         return HookResult.Continue;
@@ -134,10 +146,14 @@ public sealed class MatchFlowHandler : IGameHandler
     {
         if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live) return HookResult.Continue;
 
-        if (_config.EnableScrim || _matchTracker.CurrentMatch is null)
+        // A restart after rounds were played (mp_restartgame) starts a new match: the engine's counters start over too.
+        var restarted = _matchTracker.CurrentMatch is not null && _matchHadRoundEnd;
+        if (restarted) _matchStats.FinalizeMatch();
+        if (_config.EnableScrim || _matchTracker.CurrentMatch is null || restarted)
         {
             _matchTracker.StartMatch(Server.MapName);
         }
+        _matchHadRoundEnd = false;
         _roundBackup.Reset();
         _pauseService.Reset();
         _logger.LogInformation("Match start announced. Live tracking enabled.");
@@ -151,9 +167,14 @@ public sealed class MatchFlowHandler : IGameHandler
         // The engine fires round_freeze_end just before this, so round 1's buy was recorded under the previous match.
         if (_roundEconomy is { Round: 1 } roundOne) _matchTracker.RecordRoundEconomy(1, roundOne.Economy);
         _matchStartTotals.Clear();
+        var players = PlayerControllerState.HumansBySteamId();
         foreach (var steamId in _playerSessions.GetActiveSteamIds())
         {
-            if (Utilities.GetPlayerFromSteamId64(steamId) is { IsValid: true } player) _matchStartTotals[steamId] = ReadEngineStats(player);
+            if (!players.TryGetValue(steamId, out var player)) continue;
+            var totals = ReadEngineStats(player);
+            _matchStartTotals[steamId] = totals;
+            // The counters were reset with the match: against the old observation, round 1's awards would clamp to nothing.
+            _lastTotals[steamId] = totals;
         }
         return HookResult.Continue;
     }
@@ -164,8 +185,19 @@ public sealed class MatchFlowHandler : IGameHandler
         if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live) return HookResult.Continue;
 
         _damageReport.ResetRound();
+        var players = PlayerControllerState.HumansBySteamId();
         var previousRound = _currentRoundNumber;
-        _currentRoundNumber = GetCurrentRoundNumber();
+        var nextRound = GetCurrentRoundNumber();
+        // The engine adds the survivors' live time between the official end and this round_start (OnPreResetRound), so
+        // the previous round's rows go out once more with it. Only for the round that follows it: a restore or a
+        // restart voids or resets whatever a write here would carry.
+        if (_matchTracker.CurrentMatch is not null && previousRound >= 1 && _roundEndSeen && nextRound == previousRound + 1)
+        {
+            _playerSessions.ForEachPlayer(stats => { if (players.TryGetValue(stats.SteamId, out var player)) Observe(stats, player); });
+            SaveStats(previousRound);
+        }
+        _roundEndSeen = false;
+        _currentRoundNumber = nextRound;
         var restored = _roundBackup.ApplyRestore(_currentRoundNumber, _currentRoundNumber <= previousRound);
         // Only the next round of the same match continues from the previous round_end: a restart, new map or
         // round restore resets the engine counters (round 1 always follows one of the first two).
@@ -173,9 +205,9 @@ public sealed class MatchFlowHandler : IGameHandler
 
         foreach (var steamId in _playerSessions.GetActiveSteamIds())
         {
-            var player = Utilities.GetPlayerFromSteamId64(steamId);
+            players.TryGetValue(steamId, out var player);
             var state = PlayerControllerState.From(player);
-            if (player is { IsValid: true })
+            if (player is not null)
             {
                 var totals = ReadEngineStats(player);
                 _lastTotals.TryAdd(steamId, totals);
@@ -186,6 +218,7 @@ public sealed class MatchFlowHandler : IGameHandler
             {
                 stats.ResetRoundStats();
                 stats.CurrentTeam = state.Team;
+                // Until round_poststart: the engine hands out a new half's start money after round_start.
                 stats.Economy.RoundStartMoney = state.Money;
             });
         }
@@ -193,6 +226,22 @@ public sealed class MatchFlowHandler : IGameHandler
         _roundBackup.CreateSnapshot(_currentRoundNumber);
         _matchTracker.StartRound(_currentRoundNumber);
 
+        return HookResult.Continue;
+    }
+
+    // The money the round starts with: for the second half and each overtime half the engine assigns the start money
+    // between round_start and round_poststart (RestartRound: AssignStartingMoneyToAllPlayers).
+    private HookResult OnRoundPoststart(EventRoundPoststart @event, GameEventInfo info)
+    {
+        if (_config.DeathmatchMode || GameRulesState.IsWarmup) return HookResult.Continue;
+        if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live) return HookResult.Continue;
+
+        var players = PlayerControllerState.HumansBySteamId();
+        _playerSessions.ForEachPlayer(stats =>
+        {
+            if (players.TryGetValue(stats.SteamId, out var player) && player.InGameMoneyServices is { } money)
+                stats.Economy.RoundStartMoney = money.Account;
+        });
         return HookResult.Continue;
     }
 
@@ -210,17 +259,12 @@ public sealed class MatchFlowHandler : IGameHandler
         var ctAlive = 0;
         var tAlive = 0;
 
-        var playerStates = new List<PlayerControllerState>();
-        foreach (var steamId in _playerSessions.GetActiveSteamIds())
+        // Everyone on a side starts the round, bots included.
+        var everyone = Utilities.GetPlayers();
+        foreach (var player in everyone)
         {
-            var player = Utilities.GetPlayerFromSteamId64(steamId);
-            if (player is { IsValid: true })
-            {
-                var state = PlayerControllerState.From(player);
-                playerStates.Add(state);
-                if (state.Team == PlayerTeam.CounterTerrorist) ctAlive++;
-                else if (state.Team == PlayerTeam.Terrorist) tAlive++;
-            }
+            if (player.TeamNum == (int)PlayerTeam.CounterTerrorist) ctAlive++;
+            else if (player.TeamNum == (int)PlayerTeam.Terrorist) tAlive++;
         }
 
         var context = new RoundContext(_currentRoundNumber, roundStartUtc, ctAlive, tAlive, isPistolRound);
@@ -230,9 +274,13 @@ public sealed class MatchFlowHandler : IGameHandler
         }
 
         // Both sides' buy: the money they started the round with and what they hold now that buying is over.
+        // ponytail: the humans' only; a bot has no session to keep its start money in.
         var economy = (CtMoney: 0, TMoney: 0, CtEquipment: 0, TEquipment: 0);
-        foreach (var state in playerStates)
+        var players = PlayerControllerState.HumansBySteamId(everyone);
+        foreach (var steamId in _playerSessions.GetActiveSteamIds())
         {
+            if (!players.TryGetValue(steamId, out var player)) continue;
+            var state = PlayerControllerState.From(player);
             var isCt = state.Team == PlayerTeam.CounterTerrorist;
             var isT = state.Team == PlayerTeam.Terrorist;
             if (isCt) economy.CtEquipment += state.EquipmentValue;
@@ -278,6 +326,8 @@ public sealed class MatchFlowHandler : IGameHandler
         // Game Commencing ends the round a lone first player was in, before warmup starts; nobody played it.
         if (GameRulesState.IsWarmup || winReason == (int)RoundEndReason.GameCommencing) return HookResult.Continue;
 
+        _roundEndSeen = true;
+        _matchHadRoundEnd = true;
         _pauseService.OnRoundEnd();
 
         foreach (var processor in _processors)
@@ -287,6 +337,7 @@ public sealed class MatchFlowHandler : IGameHandler
 
         _damageReport.ReportToPlayers();
 
+        var players = PlayerControllerState.HumansBySteamId();
         _playerSessions.ForEachPlayer(stats =>
         {
             // Spectators, casters and coaches have sessions too, but they did not play the round; neither did someone
@@ -316,25 +367,17 @@ public sealed class MatchFlowHandler : IGameHandler
             if (stats.Round.WasTradedThisRound) stats.Round.RoundsTraded++;
             if (stats.Round.HadKillThisRound || stats.Round.HadAssistThisRound || stats.Round.SurvivedThisRound || stats.Round.WasTradedThisRound) stats.Round.KASTRounds++;
 
-            var player = Utilities.GetPlayerFromSteamId64(stats.SteamId);
-            if (player is { IsValid: true })
+            if (players.TryGetValue(stats.SteamId, out var player))
             {
                 Observe(stats, player);
-
-                if (player.InGameMoneyServices is not null)
-                {
-                    var equipmentValue = player.PlayerPawn.Value?.CurrentEquipmentValue ?? 0;
-                    stats.Economy.RoundEndMoney = player.InGameMoneyServices.Account;
-                    stats.Economy.EquipmentValue = equipmentValue;
-                    stats.Economy.EquipmentValueEnd = equipmentValue;
-                }
+                SampleRoundEnd(stats, player);
             }
         });
 
         _lastTotalsRound = _currentRoundNumber;
         _matchTracker.EndRound(_currentRoundNumber, winningTeamInt, winReason, _bombProcessor.RoundBomb);
 
-        SaveStatsAtRoundEnd();
+        SaveStats(_currentRoundNumber);
         return HookResult.Continue;
     }
 
@@ -342,20 +385,29 @@ public sealed class MatchFlowHandler : IGameHandler
     {
         if (_config.DeathmatchMode || GameRulesState.IsWarmup) return HookResult.Continue;
         if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live) return HookResult.Continue;
+        // Without a round_end this is a restart (mp_restartgame, the end of warmup): the round was not played out, and
+        // the engine resets its counters next.
+        if (!_roundEndSeen) return HookResult.Continue;
 
         var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
         if (!string.IsNullOrWhiteSpace(matchUuid))
             _persistenceChannel.TryWrite(new RoundOfficialEndUpdate(matchUuid, _currentRoundNumber));
-        // The awards since round_end (exit frags, the round-end payouts) belong to this round.
+        // The awards since round_end (exit frags, the loser bonus and the other round-end payouts) belong to this round.
+        var players = PlayerControllerState.HumansBySteamId();
         _playerSessions.ForEachPlayer(stats =>
         {
-            if (Utilities.GetPlayerFromSteamId64(stats.SteamId) is { IsValid: true } player) Observe(stats, player);
+            if (!players.TryGetValue(stats.SteamId, out var player)) return;
+            Observe(stats, player);
+            SampleRoundEnd(stats, player);
         });
-        SaveStatsAtRoundEnd();
+        SaveStats(_currentRoundNumber);
         return HookResult.Continue;
     }
 
-    private void SaveStatsAtRoundEnd()
+    // The lifetime rows of everyone whose totals changed, and the round's own numbers: the totals now against the totals
+    // at the round's start. Written at round end, at the official end and at the next round's start (the later write
+    // replaces the earlier), like the lifetime row.
+    private void SaveStats(int roundNumber)
     {
         var match = _matchTracker.CurrentMatch;
         var snapshots = _playerSessions.CaptureSnapshots(true, match?.MatchUuid);
@@ -367,12 +419,21 @@ public sealed class MatchFlowHandler : IGameHandler
                 _playerSessions.MarkPersisted(snapshot.SteamId, snapshot.Version);
             }
 
-            // The round's own numbers: the totals now against the totals at the round's start. Written at round end
-            // and again at the official end (the later write replaces the earlier), like the lifetime row.
-            if (match is null || _roundBackup.GetRoundStart(_currentRoundNumber, snapshot.SteamId) is not { } roundStart) continue;
+            if (match is null || _roundBackup.GetRoundStart(roundNumber, snapshot.SteamId) is not { } roundStart) continue;
             var round = MatchStatsService.Delta(snapshot, roundStart);
             if (round.RoundsPlayed == 1) _persistenceChannel.TryWrite(new PlayerRoundStatsUpdate(round));
         }
+    }
+
+    // The money and equipment at the end of the round, read at round_end and again at the official end: the loser bonus
+    // and the round-end kill rewards are paid after the round_end event (RoundWin runs after it).
+    private static void SampleRoundEnd(PlayerStats stats, CCSPlayerController player)
+    {
+        if (player.InGameMoneyServices is not { } money) return;
+        var equipmentValue = player.PlayerPawn.Value?.CurrentEquipmentValue ?? 0;
+        stats.Economy.RoundEndMoney = money.Account;
+        stats.Economy.EquipmentValue = equipmentValue;
+        stats.Economy.EquipmentValueEnd = equipmentValue;
     }
 
     // Reads the engine's per-match counters and adds the change since the last observation to the lifetime totals.

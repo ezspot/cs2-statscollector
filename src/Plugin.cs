@@ -66,8 +66,8 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         try
         {
             // Services are built and their handlers registered here, on the game thread: CounterStrikeSharp natives
-            // (Server.GameDirectory in two constructors, event and command registration) throw on any other thread.
-            // Built on the background task, the plugin never initialized.
+            // (Server.GameDirectory in two constructors, event and command registration) are not guarded against other
+            // threads; called from the background task they would run unsynchronized against the engine.
             _serviceProvider = BuildServices();
             lifecycle = _serviceProvider.GetRequiredService<IPluginLifecycleService>();
             lifecycle.Initialize(this);
@@ -76,10 +76,12 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         catch (Exception ex)
         {
             _logger.LogCritical(ex, "Failed to initialize statsCollector plugin");
-            return;
+            // Swallowed, CounterStrikeSharp would report the plugin as loaded with nothing registered; thrown, it logs
+            // the failure and unloads it (PluginContext.cs:233-254), which copes with the half-built state here.
+            throw;
         }
 
-        PickUpRunningMatch(_cancellationTokenSource.Token);
+        PickUpRunningMatch();
 
         // Schema and background writers need the database. Until they start, stats updates and position events wait in
         // their bounded queues; an unload before then discards them (there is nothing to write them to).
@@ -103,16 +105,15 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
 
     // A load in the middle of a map (hot reload, or css_plugins load after replacing the DLL) misses the map start and
     // the connects of everyone already playing. On a cold start this runs on the first world update.
-    private void PickUpRunningMatch(CancellationToken ct)
+    private void PickUpRunningMatch()
     {
         var services = _serviceProvider!;
         services.GetRequiredService<IGameScheduler>().Schedule(() =>
         {
-            if (ct.IsCancellationRequested) return;
             var playerSessions = services.GetRequiredService<IPlayerSessionService>();
             foreach (var player in Utilities.GetPlayers())
             {
-                if (!player.IsBot && player.SteamID != 0)
+                if (!player.IsBot && player.SteamID != 0 && PlayerLifecycleHandler.IsAuthorized(player))
                     playerSessions.EnsurePlayer(PlayerControllerState.From(player));
             }
 
@@ -195,12 +196,15 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         try
         {
             // Pending scrim and pause timers must be killed here, on the game thread; the container is disposed on a
-            // pool thread, where that native call throws and the timer would fire into the unloaded plugin.
+            // pool thread, where that native call runs unguarded against the engine (CounterStrikeSharp has no thread
+            // check) and the timer could fire into the unloaded plugin.
             (_serviceProvider?.GetService<IScrimManager>() as IDisposable)?.Dispose();
             (_serviceProvider?.GetService<IPauseService>() as IDisposable)?.Dispose();
 
             _cancellationTokenSource.Cancel();
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            // One budget for the whole cleanup (startup wait, final flushes, container disposal): this blocks the game
+            // thread, and with the database down every step would otherwise wait out its own timeout.
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             CleanupAsync(timeout.Token).GetAwaiter().GetResult();
         }
         catch (Exception ex)
@@ -241,8 +245,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             {
                 if (_serviceProvider is IAsyncDisposable asyncDisposable)
                 {
-                    using var disposeTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                    await asyncDisposable.DisposeAsync().AsTask().WaitAsync(disposeTimeout.Token).ConfigureAwait(false);
+                    await asyncDisposable.DisposeAsync().AsTask().WaitAsync(cancellationToken).ConfigureAwait(false);
                 }
                 else if (_serviceProvider is IDisposable disposable)
                 {

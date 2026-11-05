@@ -140,6 +140,12 @@ public sealed class PluginConfig : BasePluginConfig
             throw new ArgumentException("LiveConfigPath and KnifeConfigPath are required");
         if (ClutchSettings.BaseMultiplier < 0 || ClutchSettings.DifficultyWeight < 0)
             throw new ArgumentException("Clutch settings cannot be negative");
+        if (Scrim.MaxTacticalPauses is < 1 or > 10)
+            throw new ArgumentException("MaxTacticalPauses must be between 1 and 10");
+        if (Scrim.TacticalPauseDuration is < 5 or > 600)
+            throw new ArgumentException("TacticalPauseDuration must be between 5 and 600 seconds");
+        if (!string.IsNullOrWhiteSpace(DatabaseSslCa) && !File.Exists(DatabaseSslCa))
+            throw new ArgumentException($"DatabaseSslCa file not found: {DatabaseSslCa}");
     }
 }
 

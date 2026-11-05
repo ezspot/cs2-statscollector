@@ -123,15 +123,15 @@ CREATE TABLE IF NOT EXISTS player_stats (
     stomach_hits INT DEFAULT 0,
     arm_hits INT DEFAULT 0,
     leg_hits INT DEFAULT 0,
-    kd_ratio DECIMAL(5,3) DEFAULT 0,
+    kd_ratio DECIMAL(8,3) DEFAULT 0,
     headshot_percentage DECIMAL(5,2) DEFAULT 0,
     accuracy_percentage DECIMAL(5,2) DEFAULT 0,
     kast_percentage DECIMAL(5,2) DEFAULT 0,
     average_damage_per_round DECIMAL(6,2) DEFAULT 0,
     hltv_rating DECIMAL(5,3) DEFAULT 0,
-    impact_rating DECIMAL(5,3) DEFAULT 0,
-    survival_rating DECIMAL(5,3) DEFAULT 0,
-    utility_score DECIMAL(5,3) DEFAULT 0,
+    impact_rating DECIMAL(8,3) DEFAULT 0,
+    survival_rating DECIMAL(8,3) DEFAULT 0,
+    utility_score DECIMAL(8,3) DEFAULT 0,
     round_swing DECIMAL(10,3) DEFAULT 0,
     team_kills INT NOT NULL DEFAULT 0,
     suicides INT NOT NULL DEFAULT 0,
@@ -391,7 +391,7 @@ CREATE TABLE IF NOT EXISTS player_advanced_analytics (
     idempotency_key VARCHAR(100) UNIQUE NULL,
     FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
     FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
-    UNIQUE KEY uq_player_analytics_steam_calculated (steam_id, calculated_at),
+    INDEX idx_player_analytics_steam_calculated (steam_id, calculated_at),
     INDEX idx_player_advanced_analytics_calculated_at (calculated_at)
 ) ENGINE=InnoDB;
 
