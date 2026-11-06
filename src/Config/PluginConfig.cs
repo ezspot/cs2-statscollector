@@ -96,10 +96,10 @@ public sealed class PluginConfig : BasePluginConfig
             Database = includeDatabase ? DatabaseName : string.Empty,
             UserID = DatabaseUsername,
             Password = DatabasePassword,
-            MinimumPoolSize = 0,
-            MaximumPoolSize = 50,
-            ConnectionReset = true,
-            ConnectionIdleTimeout = 300,
+            // Players never hold a connection: the two background writers use one each and a joining player's seed
+            // borrows one for a single primary-key read. Ten covers the writers plus a join burst; further opens wait
+            // for a free one.
+            MaximumPoolSize = 10,
             AllowLoadLocalInfile = true,
             SslCa = DatabaseSslCa ?? string.Empty,
             // An empty value passes validation; it must not fall back to Preferred, which accepts plaintext.

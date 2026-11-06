@@ -70,13 +70,13 @@ in-game prompts. Everything but `.stats` needs `EnableScrim`. Admin means `@css/
 | `.stats` | anyone | Kills, deaths, assists, ADR, rating and rank of your session (from the console: logs the number of tracked players). |
 | `.ready` / `.unready` | players | Ready up in the lobby. |
 | `.vote <map>` | ready players | Vote for a map of `Scrim.MapPool`; the vote closes once every ready player has voted. |
-| `.pick <SteamID64>` | the captain whose turn it is | Pick a player for your team. |
+| `.pick <name>` | the captain whose turn it is | Pick a player for your team. Part of the name is enough; `#<userid>` (from `status`) when names collide. |
 | `.ct` / `.t` | the knife-round winner's captain | Choose the side (30 s, then the sides stay as they are). |
 | `.pause [tech\|admin]` | players; `admin` needs an admin | Pause at the end of the round: tactical pauses are limited and timed, the others last until `.unpause`. |
 | `.unpause` | admins | End a pause, also the engine's own after a round restore. |
 | `.restore <round>` | admins | Reload the engine's backup of that round and roll the stats back to its start. Without a round: the rounds that have one. |
 | `.scrim start` / `.scrim stop` | admins | Open the lobby / abort the scrim. |
-| `.scrim setcaptain <1\|2> <SteamID64>` | admins | Appoint a captain once enough players are ready. |
+| `.scrim setcaptain <1\|2> <name>` | admins | Appoint a captain once enough players are ready. |
 | `.scrim practice on\|off` | admins | Practice mode (`practice.cfg`); `off` runs the live config again. |
 | `.scrim recover` | admins | Pick up the scrim saved in `scrim_state.json` after a crash or restart. |
 | `.scrim set playersperteam\|minready <n>` | admins | Change the team size or the ready-up count until the plugin is reloaded. |
@@ -159,7 +159,7 @@ Several CS2 servers (target: up to ~5) can run this plugin against one MySQL dat
 - **Lifetime stats are seeded once the client is validated** — when a player joins (and Steam has validated them, or at once on a LAN server), their existing `player_stats` row is loaded off the game thread and added to whatever the session has already counted, then written back. Since a Steam account can only be on one server at a time there is no write race on a row, and moving between servers never overwrites history with a single session. The exception is a database outage: snapshots a server buffers while MySQL is down are written when it recovers, and can overwrite newer totals if the player has since played on another server. A player who leaves while the database is unreachable keeps their session in memory until it has been seeded, and it is written then (their playtime ends at the disconnect).
 - **Per-match rows** (`match_player_stats`, `match_weapon_stats`, `rounds`, position tables) are immutable per `(match_id, …)`, so every server records its own matches independently.
 
-> **Connection budget:** each server opens its own MySqlConnector pool (max **50** connections per server). For *N* servers, make sure MySQL `max_connections` comfortably exceeds `N × 50` — e.g. for 5 servers set `max_connections >= 300`.
+> **Connection budget:** connections are not per player. Each server holds at most **10** (its two background writers plus one short read per joining player), normally two. MySQL's default `max_connections` of 151 covers ten servers.
 
 ## Round Swing
 

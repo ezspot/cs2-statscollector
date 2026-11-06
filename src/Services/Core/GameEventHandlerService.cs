@@ -3,6 +3,7 @@ using System.Threading.Tasks;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Commands;
+using CounterStrikeSharp.API.Modules.Commands.Targeting;
 using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.Modules.Events;
 using CounterStrikeSharp.API.Modules.Utils;
@@ -147,11 +148,8 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
                 RunCommand(_scrimManager.SetPracticeModeAsync(enable), "set practice mode");
                 break;
             case "setcaptain":
-                if (command.ArgCount < 4) return;
-                if (!int.TryParse(command.GetArg(2), out var team) ||
-                    !ulong.TryParse(command.GetArg(3), out var targetSteamId)) return;
-                var target = Utilities.GetPlayerFromSteamId64(targetSteamId);
-                if (target != null) RunCommand(_scrimManager.SetCaptainAsync(team, target.SteamID), "set captain");
+                if (command.ArgCount < 4 || !int.TryParse(command.GetArg(2), out var team)) return;
+                if (FindPlayer(player, command, command.GetArg(3)) is { } captain) RunCommand(_scrimManager.SetCaptainAsync(team, captain.SteamID), "set captain");
                 break;
             case "set":
                 if (command.ArgCount < 4) return;
@@ -181,9 +179,18 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
     private void OnPickCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (player == null || command.ArgCount < 2) return;
-        if (!ulong.TryParse(command.GetArg(1), out var targetSteamId)) return;
-        var pickTarget = Utilities.GetPlayerFromSteamId64(targetSteamId);
-        if (pickTarget != null) RunCommand(_scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID), "pick player");
+        if (FindPlayer(player, command, command.ArgString) is { } pick) RunCommand(_scrimManager.PickPlayerAsync(player.SteamID, pick.SteamID), "pick player");
+    }
+
+    // Part of a name (any case), #userid or #SteamID64; CounterStrikeSharp matches it against the connected players.
+    private static CCSPlayerController? FindPlayer(CCSPlayerController? caller, CommandInfo command, string target)
+    {
+        var players = new Target(target).GetTarget(caller).Players.FindAll(p => !p.IsBot);
+        if (players.Count == 1) return players[0];
+        command.ReplyToCommand(players.Count == 0
+            ? $" [Scrim] No player matches '{target.Trim()}'."
+            : $" [Scrim] Several players match '{target.Trim()}': {string.Join(", ", players.ConvertAll(p => p.PlayerName))}");
+        return null;
     }
 
     private void OnCtCommand(CCSPlayerController? player, CommandInfo command)

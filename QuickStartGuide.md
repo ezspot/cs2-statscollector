@@ -59,7 +59,7 @@ it up as in the README's *Database prerequisites* (`local_infile=ON`, `DELETE` a
 ## Multiple servers, one database
 You can point several CS2 servers (target: up to ~5) at the same MySQL database — just give each server the same DB connection settings. Stats are keyed by SteamID64, and each server seeds a player's lifetime totals from the DB on connect, so career stats accumulate correctly even as players move between servers. See *Multi-server (shared database)* in the [README](README.md#multi-server-shared-database) for details.
 
-> **Important:** each server uses up to **50** DB connections. For *N* servers, raise MySQL `max_connections` above `N × 50` (e.g. `300` for 5 servers) or you'll hit *"Too many connections"* under load.
+> Each server holds at most **10** DB connections (normally two), whatever the player count; MySQL's default `max_connections` (151) is plenty for the ~5 servers this targets.
 
 ## Build from source
 ```bash
@@ -74,7 +74,6 @@ Copy the built plugin from `out/` to your server.
 - **No data**: `view_global_leaderboard` has a 10-round activity threshold; check the log for `Failed to process persistence batch`.
 - **Config overrides**: any option can be set via `STATSCOLLECTOR_`-prefixed environment variables; nested options
   use `__` (`STATSCOLLECTOR_Scrim__PlayersPerTeam`).
-- **"Too many connections" (multi-server)**: raise MySQL `max_connections` to at least `50 × number_of_servers`.
 
 ## Links
 - [README.md](README.md)

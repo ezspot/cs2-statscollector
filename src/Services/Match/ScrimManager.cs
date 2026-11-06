@@ -92,7 +92,7 @@ public sealed class ScrimManager : IScrimManager, IDisposable
                 _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Practice Mode enabled! God, noclip, and infinite ammo active."));
                 break;
             case ScrimState.CaptainSetup:
-                _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Ready players confirmed. Admins, use .scrim setcaptain <1|2> <SteamID64>."));
+                _scheduler.Schedule(() => Server.PrintToChatAll(" [Scrim] Ready players confirmed. Admins, use .scrim setcaptain <1|2> <name>."));
                 break;
             case ScrimState.MapVote:
                 OnMapVoteEntry();
@@ -266,7 +266,7 @@ public sealed class ScrimManager : IScrimManager, IDisposable
         _scheduler.Schedule(() =>
         {
             var captain = Utilities.GetPlayerFromSteamId64(captainSteamId);
-            captain?.PrintToChat(" [Scrim] It's YOUR turn to pick a player (.pick <SteamID64>).");
+            captain?.PrintToChat(" [Scrim] It's YOUR turn to pick a player (.pick <name>).");
 
             string pool = string.Join(", ", _pickPool.Select(id => Utilities.GetPlayerFromSteamId64(id)?.PlayerName ?? id.ToString()));
             captain?.PrintToChat($" [Scrim] Available players: {pool}");
@@ -435,7 +435,11 @@ public sealed class ScrimManager : IScrimManager, IDisposable
         if (_state != ScrimState.Picking) return;
 
         if (steamId != ActiveCaptainId()) return;
-        if (!_pickPool.Contains(targetSteamId)) return;
+        if (!_pickPool.Contains(targetSteamId))
+        {
+            _scheduler.Schedule(() => Utilities.GetPlayerFromSteamId64(steamId)?.PrintToChat(" [Scrim] That player is not in the pick pool."));
+            return;
+        }
 
         _pickPool.Remove(targetSteamId);
         var pickedByTeam1 = _team1Picking;
