@@ -6,7 +6,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Dapper;
 using MySqlConnector;
-using statsCollector.Infrastructure;
 using statsCollector.Infrastructure.Database;
 using Polly;
 using Polly.Registry;
@@ -41,8 +40,6 @@ public sealed class PositionTrackingService : IPositionTrackingService
 
         await _resiliencePipeline.ExecuteAsync(async ct =>
         {
-            using var activity = Instrumentation.ActivitySource.StartActivity("BulkTrackKillPositionsAsync");
-
             await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
 
             var dataTable = new DataTable();
@@ -122,8 +119,6 @@ public sealed class PositionTrackingService : IPositionTrackingService
 
         await _resiliencePipeline.ExecuteAsync(async ct =>
         {
-            using var activity = Instrumentation.ActivitySource.StartActivity("BulkTrackDeathPositionsAsync");
-
             await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
 
             var dataTable = new DataTable();
@@ -177,8 +172,6 @@ public sealed class PositionTrackingService : IPositionTrackingService
 
         await _resiliencePipeline.ExecuteAsync(async ct =>
         {
-            using var activity = Instrumentation.ActivitySource.StartActivity("BulkTrackUtilityPositionsAsync");
-
             await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
 
             var dataTable = new DataTable();

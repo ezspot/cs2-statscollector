@@ -1,54 +1,28 @@
-using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
-using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public sealed class MovementEventProcessor : IEventProcessor
+/// <summary>Footsteps, jumps and pings: high-frequency counters of little analytical value. Off unless
+/// <see cref="PluginConfig.EnableMovementTracking"/> is set; then the events are not even subscribed.</summary>
+public sealed class MovementEventProcessor(IPlayerSessionService playerSessions, PluginConfig config) : IEventProcessor
 {
-    private readonly IPlayerSessionService _playerSessions;
-    private readonly IOptionsMonitor<PluginConfig> _config;
-
-    public MovementEventProcessor(
-        IPlayerSessionService playerSessions,
-        IOptionsMonitor<PluginConfig> config)
-    {
-        _playerSessions = playerSessions;
-        _config = config;
-    }
-
     public void RegisterEvents(IEventDispatcher dispatcher)
     {
-        // Footsteps fire at very high frequency; only subscribe when movement tracking is enabled.
-        if (!_config.CurrentValue.EnableMovementTracking) return;
+        if (!config.EnableMovementTracking) return;
 
-        dispatcher.Subscribe<EventPlayerFootstep>((e, i) => { HandlePlayerFootstep(e); return HookResult.Continue; });
-        dispatcher.Subscribe<EventPlayerJump>((e, i) => { HandlePlayerJump(e); return HookResult.Continue; });
+        dispatcher.Subscribe<EventPlayerFootstep>((e, _) => Count(e, stats => stats.Round.Footsteps++));
+        dispatcher.Subscribe<EventPlayerJump>((e, _) => Count(e, stats => stats.Round.Jumps++));
+        dispatcher.Subscribe<EventPlayerPing>((e, _) => Count(e, stats => stats.Round.Pings++));
     }
 
-    private void HandlePlayerFootstep(EventPlayerFootstep @event)
+    private HookResult Count(GameEvent @event, Action<PlayerStats> increment)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        if (player == null || !player.IsValid || player.SteamID == 0 || player.IsBot) return;
-
-        _playerSessions.MutatePlayer(player.SteamID, stats =>
-        {
-            stats.Round.Footsteps++;
-        });
-    }
-
-    private void HandlePlayerJump(EventPlayerJump @event)
-    {
-        var player = @event.GetPlayerOrDefault("userid");
-        if (player == null || !player.IsValid || player.SteamID == 0 || player.IsBot) return;
-
-        _playerSessions.MutatePlayer(player.SteamID, stats =>
-        {
-            stats.Round.Jumps++;
-        });
+        if (player is { IsBot: false, SteamID: not 0 }) playerSessions.MutatePlayer(player.SteamID, increment);
+        return HookResult.Continue;
     }
 }

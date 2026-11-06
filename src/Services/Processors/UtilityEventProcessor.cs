@@ -3,7 +3,6 @@ using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
@@ -20,7 +19,7 @@ public sealed class UtilityEventProcessor : IEventProcessor
     private readonly ILogger<UtilityEventProcessor> _logger;
     private readonly IPositionPersistenceService _positionPersistence;
     private readonly IMatchTrackingService _matchTracker;
-    private readonly IOptionsMonitor<PluginConfig> _config;
+    private readonly PluginConfig _config;
     private readonly TimeProvider _timeProvider;
     private readonly ICombatEventProcessor _combat;
     private readonly List<PendingGrenade> _pendingGrenades = [];
@@ -33,7 +32,7 @@ public sealed class UtilityEventProcessor : IEventProcessor
         ILogger<UtilityEventProcessor> logger,
         IPositionPersistenceService positionPersistence,
         IMatchTrackingService matchTracker,
-        IOptionsMonitor<PluginConfig> config,
+        PluginConfig config,
         TimeProvider timeProvider,
         ICombatEventProcessor combat)
     {
@@ -338,29 +337,30 @@ public sealed class UtilityEventProcessor : IEventProcessor
     {
         var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
         // Round 0: no freeze end seen yet (loaded mid-round), so there is no round to attribute the throw to.
-        if (!_config.CurrentValue.EnablePositionTracking || string.IsNullOrWhiteSpace(matchUuid) || _currentRoundNumber == 0) return;
+        if (!_config.EnablePositionTracking || string.IsNullOrWhiteSpace(matchUuid) || _currentRoundNumber == 0) return;
 
-        var @event = _positionPersistence.GetUtilityEvent();
-        @event.MatchUuid = matchUuid;
-        @event.SteamId = pending.OwnerSteamId;
-        @event.ThrowX = pending.ThrowPosition.X;
-        @event.ThrowY = pending.ThrowPosition.Y;
-        @event.ThrowZ = pending.ThrowPosition.Z;
-        @event.LandX = pending.LandPosition.X;
-        @event.LandY = pending.LandPosition.Y;
-        @event.LandZ = pending.LandPosition.Z;
-        @event.UtilityType = (int)pending.Type;
-        @event.EntityId = pending.EntityId;
-        @event.LifecycleStartEvent = pending.LifecycleStartEvent;
-        @event.LifecycleEndEvent = pending.LifecycleEndEvent;
-        @event.LifecycleDurationMs = pending.LifecycleDurationMs;
-        @event.OpponentsAffected = pending.OpponentsAffected;
-        @event.TeammatesAffected = pending.TeammatesAffected;
-        @event.Damage = pending.Damage;
-        @event.MapName = Server.MapName;
-        @event.RoundNumber = _currentRoundNumber;
-        @event.RoundTime = (int)(pending.DetonatedAt - _roundStartUtc).TotalSeconds;
-        _positionPersistence.TryEnqueue(@event);
+        _positionPersistence.TryEnqueue(new UtilityPositionEvent
+        {
+            MatchUuid = matchUuid,
+            SteamId = pending.OwnerSteamId,
+            ThrowX = pending.ThrowPosition.X,
+            ThrowY = pending.ThrowPosition.Y,
+            ThrowZ = pending.ThrowPosition.Z,
+            LandX = pending.LandPosition.X,
+            LandY = pending.LandPosition.Y,
+            LandZ = pending.LandPosition.Z,
+            UtilityType = (int)pending.Type,
+            EntityId = pending.EntityId,
+            LifecycleStartEvent = pending.LifecycleStartEvent,
+            LifecycleEndEvent = pending.LifecycleEndEvent,
+            LifecycleDurationMs = pending.LifecycleDurationMs,
+            OpponentsAffected = pending.OpponentsAffected,
+            TeammatesAffected = pending.TeammatesAffected,
+            Damage = pending.Damage,
+            MapName = Server.MapName,
+            RoundNumber = _currentRoundNumber,
+            RoundTime = (int)(pending.DetonatedAt - _roundStartUtc).TotalSeconds
+        });
     }
 
     private static UtilityType ParseUtilityType(string? weapon)

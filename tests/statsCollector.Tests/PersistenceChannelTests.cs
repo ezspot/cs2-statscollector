@@ -4,7 +4,6 @@ using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging.Abstractions;
 using statsCollector.Config;
 using statsCollector.Domain;
-using statsCollector.Infrastructure;
 using statsCollector.Services;
 using Xunit;
 
@@ -74,7 +73,7 @@ public class PersistenceChannelTests
             new PlayerRoundStatsUpdate(snapshot),
             new RoundOfficialEndUpdate("m1", 1),
             new RoundsVoidedUpdate("m1", 5),
-            new MatchStartUpdate("de_test", "m1", "s1"),
+            new MatchStartUpdate("de_test", "m1"),
             new MatchEndUpdate("m1")
         ];
         var kinds = typeof(StatsUpdate).Assembly.GetTypes().Where(t => t.IsSubclassOf(typeof(StatsUpdate))).Select(t => t.Name).Order();
@@ -103,7 +102,7 @@ public class PersistenceChannelTests
     };
 
     private static PersistenceChannel NewChannel(IStatsRepository repo, string spillPath) =>
-        new(NullLogger<PersistenceChannel>.Instance, repo, new StaticOptionsMonitor<PluginConfig>(new PluginConfig()), spillPath);
+        new(NullLogger<PersistenceChannel>.Instance, repo, new PluginConfig(), spillPath);
 
     private static string NewSpillPath() =>
         Path.Combine(Directory.CreateTempSubdirectory("statscollector-tests").FullName, "pending_stats.json");
@@ -129,7 +128,7 @@ public class PersistenceChannelTests
         public Task UpsertPlayerAnalyticsAsync(IEnumerable<PlayerAnalyticsSnapshot> snapshots, CancellationToken ct) => Record("analytics");
         public Task UpsertPlayerRoundStatsAsync(IEnumerable<PlayerSnapshot> roundDeltas, CancellationToken ct) =>
             Record($"rounds[{string.Join(", ", roundDeltas.Select(d => $"{d.MatchUuid} r{d.RoundNumber} k{d.Kills}"))}]");
-        public Task StartMatchAsync(string mapName, string? matchUuid, string? seriesUuid, CancellationToken ct) => Record($"match {matchUuid} start");
+        public Task StartMatchAsync(string mapName, string matchUuid, CancellationToken ct) => Record($"match {matchUuid} start");
         public Task EndMatchAsync(string matchUuid, CancellationToken ct) => Record($"match {matchUuid} end");
         public Task StartRoundAsync(string matchUuid, int roundNumber, CancellationToken ct) => Record($"round {matchUuid} #{roundNumber}");
         public Task EndRoundAsync(string matchUuid, int roundNumber, int winnerTeam, int winReason, RoundBombInfo bomb, CancellationToken ct) => Record($"round {matchUuid} #{roundNumber} end");

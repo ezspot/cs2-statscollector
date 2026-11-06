@@ -10,13 +10,11 @@ CREATE TABLE IF NOT EXISTS players (
 CREATE TABLE IF NOT EXISTS matches (
     id INT AUTO_INCREMENT PRIMARY KEY,
     match_uuid VARCHAR(36) UNIQUE NOT NULL,
-    series_uuid VARCHAR(36) NULL,
     map_name VARCHAR(100) NOT NULL,
     start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     end_time TIMESTAMP NULL,
     status ENUM('IN_PROGRESS', 'COMPLETED', 'ABORTED') DEFAULT 'IN_PROGRESS',
-    INDEX idx_matches_time (start_time),
-    INDEX idx_matches_series (series_uuid)
+    INDEX idx_matches_time (start_time)
 ) ENGINE=InnoDB;
 
 -- 2. Tables with dependencies

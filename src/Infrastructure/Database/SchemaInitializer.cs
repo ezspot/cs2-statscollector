@@ -6,7 +6,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Dapper;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using MySqlConnector;
 using statsCollector.Config;
 
@@ -21,15 +20,15 @@ public interface ISchemaInitializer
 /// idempotent (CREATE TABLE IF NOT EXISTS, CREATE OR REPLACE VIEW), so servers sharing a database may start together;
 /// nothing is upgraded in place.</summary>
 public sealed class SchemaInitializer(
-    IOptionsMonitor<PluginConfig> config,
+    PluginConfig config,
     ILogger<SchemaInitializer> logger) : ISchemaInitializer
 {
-    private readonly IOptionsMonitor<PluginConfig> _config = config;
+    private readonly PluginConfig _config = config;
     private readonly ILogger<SchemaInitializer> _logger = logger;
 
     public async Task EnsureSchemaAsync(CancellationToken cancellationToken)
     {
-        if (!_config.CurrentValue.AutoCreateSchema) return;
+        if (!_config.AutoCreateSchema) return;
 
         var script = ReadInitScript();
         if (string.IsNullOrWhiteSpace(script))
@@ -39,13 +38,13 @@ public sealed class SchemaInitializer(
 
         try
         {
-            var databaseName = _config.CurrentValue.DatabaseName;
+            var databaseName = _config.DatabaseName;
             if (databaseName.Any(character => !char.IsLetterOrDigit(character) && character is not ('_' or '$')))
             {
                 throw new InvalidOperationException("DatabaseName may contain only letters, digits, underscores, and dollar signs.");
             }
 
-            var connectionString = _config.CurrentValue.BuildConnectionString(includeDatabase: false);
+            var connectionString = _config.BuildConnectionString(includeDatabase: false);
             await using var connection = new MySqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
             await connection.ExecuteAsync(new CommandDefinition(

@@ -3,9 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using MySqlConnector;
 using statsCollector.Config;
 using statsCollector.Infrastructure;
@@ -18,7 +16,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     private static readonly TimeSpan SchemaRetryDelay = TimeSpan.FromSeconds(15);
 
     private readonly ILogger<PluginLifecycleService> _logger;
-    private readonly IOptionsMonitor<PluginConfig> _config;
+    private readonly PluginConfig _config;
     private readonly IMatchTrackingService _matchTracker;
     private readonly IPositionPersistenceService _positionPersistence;
     private readonly IPlayerSessionService _playerSessions;
@@ -30,7 +28,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
 
     public PluginLifecycleService(
         ILogger<PluginLifecycleService> logger,
-        IOptionsMonitor<PluginConfig> config,
+        PluginConfig config,
         IMatchTrackingService matchTracker,
         IPositionPersistenceService positionPersistence,
         IPlayerSessionService playerSessions,
@@ -56,7 +54,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     {
         _eventHandler.RegisterEvents(plugin);
 
-        var autoSaveInterval = Math.Max(30, _config.CurrentValue.AutoSaveSeconds);
+        var autoSaveInterval = Math.Max(30, _config.AutoSaveSeconds);
         // BasePlugin.Dispose kills it at unload.
         plugin.AddTimer(autoSaveInterval, SaveAllStats, CounterStrikeSharp.API.Modules.Timers.TimerFlags.REPEAT);
 
@@ -78,12 +76,9 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
 
         await _positionPersistence.StartAsync(ct);
 
-        if (_persistenceChannel is IHostedService hosted)
-        {
-            // Not the plugin token: Unload cancels that before StopAsync, which would stop the worker ahead of
-            // the final save. StopAsync flushes the worker and then stops it.
-            await hosted.StartAsync(CancellationToken.None);
-        }
+        // Not the plugin token: Unload cancels that before StopAsync, which would stop the worker ahead of
+        // the final save. StopAsync flushes the worker and then stops it.
+        await _persistenceChannel.StartAsync(CancellationToken.None);
 
         _logger.LogInformation("Background persistence services started.");
     }
@@ -126,14 +121,7 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
 
         try
         {
-            if (_persistenceChannel is IHostedService hosted)
-            {
-                await hosted.StopAsync(cancellationToken);
-            }
-            else
-            {
-                await _persistenceChannel.FlushAsync(cancellationToken: cancellationToken);
-            }
+            await _persistenceChannel.StopAsync(cancellationToken);
         }
         finally
         {

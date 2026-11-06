@@ -4,7 +4,6 @@ using Serilog;
 using Serilog.Core;
 using Serilog.Events;
 using statsCollector.Config;
-using statsCollector.Infrastructure;
 
 namespace statsCollector.Infrastructure.Observability;
 
@@ -19,7 +18,7 @@ public static class Bootstrapper
             .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
             .MinimumLevel.Override("System.Net.Http", LogEventLevel.Warning)
             .Enrich.FromLogContext()
-            .Enrich.WithProperty("Version", Instrumentation.ServiceVersion)
+            .Enrich.WithProperty("Version", Plugin.Version)
             .WriteTo.Console()
             .WriteTo.File(Path.Join(logDirectory, "statscollector-.log"), rollingInterval: RollingInterval.Day)
             .CreateLogger();

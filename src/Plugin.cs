@@ -5,9 +5,7 @@ using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using Polly;
-using Polly.Registry;
 using Serilog;
 using statsCollector.Config;
 using statsCollector.Domain;
@@ -31,8 +29,10 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
     private readonly CancellationTokenSource _cancellationTokenSource = new();
     private Task? _initializationTask;
 
+    public const string Version = "1.0.0";
+
     public override string ModuleName => "statsCollector";
-    public override string ModuleVersion => Instrumentation.ServiceVersion;
+    public override string ModuleVersion => Version;
     public override string ModuleAuthor => "Anders Giske Hagen";
     public override string ModuleDescription => "CS2 player statistics collection to MySQL";
 
@@ -60,7 +60,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
 
     public override void Load(bool hotReload)
     {
-        _logger.LogInformation("statsCollector v{Version} loading... HotReload: {HotReload}", Instrumentation.ServiceVersion, hotReload);
+        _logger.LogInformation("statsCollector v{Version} loading... HotReload: {HotReload}", Version, hotReload);
 
         IPluginLifecycleService lifecycle;
         try
@@ -127,8 +127,7 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
     {
         var services = new ServiceCollection();
 
-        services.AddSingleton(Options.Create(_config));
-        services.AddSingleton<IOptionsMonitor<PluginConfig>>(new StaticOptionsMonitor<PluginConfig>(_config));
+        services.AddSingleton(_config);
         services.AddLogging(builder => { builder.ClearProviders(); builder.AddSerilog(_serilog); });
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton(_cancellationTokenSource);
@@ -153,7 +152,6 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddSingleton<BombEventProcessor>();
         services.AddSingleton<EconomyEventProcessor>();
         services.AddSingleton<MovementEventProcessor>();
-        services.AddSingleton<CommunicationEventProcessor>();
 
         // Combat first: its player_hurt handler computes the overkill-free damage the utility handler reuses.
         services.AddSingleton<IEventProcessor>(sp => sp.GetRequiredService<CombatEventProcessor>());
@@ -161,7 +159,6 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddSingleton<IEventProcessor>(sp => sp.GetRequiredService<BombEventProcessor>());
         services.AddSingleton<IEventProcessor>(sp => sp.GetRequiredService<EconomyEventProcessor>());
         services.AddSingleton<IEventProcessor>(sp => sp.GetRequiredService<MovementEventProcessor>());
-        services.AddSingleton<IEventProcessor>(sp => sp.GetRequiredService<CommunicationEventProcessor>());
 
         services.AddSingleton<ICombatEventProcessor>(sp => sp.GetRequiredService<CombatEventProcessor>());
         services.AddSingleton<IBombEventProcessor>(sp => sp.GetRequiredService<BombEventProcessor>());

@@ -1,12 +1,10 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
@@ -50,7 +48,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
     private static readonly int MaxPlayers = 65; // CS2 max players + 1 for safety
 
     private readonly IPlayerSessionService _playerSessions;
-    private readonly IOptionsMonitor<PluginConfig> _config;
+    private readonly PluginConfig _config;
     private readonly ILogger<CombatEventProcessor> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly IPositionPersistenceService _positionPersistence;
@@ -94,7 +92,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
     public CombatEventProcessor(
         IPlayerSessionService playerSessions,
-        IOptionsMonitor<PluginConfig> config,
+        PluginConfig config,
         ILogger<CombatEventProcessor> logger,
         TimeProvider timeProvider,
         IPositionPersistenceService positionPersistence,
@@ -191,7 +189,6 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
 
     private void HandlePlayerDeath(EventPlayerDeath @event)
     {
-        using var activity = Instrumentation.ActivitySource.StartActivity("HandlePlayerDeath");
         try
         {
             var victim = @event.GetPlayerOrDefault("userid");
@@ -237,13 +234,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             var killDistance = @event.GetFloatValue("distance", 0f);
 
             var now = _timeProvider.GetUtcNow().UtcDateTime;
-            var tradeWindowSeconds = _config.CurrentValue.TradeWindowSeconds;
+            var tradeWindowSeconds = _config.TradeWindowSeconds;
             var victimTeam = victimState.Team;
-
-            activity?.SetTag("victim.steamid", victimState.SteamId);
-            activity?.SetTag("attacker.steamid", attackerState.SteamId);
-            activity?.SetTag("weapon", weaponName);
-            activity?.SetTag("headshot", isHeadshot);
 
             bool isGrenadeKill = GrenadeWeaponNames.Contains(NormalizeWeaponName(weaponName));
             // The entry duel is lost only to the player who opened it, as EntryKills counts it.
@@ -260,23 +252,22 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 {
                     var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
                     // Round 0: no freeze end seen yet (loaded mid-round), so there is no round to attribute the position to.
-                    if (victimState.HasPawn && _currentRoundNumber > 0 && _config.CurrentValue.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
+                    if (victimState.HasPawn && _currentRoundNumber > 0 && _config.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
                     {
-                        var posEvent = _positionPersistence.GetDeathEvent();
-
-                        posEvent.MatchUuid = matchUuid;
-                        posEvent.SteamId = victimState.SteamId;
-                        posEvent.X = victimState.Position.X;
-                        posEvent.Y = victimState.Position.Y;
-                        posEvent.Z = victimState.Position.Z;
-                        posEvent.CauseOfDeath = weaponName;
-                        posEvent.IsHeadshot = isHeadshot;
-                        posEvent.Team = (int)victimTeam;
-                        posEvent.MapName = Server.MapName;
-                        posEvent.RoundNumber = _currentRoundNumber;
-                        posEvent.RoundTime = (int)(now - _currentRoundStartUtc).TotalSeconds;
-
-                        _positionPersistence.TryEnqueue(posEvent);
+                        _positionPersistence.TryEnqueue(new DeathPositionEvent
+                        {
+                            MatchUuid = matchUuid,
+                            SteamId = victimState.SteamId,
+                            X = victimState.Position.X,
+                            Y = victimState.Position.Y,
+                            Z = victimState.Position.Z,
+                            CauseOfDeath = weaponName,
+                            IsHeadshot = isHeadshot,
+                            Team = (int)victimTeam,
+                            MapName = Server.MapName,
+                            RoundNumber = _currentRoundNumber,
+                            RoundTime = (int)(now - _currentRoundStartUtc).TotalSeconds
+                        });
                     }
 
                     _playerSessions.MutatePlayer(victimState.SteamId, stats =>
@@ -332,30 +323,29 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 }
 
                 var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
-                if (attackerState.HasPawn && victimState.HasPawn && _currentRoundNumber > 0 && _config.CurrentValue.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
+                if (attackerState.HasPawn && victimState.HasPawn && _currentRoundNumber > 0 && _config.EnablePositionTracking && !string.IsNullOrWhiteSpace(matchUuid))
                 {
-                    var posEvent = _positionPersistence.GetKillEvent();
-
-                    posEvent.MatchUuid = matchUuid;
-                    posEvent.KillerSteamId = attackerState.SteamId;
-                    posEvent.VictimSteamId = victimState.SteamId;
-                    posEvent.KillerX = attackerState.Position.X;
-                    posEvent.KillerY = attackerState.Position.Y;
-                    posEvent.KillerZ = attackerState.Position.Z;
-                    posEvent.VictimX = victimState.Position.X;
-                    posEvent.VictimY = victimState.Position.Y;
-                    posEvent.VictimZ = victimState.Position.Z;
-                    posEvent.Weapon = weaponName;
-                    posEvent.IsHeadshot = isHeadshot;
-                    posEvent.IsWallbang = penetrated;
-                    posEvent.Distance = killDistance;
-                    posEvent.KillerTeam = (int)attackerTeam;
-                    posEvent.VictimTeam = (int)victimTeam;
-                    posEvent.MapName = Server.MapName;
-                    posEvent.RoundNumber = _currentRoundNumber;
-                    posEvent.RoundTime = (int)(now - _currentRoundStartUtc).TotalSeconds;
-
-                    _positionPersistence.TryEnqueue(posEvent);
+                    _positionPersistence.TryEnqueue(new KillPositionEvent
+                    {
+                        MatchUuid = matchUuid,
+                        KillerSteamId = attackerState.SteamId,
+                        VictimSteamId = victimState.SteamId,
+                        KillerX = attackerState.Position.X,
+                        KillerY = attackerState.Position.Y,
+                        KillerZ = attackerState.Position.Z,
+                        VictimX = victimState.Position.X,
+                        VictimY = victimState.Position.Y,
+                        VictimZ = victimState.Position.Z,
+                        Weapon = weaponName,
+                        IsHeadshot = isHeadshot,
+                        IsWallbang = penetrated,
+                        Distance = killDistance,
+                        KillerTeam = (int)attackerTeam,
+                        VictimTeam = (int)victimTeam,
+                        MapName = Server.MapName,
+                        RoundNumber = _currentRoundNumber,
+                        RoundTime = (int)(now - _currentRoundStartUtc).TotalSeconds
+                    });
                 }
 
                 // Round Swing: how much this enemy kill shifted the attacker team's win probability,
@@ -368,8 +358,8 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     var ctBefore = ctAlive;
                     var tBefore = tAlive;
                     if (victimTeam == PlayerTeam.CounterTerrorist) ctBefore++; else tBefore++;
-                    var ctWinAfter = _matchTracker?.GetRoundWinProbability(ctAlive, tAlive) ?? 0f;
-                    var ctWinBefore = _matchTracker?.GetRoundWinProbability(ctBefore, tBefore) ?? 0f;
+                    var ctWinAfter = _matchTracker.GetRoundWinProbability(ctAlive, tAlive);
+                    var ctWinBefore = _matchTracker.GetRoundWinProbability(ctBefore, tBefore);
                     var ctSwing = (decimal)(ctWinAfter - ctWinBefore);
                     swingDelta = attackerTeam == PlayerTeam.CounterTerrorist ? ctSwing : -ctSwing;
                 }
@@ -734,7 +724,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     stats.Combat.RecordClutch(candidate.Opponents, team == winningTeam);
                     if (team == winningTeam)
                     {
-                        var settings = _config.CurrentValue.ClutchSettings;
+                        var settings = _config.ClutchSettings;
                         stats.Combat.ClutchesWon++;
                         stats.Combat.ClutchPoints += settings.BaseMultiplier + (candidate.Opponents * settings.DifficultyWeight);
                     }

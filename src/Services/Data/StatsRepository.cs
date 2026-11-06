@@ -26,7 +26,7 @@ public interface IStatsRepository
     Task UpsertPlayerRoundStatsAsync(IEnumerable<PlayerSnapshot> roundDeltas, CancellationToken cancellationToken);
 
     // Match Lifecycle
-    Task StartMatchAsync(string mapName, string? matchUuid, string? seriesUuid, CancellationToken ct);
+    Task StartMatchAsync(string mapName, string matchUuid, CancellationToken ct);
     Task EndMatchAsync(string matchUuid, CancellationToken ct);
     Task StartRoundAsync(string matchUuid, int roundNumber, CancellationToken ct);
     Task EndRoundAsync(string matchUuid, int roundNumber, int winnerTeam, int winReason, RoundBombInfo bomb, CancellationToken ct);
@@ -70,8 +70,6 @@ public sealed class StatsRepository : IStatsRepository
 
         await _resiliencePipeline.ExecuteAsync(async ct =>
         {
-            using var activity = Instrumentation.ActivitySource.StartActivity("UpsertPlayersAsync");
-
             _logger.LogDebug("Starting bulk upsert for {Count} players", snapshotList.Count);
             try
             {
@@ -106,7 +104,6 @@ public sealed class StatsRepository : IStatsRepository
     {
         return await _resiliencePipeline.ExecuteAsync(async ct =>
         {
-            using var activity = Instrumentation.ActivitySource.StartActivity("GetLifetimePlayerStatsAsync");
             await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
             const string sql = "SELECT * FROM player_stats WHERE steam_id = @SteamId";
             return await connection.QueryFirstOrDefaultAsync<LifetimePlayerStatsRow>(
@@ -249,8 +246,6 @@ public sealed class StatsRepository : IStatsRepository
 
         await _resiliencePipeline.ExecuteAsync(async ct =>
         {
-            using var activity = Instrumentation.ActivitySource.StartActivity($"Upsert {table}");
-
             await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
 
             var dataTable = new DataTable();
@@ -310,8 +305,6 @@ public sealed class StatsRepository : IStatsRepository
 
         await _resiliencePipeline.ExecuteAsync(async ct =>
         {
-            using var activity = Instrumentation.ActivitySource.StartActivity("UpsertPlayerAnalyticsAsync");
-
             await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
 
             // Ensure parent rows exist for the steam_id FK before inserting analytics.
@@ -364,12 +357,11 @@ public sealed class StatsRepository : IStatsRepository
 
     // The position writer may have created the row first (INSERT IGNORE with the map only): fill in what it left
     // empty, keep what is set. Row alias form (MySQL 8.0.19+); the VALUES() function is deprecated.
-    public Task StartMatchAsync(string mapName, string? matchUuid, string? seriesUuid, CancellationToken ct) =>
+    public Task StartMatchAsync(string mapName, string matchUuid, CancellationToken ct) =>
         ExecuteResilientAsync("""
-            INSERT INTO matches (match_uuid, series_uuid, map_name, status) VALUES (@MatchUuid, @SeriesUuid, @MapName, 'IN_PROGRESS') AS new
-            ON DUPLICATE KEY UPDATE status = 'IN_PROGRESS', series_uuid = COALESCE(matches.series_uuid, new.series_uuid),
-                map_name = COALESCE(NULLIF(matches.map_name, ''), new.map_name);
-            """, new { MatchUuid = matchUuid, SeriesUuid = seriesUuid, MapName = mapName }, ct);
+            INSERT INTO matches (match_uuid, map_name, status) VALUES (@MatchUuid, @MapName, 'IN_PROGRESS') AS new
+            ON DUPLICATE KEY UPDATE status = 'IN_PROGRESS', map_name = COALESCE(NULLIF(matches.map_name, ''), new.map_name);
+            """, new { MatchUuid = matchUuid, MapName = mapName }, ct);
 
     // COALESCE: a retried batch must not move end_time to the retry time.
     public Task EndMatchAsync(string matchUuid, CancellationToken ct) =>
@@ -464,9 +456,7 @@ public sealed class StatsRepository : IStatsRepository
 
     private async Task UpsertPlayersCoreAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
     {
-        using var activity = Instrumentation.ActivitySource.StartActivity("UpsertPlayersCoreAsync");
         var snapshotList = snapshots.ToList();
-        activity?.SetTag("db.snapshot_count", snapshotList.Count);
 
         if (snapshotList.Count == 0) return;
 

@@ -3,7 +3,6 @@ using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using MySqlConnector;
 using Polly.CircuitBreaker;
 using Polly.Timeout;
@@ -54,13 +53,13 @@ public sealed record RoundOfficialEndUpdate(string MatchId, int Number)
 public sealed record RoundsVoidedUpdate(string MatchId, int FromRound)
     : StatsUpdate(MatchId, FromRound);
 
-public sealed record MatchStartUpdate(string MapName, string MatchId, string? SeriesUuid)
+public sealed record MatchStartUpdate(string MapName, string MatchId)
     : StatsUpdate(MatchId);
 
 public sealed record MatchEndUpdate(string MatchId)
     : StatsUpdate(MatchId);
 
-public interface IPersistenceChannel
+public interface IPersistenceChannel : IHostedService
 {
     bool TryWrite(StatsUpdate update);
 
@@ -88,14 +87,14 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
     public PersistenceChannel(
         ILogger<PersistenceChannel> logger,
         IStatsRepository repository,
-        IOptionsMonitor<PluginConfig> config,
+        PluginConfig config,
         string? spillPath = null)
     {
         _logger = logger;
         _repository = repository;
         // Unwritten batches kept across a restart, next to the scrim state. Resolved here, on the game thread (a native call).
         _spillPath = spillPath ?? Path.Combine(JsonRecoveryService.PluginDirectory, "pending_stats.json");
-        _channel = Channel.CreateBounded<PersistenceMessage>(new BoundedChannelOptions(config.CurrentValue.PersistenceChannelCapacity)
+        _channel = Channel.CreateBounded<PersistenceMessage>(new BoundedChannelOptions(config.PersistenceChannelCapacity)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
@@ -178,7 +177,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
         finally
         {
             _acceptingWrites = false;
-            foreach (var message in _channel.Reader.ReadAllRemaining())
+            while (_channel.Reader.TryRead(out var message))
             {
                 if (message is UpdateMessage update)
                 {
@@ -349,9 +348,6 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
 
     private async Task ProcessBatchCoreAsync(IReadOnlyList<StatsUpdate> batch, CancellationToken cancellationToken)
     {
-        using var activity = Instrumentation.ActivitySource.StartActivity("PersistenceChannel.ProcessBatch");
-        activity?.SetTag("batch.size", batch.Count);
-
         var playerUpdates = new List<PlayerSnapshot>();
         var matchSummaries = new List<PlayerSnapshot>();
         var weaponStats = new List<PlayerSnapshot>();
@@ -391,7 +387,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                     await _repository.VoidRoundsAsync(voided.MatchId, voided.FromRound, cancellationToken).ConfigureAwait(false);
                     break;
                 case MatchStartUpdate matchStart:
-                    await _repository.StartMatchAsync(matchStart.MapName, matchStart.MatchId, matchStart.SeriesUuid, cancellationToken).ConfigureAwait(false);
+                    await _repository.StartMatchAsync(matchStart.MapName, matchStart.MatchId, cancellationToken).ConfigureAwait(false);
                     break;
                 case MatchEndUpdate matchEnd:
                     await _repository.EndMatchAsync(matchEnd.MatchId, cancellationToken).ConfigureAwait(false);
@@ -446,13 +442,5 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                 break;
             }
         }
-    }
-}
-
-internal static class ChannelReaderExtensions
-{
-    public static IEnumerable<T> ReadAllRemaining<T>(this ChannelReader<T> reader)
-    {
-        while (reader.TryRead(out var item)) yield return item;
     }
 }

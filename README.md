@@ -3,7 +3,7 @@
 A CounterStrikeSharp plugin for CS2 that collects detailed player statistics into MySQL, with non-blocking persistence and a scrim/match management system.
 
 ## Features
-- **Relational match tracking** — `matches` and `rounds` are tracked automatically, with optional `series_uuid` to group BO3/BO5 series.
+- **Relational match tracking** — `matches` and `rounds` are tracked automatically.
 - **Lifetime player stats** — 100+ aggregated metrics per player (combat, utility, economy, bomb, clutch, entry). Career totals are **seeded from the database once Steam has validated the client** (at once on a LAN server, `sv_lan 1`), so they accumulate correctly across reconnects and across multiple servers sharing one database (see *Multi-server* below).
 - **Per-match stats** — `match_player_stats` / `match_weapon_stats` populated at match end from start-of-match deltas: the whole match (rounds and sides, utility, trades, clutches by 1vX, bomb, economy, pistol rounds, per-weapon headshots, damage and deaths), with a community Rating 2.0 approximation (HLTV's exact formula is not public).
 - **Per-round rows** — `player_round_stats` holds every player's numbers for every round (kills, damage, survival, trade, clutch, bomb, MVP, money and equipment), and `rounds` the round's buy (both sides' start money and equipment value) and bomb (site, plant time, time left at the defuse).
@@ -59,9 +59,27 @@ container (`MYSQL_ROOT_HOST=localhost`).
    `css_plugins unload` + `load` it: on CounterStrikeSharp v1.0.379, `css_plugins reload` after an
    upload-and-rename leaves the plugin unloaded.
 
-Scrim and pause commands are registered as `css_*`. CounterStrikeSharp maps the `!` and `/` chat prefixes by
-default (`!ready`, `!pause`); add `"."` to `PublicChatTrigger` in `configs/core.json` to use the `.ready` style
-shown in the in-game prompts.
+### Commands
+Registered as `css_*` console commands (`css_ready`). CounterStrikeSharp maps the `!` and `/` chat prefixes to them
+by default (`!ready`); add `"."` to `PublicChatTrigger` in `configs/core.json` for the `.ready` style used in the
+in-game prompts. Everything but `.stats` needs `EnableScrim`. Admin means `@css/admin` (or `@css/root`); the
+`.scrim` commands also accept `@css/scrimadmin`.
+
+| Command | Who | Does |
+|---|---|---|
+| `.stats` | anyone | Kills, deaths, assists, ADR, rating and rank of your session (from the console: logs the number of tracked players). |
+| `.ready` / `.unready` | players | Ready up in the lobby. |
+| `.vote <map>` | ready players | Vote for a map of `Scrim.MapPool`; the vote closes once every ready player has voted. |
+| `.pick <SteamID64>` | the captain whose turn it is | Pick a player for your team. |
+| `.ct` / `.t` | the knife-round winner's captain | Choose the side (30 s, then the sides stay as they are). |
+| `.pause [tech\|admin]` | players; `admin` needs an admin | Pause at the end of the round: tactical pauses are limited and timed, the others last until `.unpause`. |
+| `.unpause` | admins | End a pause, also the engine's own after a round restore. |
+| `.restore <round>` | admins | Reload the engine's backup of that round and roll the stats back to its start. Without a round: the rounds that have one. |
+| `.scrim start` / `.scrim stop` | admins | Open the lobby / abort the scrim. |
+| `.scrim setcaptain <1\|2> <SteamID64>` | admins | Appoint a captain once enough players are ready. |
+| `.scrim practice on\|off` | admins | Practice mode (`practice.cfg`); `off` runs the live config again. |
+| `.scrim recover` | admins | Pick up the scrim saved in `scrim_state.json` after a crash or restart. |
+| `.scrim set playersperteam\|minready <n>` | admins | Change the team size or the ready-up count until the plugin is reloaded. |
 
 ### Database prerequisites
 The bundled Docker stack already satisfies these. For your own MySQL server:
@@ -131,7 +149,7 @@ underscore is ignored. List options such as `Scrim__MapPool__0` are appended to 
 - `view_global_leaderboard` — ranked by HLTV rating (10-round activity threshold).
 - `view_player_profile` — per-player summary.
 - `view_player_match_history` — match-by-match breakdown.
-- `view_clutch_performance`, `view_entry_efficiency`, `view_enhanced_player_analytics`.
+- `view_clutch_performance`, `view_entry_efficiency`, `view_enhanced_player_analytics`, `view_player_performance_timeline`.
 
 ## Multi-server (shared database)
 Several CS2 servers (target: up to ~5) can run this plugin against one MySQL database safely:
@@ -166,15 +184,14 @@ Flow: CS2 event → event processor → `PlayerSessionService` (per-player locke
 `PlayerSnapshot` → `PersistenceChannel` (bounded background queue) → `StatsRepository` → MySQL.
 
 - Database access goes through `IConnectionFactory` + Dapper, wrapped in a Polly resilience pipeline.
-- Logging is via Serilog (console + daily rolling file under the plugin folder's `logs/`).
-- Observability is structured logging (Serilog). A lightweight `System.Diagnostics.ActivitySource` is
-  present for optional tracing (a no-op with no listener attached); no metrics `Meter`/exporter is wired
-  since the plugin runs in-process with no scrape endpoint.
+- Logging is via Serilog (console + daily rolling file under the plugin folder's `logs/`); there is no tracing or
+  metrics exporter, the log is the whole observability.
 
 ## Development
 - Build: `dotnet build -c Release`
-- Test: `dotnet test tests/statsCollector.Tests` (xunit; covers the counters, the snapshot plumbing, the match and
-  round deltas, the per-match SQL column lists against `init.sql`, and the position writer's restore ordering)
+- Test: `dotnet test tests/statsCollector.Tests` (xunit; covers the counters, kill classification with bots, the match
+  and round deltas, the per-match SQL column lists against `init.sql`, sessions held for an unfinished seed, and both
+  writers' restore ordering, poison rows, outage buffering and the spill file)
 - Publish: `dotnet publish -c Release -o out`
 - Requirements: .NET 10 SDK
 

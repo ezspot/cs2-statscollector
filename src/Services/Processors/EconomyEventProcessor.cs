@@ -28,7 +28,6 @@ public sealed class EconomyEventProcessor : IEventProcessor
 
     private void HandleItemPurchase(EventItemPurchase @event)
     {
-        using var activity = Instrumentation.ActivitySource.StartActivity("HandleItemPurchase");
         try
         {
             var player = @event.GetPlayerOrDefault("userid");
@@ -38,8 +37,6 @@ public sealed class EconomyEventProcessor : IEventProcessor
             if (!playerState.IsValid || playerState.IsBot) return;
 
             var weapon = @event.GetStringValue("weapon", string.Empty) ?? string.Empty;
-            activity?.SetTag("player.steamid", playerState.SteamId);
-            activity?.SetTag("weapon", weapon);
 
             _playerSessions.MutatePlayer(playerState.SteamId, stats => stats.Economy.ItemsPurchased++);
 

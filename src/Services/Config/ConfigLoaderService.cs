@@ -5,7 +5,6 @@ using System.Linq;
 using System.Threading.Tasks;
 using CounterStrikeSharp.API;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Infrastructure;
 
@@ -21,11 +20,11 @@ public class ConfigLoaderService : IConfigLoaderService
 
     public ConfigLoaderService(
         ILogger<ConfigLoaderService> logger,
-        IOptions<PluginConfig> config,
+        PluginConfig config,
         IGameScheduler scheduler)
     {
         _logger = logger;
-        _config = config.Value;
+        _config = config;
         _scheduler = scheduler;
         _whitelistedSteamIds.UnionWith(_config.Scrim.WhitelistedSteamIds);
         // Trim so "cfg/" behaves like "cfg" in the containment check below.

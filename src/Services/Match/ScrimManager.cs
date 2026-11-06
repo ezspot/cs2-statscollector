@@ -5,7 +5,6 @@ using System.Threading.Tasks;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
@@ -18,12 +17,11 @@ public sealed class ScrimManager : IScrimManager, IDisposable
     private const float PlayerLoadTimeoutSeconds = 180f;
 
     private readonly ILogger<ScrimManager> _logger;
-    private readonly IOptionsMonitor<PluginConfig> _configMonitor;
+    private readonly PluginConfig _config;
     private readonly IConfigLoaderService _configLoader;
     private readonly IJsonRecoveryService _recovery;
     private readonly IGameScheduler _scheduler;
 
-    private PluginConfig _config => _configMonitor.CurrentValue;
 
     private readonly Dictionary<ulong, bool> _readyPlayers = [];
     private readonly Dictionary<int, ulong> _captains = [];
@@ -52,13 +50,13 @@ public sealed class ScrimManager : IScrimManager, IDisposable
 
     public ScrimManager(
         ILogger<ScrimManager> logger,
-        IOptionsMonitor<PluginConfig> configMonitor,
+        PluginConfig config,
         IConfigLoaderService configLoader,
         IJsonRecoveryService recovery,
         IGameScheduler scheduler)
     {
         _logger = logger;
-        _configMonitor = configMonitor;
+        _config = config;
         _configLoader = configLoader;
         _recovery = recovery;
         _scheduler = scheduler;

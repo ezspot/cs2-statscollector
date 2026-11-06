@@ -7,9 +7,9 @@
     <RootNamespace>statsCollector.Tests</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.9.0" />
-    <PackageReference Include="xunit" Version="2.5.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
     <!-- The plugin compiles against the host's CounterStrikeSharp assemblies (ExcludeAssets="runtime"); the tests need
          the managed copies next to them. Nothing in the tests touches the native runtime. -->
     <PackageReference Include="CounterStrikeSharp.API" Version="1.0.379" />

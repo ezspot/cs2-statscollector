@@ -24,7 +24,6 @@
          the host's assemblies out of the plugin folder: on an older core a private CounterStrikeSharp.API copy
          there is loaded instead and the plugin is reported as "Unable to find plugin in assembly". -->
     <PackageReference Include="CounterStrikeSharp.API" Version="1.0.379" ExcludeAssets="runtime" />
-    <PackageReference Include="Microsoft.Extensions.ObjectPool" Version="10.0.14" />
     <PackageReference Include="Polly.Extensions" Version="8.9.0" />
     <PackageReference Include="MySqlConnector" Version="2.6.2" />
     <PackageReference Include="Dapper" Version="2.1.89" />

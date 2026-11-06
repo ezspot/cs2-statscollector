@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using statsCollector.Domain;
-using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
@@ -37,7 +36,6 @@ public sealed class AnalyticsService : IAnalyticsService
 
     public decimal CalculateImpactRating(PlayerStats stats)
     {
-        using var activity = Instrumentation.ActivitySource.StartActivity("AnalyticsService.CalculateImpactRating");
         if (stats.Round.RoundsPlayed == 0) return 0m;
 
         var multiKillImpact = stats.Combat.MultiKill2 * 0.1m + stats.Combat.MultiKill3 * 0.2m + stats.Combat.MultiKill4 * 0.3m + stats.Combat.MultiKill5 * 0.5m;
@@ -75,7 +73,6 @@ public sealed class AnalyticsService : IAnalyticsService
 
     public decimal CalculateUtilityScore(PlayerStats stats)
     {
-        using var activity = Instrumentation.ActivitySource.StartActivity("AnalyticsService.CalculateUtilityScore");
         if (stats.Round.RoundsPlayed == 0) return 0m;
         var rounds = (decimal)stats.Round.RoundsPlayed;
         var damageScore = (stats.Utility.UtilityDamage / rounds) * 0.4m;
@@ -87,7 +84,6 @@ public sealed class AnalyticsService : IAnalyticsService
 
     public decimal CalculatePerformanceScore(PlayerStats stats)
     {
-        using var activity = Instrumentation.ActivitySource.StartActivity("AnalyticsService.CalculatePerformanceScore");
         if (stats.Round.RoundsPlayed == 0) return 0m;
 
         var kdScore = Math.Min(30m, CalculateKDRatio(stats) * 10m);
@@ -131,9 +127,6 @@ public sealed class AnalyticsService : IAnalyticsService
 
     public PlayerSnapshot CreateSnapshot(PlayerStats stats, string? matchUuid = null)
     {
-        using var activity = Instrumentation.ActivitySource.StartActivity("AnalyticsService.CreateSnapshot");
-        activity?.SetTag("player.steamid", stats.SteamId);
-
         var perfScore = CalculatePerformanceScore(stats);
         var hltvRating = CalculateHLTVRating(stats);
         var impactRating = CalculateImpactRating(stats);

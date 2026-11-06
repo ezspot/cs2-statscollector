@@ -7,6 +7,5 @@ public enum UtilityType
  Smoke = 2,
  Molotov = 3,
  HeGrenade = 4,
- Decoy = 5,
- Other = 6
+ Decoy = 5
 }

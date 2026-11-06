@@ -1,6 +1,5 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using statsCollector.Config;
-using statsCollector.Infrastructure;
 using statsCollector.Services;
 using Xunit;
 
@@ -16,19 +15,19 @@ public class PositionPersistenceTests
         var log = new List<string>();
         var repo = new FakeRepo(log);
         var svc = new PositionPersistenceService(repo, NullLogger<PositionPersistenceService>.Instance,
-            new StaticOptionsMonitor<PluginConfig>(new PluginConfig()));
+            new PluginConfig());
         await svc.StartAsync(CancellationToken.None);
 
-        for (var i = 0; i < 3; i++) svc.TryEnqueue(Kill(svc, 5, i));
+        for (var i = 0; i < 3; i++) svc.TryEnqueue(Kill(5, i));
         svc.VoidRounds("m1", 5);
-        for (var i = 10; i < 12; i++) svc.TryEnqueue(Kill(svc, 5, i));
+        for (var i = 10; i < 12; i++) svc.TryEnqueue(Kill(5, i));
         await Task.Delay(500);
-        svc.TryEnqueue(Kill(svc, 6, 20));
-        svc.TryEnqueue(Kill(svc, 6, 99)); // poison: rejected as bad data
-        svc.TryEnqueue(Kill(svc, 6, 21));
+        svc.TryEnqueue(Kill(6, 20));
+        svc.TryEnqueue(Kill(6, 99)); // poison: rejected as bad data
+        svc.TryEnqueue(Kill(6, 21));
         await Task.Delay(500);
         repo.Outage = true;
-        svc.TryEnqueue(Kill(svc, 7, 30));
+        svc.TryEnqueue(Kill(7, 30));
         await Task.Delay(500);
         repo.Outage = false;
         await svc.StopAsync(TimeSpan.FromSeconds(15), CancellationToken.None);
@@ -46,12 +45,8 @@ public class PositionPersistenceTests
 
     private static void Check(bool ok, string what) => Assert.True(ok, what);
 
-    static KillPositionEvent Kill(PositionPersistenceService svc, int round, int id)
-    {
-        var e = svc.GetKillEvent();
-        e.MatchUuid = "m1"; e.RoundNumber = round; e.Distance = id; e.MapName = "de_test"; e.Weapon = "ak47";
-        return e;
-    }
+    static KillPositionEvent Kill(int round, int id) =>
+        new() { MatchUuid = "m1", RoundNumber = round, Distance = id, MapName = "de_test", Weapon = "ak47" };
 
     sealed class FakeRepo(List<string> log) : IPositionTrackingService
     {

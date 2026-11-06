@@ -7,7 +7,6 @@ using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.Modules.Events;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
@@ -28,13 +27,12 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
     private readonly IScrimManager _scrimManager;
     private readonly IPauseService _pauseService;
     private readonly IRoundBackupService _roundBackup;
-    private readonly IOptionsMonitor<PluginConfig> _configMonitor;
+    private readonly PluginConfig _config;
     private readonly IAnalyticsService _analytics;
     private readonly IEnumerable<IGameHandler> _handlers;
     private readonly IEnumerable<IEventProcessor> _processors;
     private readonly IEventDispatcher _dispatcher;
 
-    private PluginConfig _config => _configMonitor.CurrentValue;
 
     public GameEventHandlerService(
         ILogger<GameEventHandlerService> logger,
@@ -42,7 +40,7 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
         IScrimManager scrimManager,
         IPauseService pauseService,
         IRoundBackupService roundBackup,
-        IOptionsMonitor<PluginConfig> configMonitor,
+        PluginConfig config,
         IAnalyticsService analytics,
         IEnumerable<IGameHandler> handlers,
         IEnumerable<IEventProcessor> processors,
@@ -53,7 +51,7 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
         _scrimManager = scrimManager;
         _pauseService = pauseService;
         _roundBackup = roundBackup;
-        _configMonitor = configMonitor;
+        _config = config;
         _analytics = analytics;
         _handlers = handlers;
         _processors = processors;
@@ -129,60 +127,36 @@ public sealed class GameEventHandlerService : IGameEventHandlerService
     }
 
 
+    // Admin subcommands only; the players' commands (.ready, .vote, .pick, .ct, .t) are registered on their own.
     private void OnScrimCommand(CCSPlayerController? player, CommandInfo command)
     {
-        var subCommand = command.GetArg(1).ToLowerInvariant();
-        if (subCommand is "start" or "stop" or "setcaptain" or "set" or "recover" or "practice")
+        if (player != null && !AdminUtils.HasPermission(player, "@css/root", "@css/admin", "@css/scrimadmin"))
         {
-            if (player != null && !AdminUtils.HasPermission(player, "@css/root", "@css/admin", "@css/scrimadmin"))
-            {
-                player.PrintToChat(" [Scrim] You do not have permission to use this command.");
-                return;
-            }
-
-            switch (subCommand)
-            {
-                case "start": RunCommand(_scrimManager.StartScrimAsync(), "start scrim"); break;
-                case "stop": RunCommand(_scrimManager.StopScrimAsync(), "stop scrim"); break;
-                case "recover": RunCommand(_scrimManager.RecoverAsync(), "recover scrim"); break;
-                case "practice":
-                    if (command.ArgCount < 3) return;
-                    var enable = string.Equals(command.GetArg(2), "on", StringComparison.OrdinalIgnoreCase);
-                    RunCommand(_scrimManager.SetPracticeModeAsync(enable), "set practice mode");
-                    break;
-                case "setcaptain":
-                    if (command.ArgCount < 4) return;
-                    if (!int.TryParse(command.GetArg(2), out var team) ||
-                        !ulong.TryParse(command.GetArg(3), out var targetSteamId)) return;
-                    var target = Utilities.GetPlayerFromSteamId64(targetSteamId);
-                    if (target != null) RunCommand(_scrimManager.SetCaptainAsync(team, target.SteamID), "set captain");
-                    break;
-                case "set":
-                    if (command.ArgCount < 4) return;
-                    _scrimManager.SetOverride(command.GetArg(2), command.GetArg(3));
-                    break;
-            }
+            player.PrintToChat(" [Scrim] You do not have permission to use this command.");
             return;
         }
 
-        if (player == null) return;
-
-        switch (subCommand)
+        switch (command.GetArg(1).ToLowerInvariant())
         {
-            case "ready": RunCommand(_scrimManager.SetReadyAsync(player.SteamID, true), "ready player"); break;
-            case "unready": RunCommand(_scrimManager.SetReadyAsync(player.SteamID, false), "unready player"); break;
-            case "vote":
+            case "start": RunCommand(_scrimManager.StartScrimAsync(), "start scrim"); break;
+            case "stop": RunCommand(_scrimManager.StopScrimAsync(), "stop scrim"); break;
+            case "recover": RunCommand(_scrimManager.RecoverAsync(), "recover scrim"); break;
+            case "practice":
                 if (command.ArgCount < 3) return;
-                RunCommand(_scrimManager.VoteMapAsync(player.SteamID, command.GetArg(2)), "vote map");
+                var enable = string.Equals(command.GetArg(2), "on", StringComparison.OrdinalIgnoreCase);
+                RunCommand(_scrimManager.SetPracticeModeAsync(enable), "set practice mode");
                 break;
-            case "pick":
-                if (command.ArgCount < 3) return;
-                if (!ulong.TryParse(command.GetArg(2), out var pickTargetSteamId)) return;
-                var pickTarget = Utilities.GetPlayerFromSteamId64(pickTargetSteamId);
-                if (pickTarget != null) RunCommand(_scrimManager.PickPlayerAsync(player.SteamID, pickTarget.SteamID), "pick player");
+            case "setcaptain":
+                if (command.ArgCount < 4) return;
+                if (!int.TryParse(command.GetArg(2), out var team) ||
+                    !ulong.TryParse(command.GetArg(3), out var targetSteamId)) return;
+                var target = Utilities.GetPlayerFromSteamId64(targetSteamId);
+                if (target != null) RunCommand(_scrimManager.SetCaptainAsync(team, target.SteamID), "set captain");
                 break;
-            case "ct": RunCommand(_scrimManager.SelectSideAsync(player.SteamID, "ct"), "select CT side"); break;
-            case "t": RunCommand(_scrimManager.SelectSideAsync(player.SteamID, "t"), "select T side"); break;
+            case "set":
+                if (command.ArgCount < 4) return;
+                _scrimManager.SetOverride(command.GetArg(2), command.GetArg(3));
+                break;
         }
     }
 

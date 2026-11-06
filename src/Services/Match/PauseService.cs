@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Infrastructure;
 
@@ -11,11 +10,11 @@ namespace statsCollector.Services;
 
 public sealed class PauseService(
     ILogger<PauseService> logger,
-    IOptions<PluginConfig> config,
+    PluginConfig config,
     IGameScheduler scheduler) : IPauseService, IDisposable
 {
     private readonly ILogger<PauseService> _logger = logger;
-    private readonly PluginConfig _config = config.Value;
+    private readonly PluginConfig _config = config;
     private readonly IGameScheduler _scheduler = scheduler;
 
     private bool _isPaused;

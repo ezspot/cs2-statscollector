@@ -4,11 +4,11 @@ using statsCollector.Domain;
 
 namespace statsCollector.Services;
 
-public record MatchContext(string MatchUuid, string MapName, string? SeriesUuid = null);
+public record MatchContext(string MatchUuid, string MapName);
 
 public interface IMatchTrackingService
 {
-    void StartMatch(string mapName, string? seriesUuid = null);
+    void StartMatch(string mapName);
     void EndMatch();
     void StartRound(int roundNumber);
     void EndRound(int roundNumber, int winnerTeam, int winType, RoundBombInfo bomb);
@@ -37,23 +37,23 @@ public sealed class MatchTrackingService : IMatchTrackingService
         _persistenceChannel = persistenceChannel;
     }
 
-    public void StartMatch(string mapName, string? seriesUuid = null)
+    public void StartMatch(string mapName)
     {
         var uuid = Guid.NewGuid().ToString();
-        _logger.LogInformation("Starting new match tracking: {Uuid} (Series: {Series}) on {Map}", uuid, seriesUuid ?? "None", mapName);
+        _logger.LogInformation("Starting new match tracking: {Uuid} on {Map}", uuid, mapName);
 
         string? previousUuid;
         lock (_lock)
         {
             previousUuid = _currentMatch?.MatchUuid;
-            _currentMatch = new MatchContext(uuid, mapName, seriesUuid);
+            _currentMatch = new MatchContext(uuid, mapName);
         }
 
         if (previousUuid is not null)
         {
             _persistenceChannel.TryWrite(new MatchEndUpdate(previousUuid));
         }
-        _persistenceChannel.TryWrite(new MatchStartUpdate(mapName, uuid, seriesUuid));
+        _persistenceChannel.TryWrite(new MatchStartUpdate(mapName, uuid));
     }
 
     public void EndMatch()

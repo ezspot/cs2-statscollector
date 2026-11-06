@@ -3,7 +3,6 @@ using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Entities.Constants;
 using CounterStrikeSharp.API.Modules.Events;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
@@ -20,13 +19,12 @@ public sealed class MatchFlowHandler : IGameHandler
     private readonly IScrimManager _scrimManager;
     private readonly IPauseService _pauseService;
     private readonly IRoundBackupService _roundBackup;
-    private readonly IOptionsMonitor<PluginConfig> _configMonitor;
+    private readonly PluginConfig _config;
     private readonly IDamageReportService _damageReport;
     private readonly IPersistenceChannel _persistenceChannel;
     private readonly IMatchStatsService _matchStats;
     private readonly IBombEventProcessor _bombProcessor;
 
-    private PluginConfig _config => _configMonitor.CurrentValue;
     private int _currentRoundNumber = 0;
     // A round_end was seen for the current round, and one for the current match. A restart (mp_restartgame, the end of
     // warmup) fires round_officially_ended with no round_end and then resets every engine counter.
@@ -51,7 +49,7 @@ public sealed class MatchFlowHandler : IGameHandler
         IScrimManager scrimManager,
         IPauseService pauseService,
         IRoundBackupService roundBackup,
-        IOptionsMonitor<PluginConfig> configMonitor,
+        PluginConfig config,
         IDamageReportService damageReport,
         IPersistenceChannel persistenceChannel,
         IMatchStatsService matchStats,
@@ -64,7 +62,7 @@ public sealed class MatchFlowHandler : IGameHandler
         _scrimManager = scrimManager;
         _pauseService = pauseService;
         _roundBackup = roundBackup;
-        _configMonitor = configMonitor;
+        _config = config;
         _damageReport = damageReport;
         _persistenceChannel = persistenceChannel;
         _matchStats = matchStats;

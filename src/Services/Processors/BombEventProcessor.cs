@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using CounterStrikeSharp.API;
@@ -65,7 +64,6 @@ public sealed class BombEventProcessor : IBombEventProcessor
 
     private void HandleBombBeginplant(EventBombBeginplant @event)
     {
-        using var activity = Instrumentation.ActivitySource.StartActivity("HandleBombBeginplant");
         try
         {
             var player = @event.GetPlayerOrDefault("userid");
@@ -104,7 +102,6 @@ public sealed class BombEventProcessor : IBombEventProcessor
 
     private void HandleBombPlanted(EventBombPlanted @event)
     {
-        using var activity = Instrumentation.ActivitySource.StartActivity("HandleBombPlanted");
         try
         {
             var now = _timeProvider.GetUtcNow().UtcDateTime;
@@ -137,7 +134,6 @@ public sealed class BombEventProcessor : IBombEventProcessor
 
     private void HandleBombDefused(EventBombDefused @event)
     {
-        using var activity = Instrumentation.ActivitySource.StartActivity("HandleBombDefused");
         try
         {
             _roundBomb = _roundBomb with { DefuseTimeLeftSeconds = DefuseTimeLeft() };

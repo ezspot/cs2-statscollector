@@ -5,7 +5,6 @@ using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
@@ -24,7 +23,7 @@ public sealed class PlayerLifecycleHandler : IGameHandler
     private readonly IPersistenceChannel _persistenceChannel;
     private readonly IStatsRepository _statsRepository;
     private readonly IMatchStatsService _matchStats;
-    private readonly IOptionsMonitor<PluginConfig> _config;
+    private readonly PluginConfig _config;
     private readonly CancellationToken _stoppingToken;
 
     public PlayerLifecycleHandler(
@@ -35,7 +34,7 @@ public sealed class PlayerLifecycleHandler : IGameHandler
         IPersistenceChannel persistenceChannel,
         IStatsRepository statsRepository,
         IMatchStatsService matchStats,
-        IOptionsMonitor<PluginConfig> config,
+        PluginConfig config,
         CancellationTokenSource cancellationTokenSource)
     {
         _logger = logger;
@@ -178,9 +177,8 @@ public sealed class PlayerLifecycleHandler : IGameHandler
             var state = PlayerControllerState.From(player);
             _playerSessions.EnsurePlayer(state);
             // Only spawns in tracked rounds count: warmup, deathmatch, lobby and practice respawn players constantly.
-            var config = _config.CurrentValue;
-            if (config.DeathmatchMode || GameRulesState.IsWarmup ||
-                (config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live)) return HookResult.Continue;
+            if (_config.DeathmatchMode || GameRulesState.IsWarmup ||
+                (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live)) return HookResult.Continue;
             _playerSessions.MutatePlayer(state.SteamId, stats => stats.Round.TotalSpawns++);
         }
         return HookResult.Continue;

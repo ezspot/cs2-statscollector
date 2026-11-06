@@ -1,14 +1,11 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.ObjectPool;
-using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Infrastructure;
 
@@ -16,9 +13,8 @@ namespace statsCollector.Services;
 
 public abstract class PositionEvent
 {
-    public string? MatchUuid { get; set; }
-    public int RoundNumber { get; set; }
-    public abstract void Reset();
+    public string? MatchUuid { get; init; }
+    public int RoundNumber { get; init; }
 }
 
 /// <summary>Queued at a round restore. The position rows of the voided rounds were enqueued before it, so they are
@@ -32,110 +28,60 @@ public sealed class VoidRoundsMarker : PositionEvent
     }
 
     public int FromRound => RoundNumber;
-    public override void Reset() { }
 }
 
 public sealed class KillPositionEvent : PositionEvent
 {
-    public ulong KillerSteamId { get; set; }
-    public ulong VictimSteamId { get; set; }
-    public float KillerX { get; set; }
-    public float KillerY { get; set; }
-    public float KillerZ { get; set; }
-    public float VictimX { get; set; }
-    public float VictimY { get; set; }
-    public float VictimZ { get; set; }
-    public string Weapon { get; set; } = string.Empty;
-    public bool IsHeadshot { get; set; }
-    public bool IsWallbang { get; set; }
-    public float Distance { get; set; }
-    public int KillerTeam { get; set; }
-    public int VictimTeam { get; set; }
-    public string MapName { get; set; } = string.Empty;
-    public int RoundTime { get; set; }
-
-    public override void Reset()
-    {
-        MatchUuid = null;
-        KillerSteamId = 0;
-        VictimSteamId = 0;
-        KillerX = KillerY = KillerZ = 0;
-        VictimX = VictimY = VictimZ = 0;
-        Weapon = string.Empty;
-        IsHeadshot = false;
-        IsWallbang = false;
-        Distance = 0;
-        KillerTeam = VictimTeam = 0;
-        MapName = string.Empty;
-        RoundNumber = 0;
-        RoundTime = 0;
-    }
+    public ulong KillerSteamId { get; init; }
+    public ulong VictimSteamId { get; init; }
+    public float KillerX { get; init; }
+    public float KillerY { get; init; }
+    public float KillerZ { get; init; }
+    public float VictimX { get; init; }
+    public float VictimY { get; init; }
+    public float VictimZ { get; init; }
+    public string Weapon { get; init; } = string.Empty;
+    public bool IsHeadshot { get; init; }
+    public bool IsWallbang { get; init; }
+    public float Distance { get; init; }
+    public int KillerTeam { get; init; }
+    public int VictimTeam { get; init; }
+    public string MapName { get; init; } = string.Empty;
+    public int RoundTime { get; init; }
 }
 
 public sealed class DeathPositionEvent : PositionEvent
 {
-    public ulong SteamId { get; set; }
-    public float X { get; set; }
-    public float Y { get; set; }
-    public float Z { get; set; }
-    public string CauseOfDeath { get; set; } = string.Empty;
-    public bool IsHeadshot { get; set; }
-    public int Team { get; set; }
-    public string MapName { get; set; } = string.Empty;
-    public int RoundTime { get; set; }
-
-    public override void Reset()
-    {
-        MatchUuid = null;
-        SteamId = 0;
-        X = Y = Z = 0;
-        CauseOfDeath = string.Empty;
-        IsHeadshot = false;
-        Team = 0;
-        MapName = string.Empty;
-        RoundNumber = 0;
-        RoundTime = 0;
-    }
+    public ulong SteamId { get; init; }
+    public float X { get; init; }
+    public float Y { get; init; }
+    public float Z { get; init; }
+    public string CauseOfDeath { get; init; } = string.Empty;
+    public bool IsHeadshot { get; init; }
+    public int Team { get; init; }
+    public string MapName { get; init; } = string.Empty;
+    public int RoundTime { get; init; }
 }
 
 public sealed class UtilityPositionEvent : PositionEvent
 {
-    public ulong SteamId { get; set; }
-    public float ThrowX { get; set; }
-    public float ThrowY { get; set; }
-    public float ThrowZ { get; set; }
-    public float LandX { get; set; }
-    public float LandY { get; set; }
-    public float LandZ { get; set; }
-    public int UtilityType { get; set; }
-    public int EntityId { get; set; }
-    public string LifecycleStartEvent { get; set; } = string.Empty;
-    public string LifecycleEndEvent { get; set; } = string.Empty;
-    public int LifecycleDurationMs { get; set; }
-    public int OpponentsAffected { get; set; }
-    public int TeammatesAffected { get; set; }
-    public int Damage { get; set; }
-    public string MapName { get; set; } = string.Empty;
-    public int RoundTime { get; set; }
-
-    public override void Reset()
-    {
-        MatchUuid = null;
-        SteamId = 0;
-        ThrowX = ThrowY = ThrowZ = 0;
-        LandX = LandY = LandZ = 0;
-        UtilityType = 0;
-        EntityId = 0;
-        LifecycleStartEvent = string.Empty;
-        LifecycleEndEvent = string.Empty;
-        LifecycleDurationMs = 0;
-        OpponentsAffected = 0;
-        TeammatesAffected = 0;
-        Damage = 0;
-        MapName = string.Empty;
-        RoundNumber = 0;
-        RoundTime = 0;
-    }
+    public ulong SteamId { get; init; }
+    public float ThrowX { get; init; }
+    public float ThrowY { get; init; }
+    public float ThrowZ { get; init; }
+    public float LandX { get; init; }
+    public float LandY { get; init; }
+    public float LandZ { get; init; }
+    public int UtilityType { get; init; }
+    public int EntityId { get; init; }
+    public string LifecycleStartEvent { get; init; } = string.Empty;
+    public string LifecycleEndEvent { get; init; } = string.Empty;
+    public int LifecycleDurationMs { get; init; }
+    public int OpponentsAffected { get; init; }
+    public int TeammatesAffected { get; init; }
+    public int Damage { get; init; }
+    public string MapName { get; init; } = string.Empty;
+    public int RoundTime { get; init; }
 }
 
 public interface IPositionPersistenceService : IAsyncDisposable
@@ -145,20 +91,16 @@ public interface IPositionPersistenceService : IAsyncDisposable
     Task StopAsync(TimeSpan timeout, CancellationToken cancellationToken);
     /// <summary>Removes the position rows of rounds <paramref name="fromRound"/> on, after everything queued so far.</summary>
     void VoidRounds(string matchUuid, int fromRound);
-
-    KillPositionEvent GetKillEvent();
-    DeathPositionEvent GetDeathEvent();
-    UtilityPositionEvent GetUtilityEvent();
 }
 
 public sealed class PositionPersistenceService : IPositionPersistenceService
 {
+    private const int MaxRetryQueue = 5000;
+
     private readonly IPositionTrackingService _repository;
     private readonly ILogger<PositionPersistenceService> _logger;
     private readonly Channel<PositionEvent> _channel;
-
     private readonly ConcurrentQueue<PositionEvent> _retryQueue = new();
-    private readonly ActivitySource _activitySource = Instrumentation.ActivitySource;
 
     private Task? _processingTask;
     private CancellationTokenSource? _linkedCts;
@@ -166,24 +108,15 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
     // A restore's void waits here until the database has taken it; nothing is written before it.
     private VoidRoundsMarker? _pendingVoid;
 
-    private readonly ObjectPool<KillPositionEvent> _killPool;
-    private readonly ObjectPool<DeathPositionEvent> _deathPool;
-    private readonly ObjectPool<UtilityPositionEvent> _utilityPool;
-
     public PositionPersistenceService(
         IPositionTrackingService repository,
         ILogger<PositionPersistenceService> logger,
-        IOptionsMonitor<PluginConfig> config)
+        PluginConfig config)
     {
         _repository = repository;
         _logger = logger;
 
-        var policy = new DefaultObjectPoolProvider();
-        _killPool = policy.Create(new PositionEventPooledObjectPolicy<KillPositionEvent>());
-        _deathPool = policy.Create(new PositionEventPooledObjectPolicy<DeathPositionEvent>());
-        _utilityPool = policy.Create(new PositionEventPooledObjectPolicy<UtilityPositionEvent>());
-
-        var capacity = Math.Max(100, config.CurrentValue.PersistenceChannelCapacity);
+        var capacity = Math.Max(100, config.PersistenceChannelCapacity);
         _channel = Channel.CreateBounded<PositionEvent>(new BoundedChannelOptions(capacity)
         {
             AllowSynchronousContinuations = false,
@@ -193,15 +126,6 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         });
     }
 
-    public KillPositionEvent GetKillEvent() => _killPool.Get();
-    public DeathPositionEvent GetDeathEvent() => _deathPool.Get();
-    public UtilityPositionEvent GetUtilityEvent() => _utilityPool.Get();
-
-    private class PositionEventPooledObjectPolicy<T> : IPooledObjectPolicy<T> where T : PositionEvent, new()
-    {
-        public T Create() => new();
-        public bool Return(T obj) { obj.Reset(); return true; }
-    }
     public Task StartAsync(CancellationToken cancellationToken)
     {
         if (_started) return Task.CompletedTask;
@@ -217,17 +141,9 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
     // Events recorded before StartAsync (startup waits for the schema) are buffered in the channel, like stats updates.
     public bool TryEnqueue(PositionEvent @event)
     {
-        using var activity = _activitySource.StartActivity("PositionPersistence.Enqueue", ActivityKind.Producer);
-        activity?.SetTag("event.type", @event.GetType().Name);
-
-        if (_channel.Writer.TryWrite(@event))
-        {
-            return true;
-        }
+        if (_channel.Writer.TryWrite(@event)) return true;
 
         _logger.LogWarning("Position event dropped: channel full or stopped. Type: {Type}", @event.GetType().Name);
-        activity?.SetStatus(ActivityStatusCode.Error, "Channel full");
-        ReturnToPool(@event);
         return false;
     }
 
@@ -313,18 +229,9 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
 
                 if (batch.Count == 0) continue;
 
-                using var activity = _activitySource.StartActivity("PositionPersistence.ProcessBatch", ActivityKind.Consumer);
-                activity?.SetTag("batch.size", batch.Count);
-
                 try
                 {
                     var failed = await ProcessBatchInternalAsync(batch, cancellationToken).ConfigureAwait(false);
-                    var failedSet = failed.ToHashSet();
-                    foreach (var @event in batch.Where(@event => !failedSet.Contains(@event)))
-                    {
-                        ReturnToPool(@event);
-                    }
-
                     if (failed.Count == 0)
                     {
                         retryDelay = TimeSpan.FromSeconds(5);
@@ -332,19 +239,7 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
                         continue;
                     }
 
-                    activity?.SetStatus(ActivityStatusCode.Error, "One or more position groups failed");
-                    foreach (var item in failed)
-                    {
-                        if (_retryQueue.Count < 5000)
-                        {
-                            _retryQueue.Enqueue(item);
-                        }
-                        else
-                        {
-                            ReturnToPool(item);
-                            _logger.LogCritical("Position retry buffer full. Dropped {Type}.", item.GetType().Name);
-                        }
-                    }
+                    foreach (var item in failed) Retry(item);
 
                     await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
                     retryDelay = TimeSpan.FromTicks(Math.Min(retryDelay.Ticks * 2, maxRetryDelay.Ticks));
@@ -355,13 +250,8 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
                 }
                 catch (Exception ex)
                 {
-                    activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
                     _logger.LogCritical(ex, "Unexpected position persistence failure");
-                    foreach (var item in batch)
-                    {
-                        if (_retryQueue.Count < 5000) _retryQueue.Enqueue(item);
-                        else ReturnToPool(item);
-                    }
+                    foreach (var item in batch) Retry(item);
                 }
             }
         }
@@ -372,14 +262,10 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         }
     }
 
-    private void ReturnToPool(PositionEvent @event)
+    private void Retry(PositionEvent @event)
     {
-        switch (@event)
-        {
-            case KillPositionEvent k: _killPool.Return(k); break;
-            case DeathPositionEvent d: _deathPool.Return(d); break;
-            case UtilityPositionEvent u: _utilityPool.Return(u); break;
-        }
+        if (_retryQueue.Count < MaxRetryQueue) _retryQueue.Enqueue(@event);
+        else _logger.LogCritical("Position retry buffer full. Dropped {Type}.", @event.GetType().Name);
     }
 
     private async Task<List<PositionEvent>> ProcessBatchInternalAsync(List<PositionEvent> batch, CancellationToken ct)
@@ -446,8 +332,7 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         var kept = new List<PositionEvent>();
         while (_retryQueue.TryDequeue(out var queued))
         {
-            if (queued.MatchUuid == marker.MatchUuid && queued.RoundNumber >= marker.FromRound) ReturnToPool(queued);
-            else kept.Add(queued);
+            if (queued.MatchUuid != marker.MatchUuid || queued.RoundNumber < marker.FromRound) kept.Add(queued);
         }
         foreach (var queued in kept) _retryQueue.Enqueue(queued);
 

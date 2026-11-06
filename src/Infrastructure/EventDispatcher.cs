@@ -1,7 +1,6 @@
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Services;
@@ -12,25 +11,19 @@ public interface IEventDispatcher
 {
     void Initialize(BasePlugin plugin);
     void Subscribe<T>(Func<T, GameEventInfo, HookResult> handler) where T : GameEvent;
-    HookResult Dispatch<T>(T @event, GameEventInfo info) where T : GameEvent;
 }
 
 public sealed class EventDispatcher(
     ILogger<EventDispatcher> logger,
-    IOptionsMonitor<PluginConfig> config,
+    PluginConfig config,
     IScrimManager scrimManager) : IEventDispatcher
 {
     private readonly Dictionary<Type, object> _handlers = [];
     private readonly HashSet<Type> _hookedTypes = [];
     private readonly ILogger<EventDispatcher> _logger = logger;
-    private readonly IOptionsMonitor<PluginConfig> _config = config;
+    private readonly PluginConfig _config = config;
     private readonly IScrimManager _scrimManager = scrimManager;
     private BasePlugin? _plugin;
-
-    private static class EventName<T>
-    {
-        public static readonly string DispatchName = $"EventDispatcher.Dispatch.{typeof(T).Name}";
-    }
 
     public void Initialize(BasePlugin plugin) => _plugin = plugin;
 
@@ -54,19 +47,16 @@ public sealed class EventDispatcher(
         _logger.LogTrace("Subscribed to event {EventType}", typeof(T).Name);
     }
 
-    public HookResult Dispatch<T>(T @event, GameEventInfo info) where T : GameEvent
+    private HookResult Dispatch<T>(T @event, GameEventInfo info) where T : GameEvent
     {
-        var config = _config.CurrentValue;
-        if (config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live)
+        if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live)
         {
             return HookResult.Continue;
         }
 
         // Warmup is not part of a match. Deathmatch has no rounds: its kills, with no rounds to divide by, would
         // distort the lifetime ratings that competitive servers share.
-        if (config.DeathmatchMode || GameRulesState.IsWarmup) return HookResult.Continue;
-
-        using var activity = Instrumentation.ActivitySource.StartActivity(EventName<T>.DispatchName);
+        if (_config.DeathmatchMode || GameRulesState.IsWarmup) return HookResult.Continue;
 
         if (!_handlers.TryGetValue(typeof(T), out var handlersObj))
         {
