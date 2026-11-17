@@ -593,7 +593,6 @@ public sealed class ScrimManager : IScrimManager, IDisposable
                 if (int.TryParse(value, out var m) && m is >= 2 and <= 64 && m <= _playersPerTeam * 2) _minReadyPlayers = m;
                 break;
         }
-        RunTransition(SaveCurrentStateAsync(), "save scrim override");
     }
 
     public void HandleMapStart(string mapName)

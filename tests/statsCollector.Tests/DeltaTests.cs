@@ -93,6 +93,28 @@ public class DeltaTests
     }
 
     [Fact]
+    public void ReconnectKeepsWeaponKillsEvenWhenThePlayerOnlyFiresThatWeaponAfterReturning()
+    {
+        var baseline = Build(1) with
+        {
+            WeaponKills = new Dictionary<string, int> { ["ak47"] = -2, ["glock"] = 1 },
+            WeaponShots = new Dictionary<string, int> { ["ak47"] = -5 }
+        };
+        var current = Build(2) with
+        {
+            WeaponKills = new Dictionary<string, int> { ["awp"] = 1 },
+            WeaponShots = new Dictionary<string, int> { ["ak47"] = 1 }
+        };
+
+        var delta = MatchStatsService.Delta(current, baseline);
+
+        Assert.Equal(2, delta.WeaponKills.GetValueOrDefault("ak47"));
+        Assert.Equal(6, delta.WeaponShots["ak47"]);
+        Assert.Equal(1, delta.WeaponKills["awp"]);
+        Assert.False(delta.WeaponKills.ContainsKey("glock"));
+    }
+
+    [Fact]
     public void EngineStatsSubtractFieldByField()
     {
         var ctor = typeof(EngineMatchStats).GetConstructors().Single(c => c.GetParameters().Length > 0);

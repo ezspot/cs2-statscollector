@@ -90,15 +90,14 @@ public sealed class MatchStatsService(
         var match = _matchTracker.CurrentMatch;
         if (match?.MatchUuid is null) return;
 
-        List<PlayerSnapshot> baseline;
+        Dictionary<ulong, PlayerSnapshot> baselineById;
         lock (_lock)
         {
             if (_baseline.Count == 0) return;
-            baseline = [.. _baseline.Values];
+            baselineById = new(_baseline);
             _baseline.Clear();
         }
 
-        var baselineById = baseline.ToDictionary(snapshot => snapshot.SteamId);
         var current = _playerSessions.CaptureSnapshots(onlyDirty: false, matchUuid: match.MatchUuid);
 
         var written = 0;
@@ -431,6 +430,13 @@ public sealed class MatchStatsService(
         {
             var delta = kvp.Value - (baseline?.GetValueOrDefault(kvp.Key) ?? 0);
             if (delta > 0) result[kvp.Key] = delta;
+        }
+        // A previous session's contribution is carried as a negative baseline, even for weapons
+        // that have yet to record this particular counter in the new session.
+        if (baseline is not null)
+        {
+            foreach (var (weapon, value) in baseline)
+                if (value < 0 && !current.ContainsKey(weapon)) result[weapon] = -value;
         }
         return result;
     }

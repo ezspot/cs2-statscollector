@@ -350,7 +350,6 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
     {
         var playerUpdates = new List<PlayerSnapshot>();
         var matchSummaries = new List<PlayerSnapshot>();
-        var weaponStats = new List<PlayerSnapshot>();
         var analytics = new List<PlayerAnalyticsSnapshot>();
         var roundStats = new List<PlayerSnapshot>();
 
@@ -363,7 +362,6 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                     break;
                 case MatchPlayerStatsUpdate matchPlayer:
                     matchSummaries.Add(matchPlayer.Snapshot);
-                    weaponStats.Add(matchPlayer.Snapshot);
                     analytics.Add(matchPlayer.Analytics);
                     break;
                 case RoundStartUpdate roundStart:
@@ -396,8 +394,11 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
         }
 
         if (playerUpdates.Count > 0) await _repository.UpsertPlayersAsync(playerUpdates, cancellationToken).ConfigureAwait(false);
-        if (matchSummaries.Count > 0) await _repository.UpsertMatchSummariesAsync(matchSummaries, cancellationToken).ConfigureAwait(false);
-        if (weaponStats.Count > 0) await _repository.UpsertMatchWeaponStatsAsync(weaponStats, cancellationToken).ConfigureAwait(false);
+        if (matchSummaries.Count > 0)
+        {
+            await _repository.UpsertMatchSummariesAsync(matchSummaries, cancellationToken).ConfigureAwait(false);
+            await _repository.UpsertMatchWeaponStatsAsync(matchSummaries, cancellationToken).ConfigureAwait(false);
+        }
         if (analytics.Count > 0) await _repository.UpsertPlayerAnalyticsAsync(analytics, cancellationToken).ConfigureAwait(false);
         if (roundStats.Count > 0) await _repository.UpsertPlayerRoundStatsAsync(roundStats, cancellationToken).ConfigureAwait(false);
 
