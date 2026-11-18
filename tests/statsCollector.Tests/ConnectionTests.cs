@@ -1,7 +1,12 @@
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging.Abstractions;
 using MySqlConnector;
 using statsCollector.Config;
 using statsCollector.Infrastructure;
+using statsCollector.Infrastructure.Database;
 using Xunit;
 
 namespace statsCollector.Tests;
@@ -16,6 +21,23 @@ public class ConnectionTests
         var builder = new MySqlConnectionStringBuilder(new PluginConfig().BuildConnectionString());
 
         Assert.Equal(ResiliencePolicies.AttemptTimeout, TimeSpan.FromSeconds(builder.ConnectionTimeout));
+    }
+
+    // A frozen database host accepts the connection and never sends its greeting. The connect alone would hold an
+    // unload's last write, and the spill behind it, until ConnectionTimeout, past the point where the server may exit.
+    [Fact]
+    public async Task ConnectStopsWaitingWhenItsTokenIsCancelled()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var config = new PluginConfig { DatabaseHost = "127.0.0.1", DatabasePort = ((IPEndPoint)listener.LocalEndpoint).Port, DatabasePassword = "password" };
+        var factory = new ConnectionFactory(config, NullLogger<ConnectionFactory>.Instance);
+        using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+
+        var watch = Stopwatch.StartNew();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => factory.CreateConnectionAsync(cancel.Token));
+
+        Assert.InRange(watch.Elapsed, TimeSpan.Zero, TimeSpan.FromSeconds(2));
     }
 
     // The pipeline's timeout only asks MySqlConnector to cancel (KILL QUERY over a new connection): against a server

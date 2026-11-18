@@ -254,16 +254,6 @@ public sealed class MatchFlowHandler : IGameHandler
 
         var roundStartUtc = DateTime.UtcNow;
         var isPistolRound = GameRulesState.IsPistolRound;
-        var ctAlive = 0;
-        var tAlive = 0;
-
-        // Everyone on a side starts the round, bots included.
-        var everyone = Utilities.GetPlayers();
-        foreach (var player in everyone)
-        {
-            if (player.TeamNum == (int)PlayerTeam.CounterTerrorist) ctAlive++;
-            else if (player.TeamNum == (int)PlayerTeam.Terrorist) tAlive++;
-        }
 
         var context = new RoundContext(_currentRoundNumber, roundStartUtc);
         foreach (var processor in _processors)
@@ -274,7 +264,7 @@ public sealed class MatchFlowHandler : IGameHandler
         // Both sides' buy: the money they started the round with and what they hold now that buying is over.
         // ponytail: the humans' only; a bot has no session to keep its start money in.
         var economy = (CtMoney: 0, TMoney: 0, CtEquipment: 0, TEquipment: 0);
-        var players = PlayerControllerState.HumansBySteamId(everyone);
+        var players = PlayerControllerState.HumansBySteamId();
         foreach (var steamId in _playerSessions.GetActiveSteamIds())
         {
             if (!players.TryGetValue(steamId, out var player)) continue;
@@ -287,10 +277,7 @@ public sealed class MatchFlowHandler : IGameHandler
             {
                 stats.Round.SurvivedThisRound = true;
                 stats.Round.RoundNumber = _currentRoundNumber;
-                stats.Round.RoundStartUtc = roundStartUtc;
                 stats.Round.IsPistolRound = isPistolRound;
-                stats.Round.AliveOnTeamAtRoundStart = isCt ? ctAlive : tAlive;
-                stats.Round.AliveEnemyAtRoundStart = isCt ? tAlive : ctAlive;
                 stats.Economy.EquipmentValue = state.EquipmentValue;
                 stats.Economy.EquipmentValueStart = state.EquipmentValue;
                 if (isCt) economy.CtMoney += stats.Economy.RoundStartMoney;

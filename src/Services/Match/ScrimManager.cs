@@ -125,7 +125,6 @@ public sealed class ScrimManager : IScrimManager, IDisposable
             [.. _team2],
             new Dictionary<int, ulong>(_captains),
             _selectedMap,
-            DateTime.UtcNow,
             ReadyPlayers: new Dictionary<ulong, bool>(_readyPlayers),
             MapVotes: new Dictionary<string, int>(_mapVotes),
             PlayerVotes: new Dictionary<ulong, string>(_playerVotes),

@@ -9,21 +9,16 @@ public sealed class RoundStats
     private int _roundsPlayed;
     private int _roundsWon;
     private int _kastRounds;
-    private int _aliveOnTeamAtRoundStart;
-    private int _aliveEnemyAtRoundStart;
     private bool _hadKillThisRound;
     private bool _hadAssistThisRound;
     private bool _survivedThisRound;
-    private bool _didTradeThisRound;
 
     private int _jumps;
     private int _totalSpawns;
     private int _roundNumber;
-    private DateTime _roundStartUtc;
     private int _ctRounds;
     private int _tRounds;
     private bool _wasTradedThisRound;
-    private bool _wasFlashedForKill;
     private int _pings;
     private int _footsteps;
     private int _liveTime;
@@ -43,20 +38,15 @@ public sealed class RoundStats
     public int RoundsPlayed { get => _roundsPlayed; set { _roundsPlayed = value; _markDirty(); } }
     public int RoundsWon { get => _roundsWon; set { _roundsWon = value; _markDirty(); } }
     public int KASTRounds { get => _kastRounds; set { _kastRounds = value; _markDirty(); } }
-    public int AliveOnTeamAtRoundStart { get => _aliveOnTeamAtRoundStart; set { _aliveOnTeamAtRoundStart = value; _markDirty(); } }
-    public int AliveEnemyAtRoundStart { get => _aliveEnemyAtRoundStart; set { _aliveEnemyAtRoundStart = value; _markDirty(); } }
     public bool HadKillThisRound { get => _hadKillThisRound; set { _hadKillThisRound = value; _markDirty(); } }
     public bool HadAssistThisRound { get => _hadAssistThisRound; set { _hadAssistThisRound = value; _markDirty(); } }
     public bool SurvivedThisRound { get => _survivedThisRound; set { _survivedThisRound = value; _markDirty(); } }
-    public bool DidTradeThisRound { get => _didTradeThisRound; set { _didTradeThisRound = value; _markDirty(); } }
     public int Jumps { get => _jumps; set { _jumps = value; _markDirty(); } }
     public int TotalSpawns { get => _totalSpawns; set { _totalSpawns = value; _markDirty(); } }
     public int RoundNumber { get => _roundNumber; set { _roundNumber = value; _markDirty(); } }
-    public DateTime RoundStartUtc { get => _roundStartUtc; set { _roundStartUtc = value; _markDirty(); } }
     public int CtRounds { get => _ctRounds; set { _ctRounds = value; _markDirty(); } }
     public int TRounds { get => _tRounds; set { _tRounds = value; _markDirty(); } }
     public bool WasTradedThisRound { get => _wasTradedThisRound; set { _wasTradedThisRound = value; _markDirty(); } }
-    public bool WasFlashedForKill { get => _wasFlashedForKill; set { _wasFlashedForKill = value; _markDirty(); } }
     public int Pings { get => _pings; set { _pings = value; _markDirty(); } }
     public int Footsteps { get => _footsteps; set { _footsteps = value; _markDirty(); } }
     // Time alive as the engine counts it (CSMatchStats_t m_iLiveTime), accrued at round end.
@@ -76,9 +66,7 @@ public sealed class RoundStats
         _hadKillThisRound = false;
         _hadAssistThisRound = false;
         _survivedThisRound = false;
-        _didTradeThisRound = false;
         _wasTradedThisRound = false;
-        _wasFlashedForKill = false;
         _markDirty();
     }
 }

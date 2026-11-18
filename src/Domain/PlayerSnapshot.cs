@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -9,9 +8,6 @@ public sealed record PlayerSnapshot
     long Version,
     string? MatchUuid,
     int RoundNumber,
-    DateTime RoundStartUtc,
-    int AliveOnTeamAtRoundStart,
-    int AliveEnemyAtRoundStart,
 
     ulong SteamId,
     string Name,
@@ -54,7 +50,6 @@ public sealed record PlayerSnapshot
     int MolotovsThrown,
     int HeGrenadesThrown,
     int DecoysThrown,
-    int PlayersBlinded,
     int TimesBlinded,
     int FlashAssists,
     float TotalBlindTime,
@@ -103,7 +98,6 @@ public sealed record PlayerSnapshot
     int NoscopeKills,
     int ThruSmokeKills,
     int AttackerBlindKills,
-    int FlashAssistedKills,
     int WallbangKills,
     int Revenges,
     int ClutchesWon,
@@ -124,8 +118,6 @@ public sealed record PlayerSnapshot
     bool HadAssistThisRound,
     bool SurvivedThisRound,
     bool WasTradedThisRound,
-    bool DidTradeThisRound,
-    bool WasFlashedForKill,
     int KASTRounds,
     int Pings,
     int Footsteps,
@@ -146,10 +138,8 @@ public sealed record PlayerSnapshot
     decimal ImpactRating,
     decimal UtilityScore,
     decimal PerformanceScore,
-    string PlayerRank,
     decimal AverageKillsPerRound,
     decimal AverageDeathsPerRound,
-    decimal AverageAssistsPerRound,
     decimal ClutchSuccessRate,
     decimal TradeKillRatio,
     decimal OpeningKillRatio,
@@ -161,7 +151,6 @@ public sealed record PlayerSnapshot
     decimal UtilityImpactScore,
     string TopWeaponByKills,
     // Team kills, suicides, the 1vX clutch split and the engine's CSMatchStats_t economy/time-alive counters (2026-11).
-    // Appended so the positional constructor call in AnalyticsService.CreateSnapshot stays aligned.
     int TeamKills,
     int Suicides,
     int Clutch1v1Attempts,

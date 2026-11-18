@@ -25,9 +25,13 @@ public sealed class ConnectionFactory : IConnectionFactory
             _config.DatabaseHost, _config.DatabasePort, _config.DatabaseSslMode);
         
         var connection = new MySqlConnection(connectionString);
+        // MySqlConnector's connect ignores the token while it waits for the server's greeting and ends only at its
+        // ConnectionTimeout. The caller stops waiting when the token is cancelled (an unload must spill what it holds
+        // before the server exits); the attempt ends by itself.
+        var open = connection.OpenAsync(cancellationToken);
         try
         {
-            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await open.WaitAsync(cancellationToken).ConfigureAwait(false);
             _logger.LogTrace("Database connection opened successfully");
             return connection;
         }
@@ -35,8 +39,15 @@ public sealed class ConnectionFactory : IConnectionFactory
         {
             // Callers log the failure once, after their retries.
             _logger.LogDebug(ex, "Failed to open database connection to {Host}:{Port}", _config.DatabaseHost, _config.DatabasePort);
-            await connection.DisposeAsync().ConfigureAwait(false);
+            _ = DisposeWhenEndedAsync(open, connection);
             throw;
         }
+    }
+
+    // A connection is not disposed while its connect is still running.
+    private static async Task DisposeWhenEndedAsync(Task open, MySqlConnection connection)
+    {
+        await open.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        await connection.DisposeAsync().ConfigureAwait(false);
     }
 }

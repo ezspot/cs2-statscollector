@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 namespace statsCollector.Domain;
 
@@ -8,7 +7,6 @@ public record ScrimRecoveryData(
     List<ulong> Team2,
     Dictionary<int, ulong> Captains,
     string? SelectedMap,
-    DateTime SavedAtUtc,
     Dictionary<ulong, bool> ReadyPlayers = null!,
     Dictionary<string, int> MapVotes = null!,
     Dictionary<ulong, string> PlayerVotes = null!,

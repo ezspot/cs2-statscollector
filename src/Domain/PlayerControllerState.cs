@@ -64,12 +64,10 @@ public sealed record PlayerControllerState
     }
 
     /// <summary>The connected humans by SteamID: one pass over the player slots for a loop that looks several up.</summary>
-    public static Dictionary<ulong, CCSPlayerController> HumansBySteamId() => HumansBySteamId(Utilities.GetPlayers());
-
-    public static Dictionary<ulong, CCSPlayerController> HumansBySteamId(IEnumerable<CCSPlayerController> everyone)
+    public static Dictionary<ulong, CCSPlayerController> HumansBySteamId()
     {
         var players = new Dictionary<ulong, CCSPlayerController>();
-        foreach (var player in everyone)
+        foreach (var player in Utilities.GetPlayers())
         {
             if (!player.IsBot && player.SteamID != 0) players.TryAdd(player.SteamID, player);
         }

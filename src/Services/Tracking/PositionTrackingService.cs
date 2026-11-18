@@ -9,7 +9,6 @@ using MySqlConnector;
 using statsCollector.Infrastructure;
 using statsCollector.Infrastructure.Database;
 using Polly;
-using Polly.Registry;
 
 namespace statsCollector.Services;
 
@@ -28,10 +27,10 @@ public sealed class PositionTrackingService : IPositionTrackingService
 
     public PositionTrackingService(
         IConnectionFactory connectionFactory,
-        ResiliencePipelineProvider<string> pipelineProvider)
+        ResiliencePipeline resiliencePipeline)
     {
         _connectionFactory = connectionFactory;
-        _resiliencePipeline = pipelineProvider.GetPipeline("database");
+        _resiliencePipeline = resiliencePipeline;
     }
 
     public async Task BulkTrackKillPositionsAsync(IEnumerable<KillPositionEvent> events, CancellationToken cancellationToken = default)

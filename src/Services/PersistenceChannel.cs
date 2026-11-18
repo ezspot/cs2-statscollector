@@ -24,34 +24,34 @@ namespace statsCollector.Services;
 [JsonDerivedType(typeof(RoundsVoidedUpdate), "roundsVoided")]
 [JsonDerivedType(typeof(MatchStartUpdate), "matchStart")]
 [JsonDerivedType(typeof(MatchEndUpdate), "matchEnd")]
-public abstract record StatsUpdate(string? MatchUuid = null, int? RoundNumber = null, ulong? SteamId = null);
+public abstract record StatsUpdate(string? MatchUuid = null, ulong? SteamId = null);
 
 public sealed record PlayerStatsUpdate(PlayerSnapshot Snapshot)
-    : StatsUpdate(Snapshot.MatchUuid, Snapshot.RoundNumber, Snapshot.SteamId);
+    : StatsUpdate(Snapshot.MatchUuid, Snapshot.SteamId);
 
 public sealed record MatchPlayerStatsUpdate(PlayerSnapshot Snapshot, PlayerAnalyticsSnapshot Analytics)
-    : StatsUpdate(Snapshot.MatchUuid, Snapshot.RoundNumber, Snapshot.SteamId);
+    : StatsUpdate(Snapshot.MatchUuid, Snapshot.SteamId);
 
 public sealed record RoundStartUpdate(string MatchId, int Number)
-    : StatsUpdate(MatchId, Number);
+    : StatsUpdate(MatchId);
 
 public sealed record RoundEndUpdate(string MatchId, int Number, int WinnerTeam, int WinReason, RoundBombInfo Bomb)
-    : StatsUpdate(MatchId, Number);
+    : StatsUpdate(MatchId);
 
 /// <summary>Both sides' money at round start and equipment value at freeze end.</summary>
 public sealed record RoundEconomyUpdate(string MatchId, int Number, RoundEconomy Economy)
-    : StatsUpdate(MatchId, Number);
+    : StatsUpdate(MatchId);
 
 /// <summary>A player's totals over one round: their snapshot at round end minus the one at round start.</summary>
 public sealed record PlayerRoundStatsUpdate(PlayerSnapshot RoundDelta)
-    : StatsUpdate(RoundDelta.MatchUuid, RoundDelta.RoundNumber, RoundDelta.SteamId);
+    : StatsUpdate(RoundDelta.MatchUuid, RoundDelta.SteamId);
 
 public sealed record RoundOfficialEndUpdate(string MatchId, int Number)
-    : StatsUpdate(MatchId, Number);
+    : StatsUpdate(MatchId);
 
 /// <summary>A round restore replays rounds from <paramref name="FromRound"/> on, so their rows are dropped.</summary>
 public sealed record RoundsVoidedUpdate(string MatchId, int FromRound)
-    : StatsUpdate(MatchId, FromRound);
+    : StatsUpdate(MatchId);
 
 public sealed record MatchStartUpdate(string MapName, string MatchId)
     : StatsUpdate(MatchId);
@@ -286,8 +286,17 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
         finally
         {
             await base.StopAsync(cancellationToken).ConfigureAwait(false);
+            // base.StopAsync stops waiting the moment the caller's token is cancelled, which is also when the worker
+            // learns it has to stop. It is given a little longer, so the spill is on disk and logged before the unload
+            // returns: a server that exits right after would otherwise lose everything the buffer held.
+            if (ExecuteTask is { IsCompleted: false } worker)
+                await worker.WaitAsync(SpillGrace, CancellationToken.None).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
         }
     }
+
+    // Inside the 3 s Plugin.Unload waits past its cleanup budget. Enough for a cancelled command to end (its KILL QUERY
+    // connection may take CancellationTimeout = 1 s) and the file to be written.
+    private static readonly TimeSpan SpillGrace = TimeSpan.FromSeconds(2);
 
     private async Task ProcessBatchAsync(IReadOnlyList<StatsUpdate> batch, CancellationToken cancellationToken)
     {

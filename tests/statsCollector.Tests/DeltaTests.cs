@@ -14,11 +14,11 @@ public class DeltaTests
     // Not counters: kept from the current snapshot by MatchStatsService.Delta.
     private static readonly HashSet<string> Kept =
     [
-        "Version", "RoundNumber", "AliveOnTeamAtRoundStart", "AliveEnemyAtRoundStart",
+        "Version", "RoundNumber",
         "EquipmentValue", "RoundStartMoney", "RoundEndMoney", "EquipmentValueStart", "EquipmentValueEnd", "LongestKill",
         "KDRatio", "HeadshotPercentage", "AccuracyPercentage", "KASTPercentage", "AverageDamagePerRound", "HLTVRating",
         "ImpactRating", "UtilityScore", "PerformanceScore", "AverageKillsPerRound", "AverageDeathsPerRound",
-        "AverageAssistsPerRound", "ClutchSuccessRate", "TradeKillRatio", "OpeningKillRatio", "GrenadeEffectivenessRate",
+        "ClutchSuccessRate", "TradeKillRatio", "OpeningKillRatio", "GrenadeEffectivenessRate",
         "FlashEffectivenessRate", "UtilityUsagePerRound", "AverageMoneySpentPerRound", "SurvivalRating", "UtilityImpactScore"
     ];
 
@@ -39,7 +39,6 @@ public class DeltaTests
         if (p.ParameterType == typeof(float)) return (float)v;
         if (p.ParameterType == typeof(ulong)) return (ulong)v;
         if (p.ParameterType == typeof(bool)) return scale % 2 == 1;
-        if (p.ParameterType == typeof(DateTime)) return new DateTime(2026, 11, 5, 0, 0, 0, DateTimeKind.Utc);
         if (p.ParameterType == typeof(string)) return p.Name == "MatchUuid" ? matchUuid : p.Name!;
         if (p.ParameterType == typeof(IReadOnlyDictionary<string, int>)) return new Dictionary<string, int> { ["ak47"] = weaponValue * scale, ["awp"] = scale };
         throw new InvalidOperationException($"Unexpected parameter {p.Name}: {p.ParameterType}");
@@ -67,7 +66,7 @@ public class DeltaTests
                 Assert.Equal(2, dictionary["awp"]);
                 continue;
             }
-            if (Kept.Contains(property.Name) || type == typeof(bool) || type == typeof(string) || type == typeof(DateTime) || type == typeof(ulong))
+            if (Kept.Contains(property.Name) || type == typeof(bool) || type == typeof(string) || type == typeof(ulong))
             {
                 Assert.Equal(curValue, deltaValue);
                 continue;

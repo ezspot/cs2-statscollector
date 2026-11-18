@@ -194,7 +194,7 @@ public sealed class PlayerStats
         Utility.MolotovsThrown += r.MolotovsThrown;
         Utility.HeGrenadesThrown += r.HeGrenadesThrown;
         Utility.DecoysThrown += r.DecoysThrown;
-        Utility.EnemiesBlinded += r.PlayersBlinded;
+        Utility.EnemiesBlinded += r.EnemiesFlashed;
         Utility.TeammatesBlinded += r.TeammatesFlashed;
         Utility.TimesBlinded += r.TimesBlinded;
         Utility.FlashAssists += r.FlashAssists;

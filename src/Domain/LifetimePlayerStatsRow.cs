@@ -37,7 +37,7 @@ public sealed record LifetimePlayerStatsRow
     public int MolotovsThrown { get; init; }
     public int HeGrenadesThrown { get; init; }
     public int DecoysThrown { get; init; }
-    public int PlayersBlinded { get; init; }
+    public int EnemiesFlashed { get; init; }
     public int TeammatesFlashed { get; init; }
     public int TimesBlinded { get; init; }
     public int FlashAssists { get; init; }

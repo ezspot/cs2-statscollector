@@ -20,10 +20,12 @@ A CounterStrikeSharp plugin for CS2 that collects detailed player statistics int
   Batches still unwritten when the plugin unloads, the one cut off mid-write included, are spilled to
   `pending_stats.json` in the plugin directory and replayed at the next start; the file is removed as soon as they are
   written, before anything newer is, so a crash during the replay neither loses them nor replays them over newer
-  totals. Against a server that stopped answering, the spill is written once the statement in flight gives up, which
-  can be after the unload returned: a process that exits at once loses it, and a plugin loaded again within those
-  seconds misses it (that instance can delete or replace the file, or a later start replays it over newer totals),
-  so reload a plugin only while the database answers. A file that cannot be read is renamed
+  totals. Against a server that stopped answering, the unload waits up to 2 s past its budget for the spill, which
+  covers a connection attempt or a statement in flight (on a live server with the database frozen: 7.0 s, the file on
+  disk before the unload returned). Should the writer need longer, the spill lands after the unload: a process that
+  exits at once loses it, and a plugin loaded again within those seconds misses it (that instance can delete or
+  replace the file, or a later start replays it over newer totals), so reload a plugin only while the database
+  answers. A file that cannot be read is renamed
   `pending_stats.json.unreadable-<UTC time>` and left for inspection.
   Position events (heatmaps) are not spilled: those still buffered at unload are counted in a warning and lost.
   At startup the plugin checks the server's `local_infile` and logs a critical message
@@ -70,7 +72,9 @@ container (`MYSQL_ROOT_HOST=localhost`).
 4. Create the configured database, select it, then run `database/init.sql` to create the tables and views.
 5. Start the server and confirm with `css_plugins list`. After replacing the DLL, restart the server or
    `css_plugins unload` + `load` it: on CounterStrikeSharp v1.0.379, `css_plugins reload` after an
-   upload-and-rename leaves the plugin unloaded.
+   upload-and-rename leaves the plugin unloaded. CounterStrikeSharp also reloads the plugin by itself when a file in
+   its folder changes (on v1.0.380 once per file event, also while it is unloaded), and each reload ends the match
+   being recorded and starts a new one, so replace the files between matches.
 
 ### Commands
 Registered as `css_*` console commands (`css_ready`). CounterStrikeSharp maps the `!` and `/` chat prefixes to them
@@ -128,7 +132,8 @@ See `config.sample.json` for the full set of options (persistence, trade window,
 
 `database/init.sql` is the whole schema; there are no migrations. Run it once on an empty database
 (`mysql -u <user> -p cs2_statscollector < database/init.sql`), or let `AutoCreateSchema` run it at startup. The
-Docker image runs it only on an empty volume.
+Docker image runs it only on an empty volume. After a schema change, drop the database and create it again: the
+script leaves an existing table as it is.
 
 Any option can be overridden by an environment variable prefixed with `STATSCOLLECTOR_`
 (e.g. `STATSCOLLECTOR_DatabasePassword`). Nested options use `__` (`STATSCOLLECTOR_Scrim__PlayersPerTeam`); a single

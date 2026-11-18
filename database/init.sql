@@ -13,8 +13,7 @@ CREATE TABLE IF NOT EXISTS matches (
     map_name VARCHAR(100) NOT NULL,
     start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     end_time TIMESTAMP NULL,
-    status ENUM('IN_PROGRESS', 'COMPLETED', 'ABORTED') DEFAULT 'IN_PROGRESS',
-    INDEX idx_matches_time (start_time)
+    status ENUM('IN_PROGRESS', 'COMPLETED') DEFAULT 'IN_PROGRESS'
 ) ENGINE=InnoDB;
 
 -- 2. Tables with dependencies
@@ -45,7 +44,6 @@ CREATE TABLE IF NOT EXISTS player_stats (
     molotovs_thrown INT DEFAULT 0,
     he_grenades_thrown INT DEFAULT 0,
     decoys_thrown INT DEFAULT 0,
-    players_blinded INT DEFAULT 0,
     times_blinded INT DEFAULT 0,
     flash_assists INT DEFAULT 0,
     total_blind_time DECIMAL(10,2) DEFAULT 0,
@@ -104,7 +102,6 @@ CREATE TABLE IF NOT EXISTS player_stats (
     noscope_kills INT DEFAULT 0,
     thru_smoke_kills INT DEFAULT 0,
     attacker_blind_kills INT DEFAULT 0,
-    flash_assisted_kills INT DEFAULT 0,
     wallbang_kills INT DEFAULT 0,
     revenges INT DEFAULT 0,
     pings INT DEFAULT 0,
@@ -169,7 +166,6 @@ CREATE TABLE IF NOT EXISTS player_stats (
     kill_distance_total DECIMAL(12,2) NOT NULL DEFAULT 0,
     longest_kill DECIMAL(8,2) NOT NULL DEFAULT 0,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_player_stats_updated_at (updated_at),
     INDEX idx_player_stats_hltv_rating (hltv_rating DESC),
     FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
@@ -380,13 +376,11 @@ CREATE TABLE IF NOT EXISTS player_advanced_analytics (
     survival_rating DECIMAL(8,3) NOT NULL,
     utility_score DECIMAL(8,3) NOT NULL,
     clutch_points DECIMAL(10,3) NOT NULL,
-    flash_assisted_kills INT DEFAULT 0,
     wallbang_kills INT DEFAULT 0,
     idempotency_key VARCHAR(100) UNIQUE NULL,
     FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
     FOREIGN KEY (steam_id) REFERENCES players(steam_id) ON DELETE CASCADE,
-    INDEX idx_player_analytics_steam_calculated (steam_id, calculated_at),
-    INDEX idx_player_advanced_analytics_calculated_at (calculated_at)
+    INDEX idx_player_analytics_steam_calculated (steam_id, calculated_at)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS kill_positions (

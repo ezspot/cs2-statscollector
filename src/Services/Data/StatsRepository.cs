@@ -11,7 +11,6 @@ using statsCollector.Domain;
 using statsCollector.Infrastructure.Database;
 using statsCollector.Infrastructure;
 using Polly;
-using Polly.Registry;
 
 namespace statsCollector.Services;
 
@@ -53,12 +52,12 @@ public sealed class StatsRepository : IStatsRepository
 
     public StatsRepository(
         IConnectionFactory connectionFactory,
-        ResiliencePipelineProvider<string> pipelineProvider,
+        ResiliencePipeline resiliencePipeline,
         ILogger<StatsRepository> logger)
     {
         _connectionFactory = connectionFactory;
         _logger = logger;
-        _resiliencePipeline = pipelineProvider.GetPipeline("database");
+        _resiliencePipeline = resiliencePipeline;
     }
 
     public async Task UpsertPlayersAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
@@ -125,8 +124,9 @@ public sealed class StatsRepository : IStatsRepository
 
     internal sealed record WeaponRow(string MatchUuid, ulong SteamId, string Weapon, int Kills, int Headshots, int Shots, int Hits, int Damage, int Deaths);
 
-    // A column of a per-match table: its name, the DataTable (CLR) type, the MySQL type of the staging table, and the
-    // value it takes from a row. One list per table keeps the staging table, the bulk copy and the merge aligned.
+    // A table column: its name, the DataTable (CLR) type, the MySQL type in the staging table (empty for the lifetime
+    // list, whose staging table is a copy of player_stats), and the value it takes from a row. One list per table
+    // keeps the staging table, the bulk copy and the merge aligned.
     internal sealed record Column<T>(string Name, Type ClrType, string SqlType, Func<T, object?> Value);
 
     private static Column<T> Int<T>(string name, Func<T, int> value) => new(name, typeof(int), "INT", row => value(row));
@@ -240,10 +240,7 @@ public sealed class StatsRepository : IStatsRepository
         {
             await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
 
-            var dataTable = new DataTable();
-            foreach (var column in columns) dataTable.Columns.Add(column.Name, column.ClrType);
-            foreach (var row in rows) dataTable.Rows.Add(columns.Select(column => column.Value(row)).ToArray());
-
+            var dataTable = ToDataTable(columns, rows);
             var staging = $"temp_{table}_uuid";
             await ExecuteAsync(connection, $"CREATE TEMPORARY TABLE {staging} (row_id INT AUTO_INCREMENT PRIMARY KEY, {string.Join(", ", columns.Select(c => $"{c.Name} {c.SqlType}"))});", ct).ConfigureAwait(false);
 
@@ -323,14 +320,14 @@ public sealed class StatsRepository : IStatsRepository
                      rounds_played, kd_ratio, headshot_percentage, opening_kill_ratio, trade_kill_ratio,
                      grenade_effectiveness_rate, flash_effectiveness_rate, utility_usage_per_round, average_money_spent_per_round,
                      performance_score, top_weapon_by_kills, survival_rating, utility_score, clutch_points,
-                     flash_assisted_kills, wallbang_kills, idempotency_key)
+                     wallbang_kills, idempotency_key)
                 SELECT m.id, @SteamId, CURRENT_TIMESTAMP, @Name, @Rating2, @KillsPerRound, @DeathsPerRound, @ImpactScore,
                      @KastPercentage, @AverageDamagePerRound, @UtilityImpactScore, @ClutchSuccessRate, @TradeSuccessRate,
                      @FlashWaste, @EntryKills, @EntryDeaths, @EntryKillAttempts, @EntryKillAttemptWins, @EntrySuccessRate,
                      @RoundsPlayed, @KdRatio, @HeadshotPercentage, @OpeningKillRatio, @TradeKillRatio,
                      @GrenadeEffectivenessRate, @FlashEffectivenessRate, @UtilityUsagePerRound, @AverageMoneySpentPerRound,
                      @PerformanceScore, @TopWeaponByKills, @SurvivalRating, @UtilityScore, @ClutchPoints,
-                     @FlashAssistedKills, @WallbangKills, @IdempotencyKey
+                     @WallbangKills, @IdempotencyKey
                 FROM matches m WHERE m.match_uuid = @MatchUuid
                 ON DUPLICATE KEY UPDATE
                     calculated_at = CURRENT_TIMESTAMP, name = @Name, rating2 = @Rating2, kills_per_round = @KillsPerRound,
@@ -344,8 +341,7 @@ public sealed class StatsRepository : IStatsRepository
                     grenade_effectiveness_rate = @GrenadeEffectivenessRate, flash_effectiveness_rate = @FlashEffectivenessRate,
                     utility_usage_per_round = @UtilityUsagePerRound, average_money_spent_per_round = @AverageMoneySpentPerRound,
                     performance_score = @PerformanceScore, top_weapon_by_kills = @TopWeaponByKills, survival_rating = @SurvivalRating,
-                    utility_score = @UtilityScore, clutch_points = @ClutchPoints, flash_assisted_kills = @FlashAssistedKills,
-                    wallbang_kills = @WallbangKills;
+                    utility_score = @UtilityScore, clutch_points = @ClutchPoints, wallbang_kills = @WallbangKills;
                 """;
 
             await connection.ExecuteAsync(new CommandDefinition(sql, list, cancellationToken: ct)).ConfigureAwait(false);
@@ -453,203 +449,104 @@ public sealed class StatsRepository : IStatsRepository
         }
     }
 
+    // The player's lifetime totals and ratios: player_stats, one row per player. The staging table is created LIKE
+    // player_stats, so these carry no SQL type; the copy and the merge both come from this list.
+    internal static readonly Column<PlayerSnapshot>[] LifetimeColumns =
+    [
+        new("steam_id", typeof(ulong), "", s => s.SteamId), Str<PlayerSnapshot>("name", "", s => s.Name), Int<PlayerSnapshot>("kills", s => s.Kills),
+        Int<PlayerSnapshot>("deaths", s => s.Deaths), Int<PlayerSnapshot>("assists", s => s.Assists),
+        Int<PlayerSnapshot>("headshots", s => s.Headshots), Int<PlayerSnapshot>("damage_dealt", s => s.DamageDealt),
+        Int<PlayerSnapshot>("damage_taken", s => s.DamageTaken), Int<PlayerSnapshot>("damage_armor", s => s.DamageArmor),
+        Int<PlayerSnapshot>("shots_fired", s => s.ShotsFired), Int<PlayerSnapshot>("shots_hit", s => s.ShotsHit),
+        Int<PlayerSnapshot>("mvps", s => s.Mvps), Int<PlayerSnapshot>("score", s => s.Score),
+        Int<PlayerSnapshot>("rounds_played", s => s.RoundsPlayed), Int<PlayerSnapshot>("rounds_won", s => s.RoundsWon),
+        Int<PlayerSnapshot>("kast_rounds", s => s.KASTRounds), Int<PlayerSnapshot>("total_spawns", s => s.TotalSpawns),
+        Int<PlayerSnapshot>("playtime_seconds", s => s.PlaytimeSeconds), Int<PlayerSnapshot>("ct_rounds", s => s.CtRounds),
+        Int<PlayerSnapshot>("t_rounds", s => s.TRounds), Int<PlayerSnapshot>("grenades_thrown", s => s.GrenadesThrown),
+        Int<PlayerSnapshot>("flashes_thrown", s => s.FlashesThrown), Int<PlayerSnapshot>("smokes_thrown", s => s.SmokesThrown),
+        Int<PlayerSnapshot>("molotovs_thrown", s => s.MolotovsThrown), Int<PlayerSnapshot>("he_grenades_thrown", s => s.HeGrenadesThrown),
+        Int<PlayerSnapshot>("decoys_thrown", s => s.DecoysThrown), Int<PlayerSnapshot>("times_blinded", s => s.TimesBlinded),
+        Int<PlayerSnapshot>("flash_assists", s => s.FlashAssists), new("total_blind_time", typeof(decimal), "", s => s.TotalBlindTime),
+        new("total_blind_time_inflicted", typeof(decimal), "", s => s.TotalBlindTimeInflicted),
+        Int<PlayerSnapshot>("utility_damage_dealt", s => s.UtilityDamageDealt),
+        Int<PlayerSnapshot>("utility_damage_taken", s => s.UtilityDamageTaken), Int<PlayerSnapshot>("bomb_plants", s => s.BombPlants),
+        Int<PlayerSnapshot>("bomb_defuses", s => s.BombDefuses), Int<PlayerSnapshot>("bomb_explosions", s => s.BombExplosions),
+        Int<PlayerSnapshot>("bomb_plant_attempts", s => s.BombPlantAttempts), Int<PlayerSnapshot>("bomb_plant_aborts", s => s.BombPlantAborts),
+        Int<PlayerSnapshot>("bomb_defuse_attempts", s => s.BombDefuseAttempts), Int<PlayerSnapshot>("bomb_defuse_aborts", s => s.BombDefuseAborts),
+        Int<PlayerSnapshot>("bomb_defuse_with_kit", s => s.BombDefuseWithKit),
+        Int<PlayerSnapshot>("bomb_defuse_without_kit", s => s.BombDefuseWithoutKit), Int<PlayerSnapshot>("bomb_drops", s => s.BombDrops),
+        Int<PlayerSnapshot>("bomb_pickups", s => s.BombPickups), Int<PlayerSnapshot>("defuser_pickups", s => s.DefuserPickups),
+        Int<PlayerSnapshot>("clutch_defuses", s => s.ClutchDefuses), Int<PlayerSnapshot>("total_plant_time", s => s.TotalPlantTime),
+        Int<PlayerSnapshot>("total_defuse_time", s => s.TotalDefuseTime), Int<PlayerSnapshot>("bomb_kills", s => s.BombKills),
+        Int<PlayerSnapshot>("bomb_deaths", s => s.BombDeaths), Int<PlayerSnapshot>("jumps", s => s.Jumps),
+        Int<PlayerSnapshot>("money_spent", s => s.MoneySpent), Int<PlayerSnapshot>("equipment_value", s => s.EquipmentValue),
+        Int<PlayerSnapshot>("items_purchased", s => s.ItemsPurchased), Int<PlayerSnapshot>("items_picked_up", s => s.ItemsPickedUp),
+        Int<PlayerSnapshot>("round_start_money", s => s.RoundStartMoney), Int<PlayerSnapshot>("round_end_money", s => s.RoundEndMoney),
+        Int<PlayerSnapshot>("equipment_value_start", s => s.EquipmentValueStart),
+        Int<PlayerSnapshot>("equipment_value_end", s => s.EquipmentValueEnd), Int<PlayerSnapshot>("enemies_flashed", s => s.EnemiesFlashed),
+        Int<PlayerSnapshot>("teammates_flashed", s => s.TeammatesFlashed), Int<PlayerSnapshot>("effective_flashes", s => s.EffectiveFlashes),
+        Int<PlayerSnapshot>("effective_he_grenades", s => s.EffectiveHEGrenades), Int<PlayerSnapshot>("effective_molotovs", s => s.EffectiveMolotovs),
+        Int<PlayerSnapshot>("flash_waste", s => s.FlashWaste), Int<PlayerSnapshot>("multi_kill_nades", s => s.MultiKillNades),
+        Int<PlayerSnapshot>("nade_kills", s => s.NadeKills), Int<PlayerSnapshot>("entry_kills", s => s.EntryKills),
+        Int<PlayerSnapshot>("entry_deaths", s => s.EntryDeaths), Int<PlayerSnapshot>("entry_kill_attempts", s => s.EntryKillAttempts),
+        Int<PlayerSnapshot>("entry_kill_attempt_wins", s => s.EntryKillAttemptWins), Int<PlayerSnapshot>("trade_kills", s => s.TradeKills),
+        Int<PlayerSnapshot>("traded_deaths", s => s.TradedDeaths), Int<PlayerSnapshot>("high_impact_kills", s => s.HighImpactKills),
+        Int<PlayerSnapshot>("low_impact_kills", s => s.LowImpactKills), Int<PlayerSnapshot>("multi_kills", s => s.MultiKills),
+        Int<PlayerSnapshot>("multi_kill_2", s => s.MultiKill2), Int<PlayerSnapshot>("multi_kill_3", s => s.MultiKill3),
+        Int<PlayerSnapshot>("multi_kill_4", s => s.MultiKill4), Int<PlayerSnapshot>("multi_kill_5", s => s.MultiKill5),
+        Int<PlayerSnapshot>("opening_duels_won", s => s.OpeningDuelsWon), Int<PlayerSnapshot>("opening_duels_lost", s => s.OpeningDuelsLost),
+        Int<PlayerSnapshot>("revenges", s => s.Revenges), Int<PlayerSnapshot>("clutches_won", s => s.ClutchesWon),
+        Int<PlayerSnapshot>("clutches_lost", s => s.ClutchesLost), Int<PlayerSnapshot>("clutch_kills", s => s.ClutchKills),
+        Dec<PlayerSnapshot>("clutch_points", "", s => s.ClutchPoints), Int<PlayerSnapshot>("mvps_eliminations", s => s.MvpsEliminations),
+        Int<PlayerSnapshot>("mvps_bomb", s => s.MvpsBomb), Int<PlayerSnapshot>("mvps_hostage", s => s.MvpsHostage),
+        Int<PlayerSnapshot>("headshots_hit", s => s.HeadshotsHit), Int<PlayerSnapshot>("chest_hits", s => s.ChestHits),
+        Int<PlayerSnapshot>("stomach_hits", s => s.StomachHits), Int<PlayerSnapshot>("arm_hits", s => s.ArmHits),
+        Int<PlayerSnapshot>("leg_hits", s => s.LegHits), Dec<PlayerSnapshot>("kd_ratio", "", s => s.KDRatio),
+        Dec<PlayerSnapshot>("headshot_percentage", "", s => s.HeadshotPercentage),
+        Dec<PlayerSnapshot>("accuracy_percentage", "", s => s.AccuracyPercentage), Dec<PlayerSnapshot>("kast_percentage", "", s => s.KASTPercentage),
+        Dec<PlayerSnapshot>("average_damage_per_round", "", s => s.AverageDamagePerRound), Dec<PlayerSnapshot>("hltv_rating", "", s => s.HLTVRating),
+        Dec<PlayerSnapshot>("impact_rating", "", s => s.ImpactRating), Dec<PlayerSnapshot>("survival_rating", "", s => s.SurvivalRating),
+        Dec<PlayerSnapshot>("utility_score", "", s => s.UtilityScore), Int<PlayerSnapshot>("noscope_kills", s => s.NoscopeKills),
+        Int<PlayerSnapshot>("thru_smoke_kills", s => s.ThruSmokeKills), Int<PlayerSnapshot>("attacker_blind_kills", s => s.AttackerBlindKills),
+        Int<PlayerSnapshot>("wallbang_kills", s => s.WallbangKills), Int<PlayerSnapshot>("pings", s => s.Pings),
+        Int<PlayerSnapshot>("footsteps", s => s.Footsteps), Dec<PlayerSnapshot>("round_swing", "", s => s.RoundSwing),
+        Int<PlayerSnapshot>("team_kills", s => s.TeamKills), Int<PlayerSnapshot>("suicides", s => s.Suicides),
+        Int<PlayerSnapshot>("clutch_1v1_attempts", s => s.Clutch1v1Attempts), Int<PlayerSnapshot>("clutch_1v1_wins", s => s.Clutch1v1Wins),
+        Int<PlayerSnapshot>("clutch_1v2_attempts", s => s.Clutch1v2Attempts), Int<PlayerSnapshot>("clutch_1v2_wins", s => s.Clutch1v2Wins),
+        Int<PlayerSnapshot>("clutch_1v3_attempts", s => s.Clutch1v3Attempts), Int<PlayerSnapshot>("clutch_1v3_wins", s => s.Clutch1v3Wins),
+        Int<PlayerSnapshot>("clutch_1v4_attempts", s => s.Clutch1v4Attempts), Int<PlayerSnapshot>("clutch_1v4_wins", s => s.Clutch1v4Wins),
+        Int<PlayerSnapshot>("clutch_1v5_attempts", s => s.Clutch1v5Attempts), Int<PlayerSnapshot>("clutch_1v5_wins", s => s.Clutch1v5Wins),
+        Int<PlayerSnapshot>("kill_reward", s => s.KillReward), Int<PlayerSnapshot>("cash_earned", s => s.CashEarned),
+        Int<PlayerSnapshot>("money_saved", s => s.MoneySaved), Int<PlayerSnapshot>("live_time", s => s.LiveTime),
+        Int<PlayerSnapshot>("team_damage", s => s.TeamDamage), Int<PlayerSnapshot>("multi_kill_1", s => s.MultiKill1),
+        Int<PlayerSnapshot>("ct_kills", s => s.CtKills), Int<PlayerSnapshot>("t_kills", s => s.TKills),
+        Int<PlayerSnapshot>("ct_deaths", s => s.CtDeaths), Int<PlayerSnapshot>("t_deaths", s => s.TDeaths),
+        Int<PlayerSnapshot>("ct_damage", s => s.CtDamage), Int<PlayerSnapshot>("t_damage", s => s.TDamage),
+        Int<PlayerSnapshot>("ct_first_kills", s => s.CtFirstKills), Int<PlayerSnapshot>("t_first_kills", s => s.TFirstKills),
+        Int<PlayerSnapshot>("ct_first_deaths", s => s.CtFirstDeaths), Int<PlayerSnapshot>("t_first_deaths", s => s.TFirstDeaths),
+        Int<PlayerSnapshot>("rounds_survived", s => s.RoundsSurvived), Int<PlayerSnapshot>("rounds_traded", s => s.RoundsTraded),
+        Int<PlayerSnapshot>("ct_rounds_won", s => s.CtRoundsWon), Int<PlayerSnapshot>("t_rounds_won", s => s.TRoundsWon),
+        Int<PlayerSnapshot>("pistol_rounds_played", s => s.PistolRoundsPlayed), Int<PlayerSnapshot>("pistol_rounds_won", s => s.PistolRoundsWon),
+        Int<PlayerSnapshot>("pistol_round_kills", s => s.PistolRoundKills), Dec<PlayerSnapshot>("kill_distance_total", "", s => s.KillDistanceTotal),
+        Dec<PlayerSnapshot>("longest_kill", "", s => s.LongestKill)
+    ];
+
+    internal static string LifetimeMergeSql()
+    {
+        var columns = LifetimeColumns.Select(c => c.Name).ToList();
+        return $"""
+            INSERT INTO player_stats ({string.Join(", ", columns)})
+            SELECT {string.Join(", ", columns)} FROM temp_player_stats AS src
+            ON DUPLICATE KEY UPDATE {string.Join(", ", columns.Where(c => c != "steam_id").Select(c => $"{c} = src.{c}"))};
+            """;
+    }
+
     private async Task UpsertPlayersCoreAsync(IReadOnlyList<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
     {
         await using var connection = await _connectionFactory.CreateConnectionAsync(cancellationToken).ConfigureAwait(false);
 
-        // High-performance pattern for player stats (many columns):
-        // 1. Create a DataTable matching the full schema
-        // 2. Bulk copy to a temporary table
-        // 3. Perform a server-side merge into the main tables
-
-        var dataTable = new DataTable();
-        // Add all columns
-        dataTable.Columns.Add("steam_id", typeof(ulong));
-        dataTable.Columns.Add("name", typeof(string));
-        dataTable.Columns.Add("kills", typeof(int));
-        dataTable.Columns.Add("deaths", typeof(int));
-        dataTable.Columns.Add("assists", typeof(int));
-        dataTable.Columns.Add("headshots", typeof(int));
-        dataTable.Columns.Add("damage_dealt", typeof(int));
-        dataTable.Columns.Add("damage_taken", typeof(int));
-        dataTable.Columns.Add("damage_armor", typeof(int));
-        dataTable.Columns.Add("shots_fired", typeof(int));
-        dataTable.Columns.Add("shots_hit", typeof(int));
-        dataTable.Columns.Add("mvps", typeof(int));
-        dataTable.Columns.Add("score", typeof(int));
-        dataTable.Columns.Add("rounds_played", typeof(int));
-        dataTable.Columns.Add("rounds_won", typeof(int));
-        dataTable.Columns.Add("kast_rounds", typeof(int));
-        dataTable.Columns.Add("total_spawns", typeof(int));
-        dataTable.Columns.Add("playtime_seconds", typeof(int));
-        dataTable.Columns.Add("ct_rounds", typeof(int));
-        dataTable.Columns.Add("t_rounds", typeof(int));
-        dataTable.Columns.Add("grenades_thrown", typeof(int));
-        dataTable.Columns.Add("flashes_thrown", typeof(int));
-        dataTable.Columns.Add("smokes_thrown", typeof(int));
-        dataTable.Columns.Add("molotovs_thrown", typeof(int));
-        dataTable.Columns.Add("he_grenades_thrown", typeof(int));
-        dataTable.Columns.Add("decoys_thrown", typeof(int));
-        dataTable.Columns.Add("players_blinded", typeof(int));
-        dataTable.Columns.Add("times_blinded", typeof(int));
-        dataTable.Columns.Add("flash_assists", typeof(int));
-        dataTable.Columns.Add("total_blind_time", typeof(decimal));
-        dataTable.Columns.Add("total_blind_time_inflicted", typeof(decimal));
-        dataTable.Columns.Add("utility_damage_dealt", typeof(int));
-        dataTable.Columns.Add("utility_damage_taken", typeof(int));
-        dataTable.Columns.Add("bomb_plants", typeof(int));
-        dataTable.Columns.Add("bomb_defuses", typeof(int));
-        dataTable.Columns.Add("bomb_explosions", typeof(int));
-        dataTable.Columns.Add("bomb_plant_attempts", typeof(int));
-        dataTable.Columns.Add("bomb_plant_aborts", typeof(int));
-        dataTable.Columns.Add("bomb_defuse_attempts", typeof(int));
-        dataTable.Columns.Add("bomb_defuse_aborts", typeof(int));
-        dataTable.Columns.Add("bomb_defuse_with_kit", typeof(int));
-        dataTable.Columns.Add("bomb_defuse_without_kit", typeof(int));
-        dataTable.Columns.Add("bomb_drops", typeof(int));
-        dataTable.Columns.Add("bomb_pickups", typeof(int));
-        dataTable.Columns.Add("defuser_pickups", typeof(int));
-        dataTable.Columns.Add("clutch_defuses", typeof(int));
-        dataTable.Columns.Add("total_plant_time", typeof(int));
-        dataTable.Columns.Add("total_defuse_time", typeof(int));
-        dataTable.Columns.Add("bomb_kills", typeof(int));
-        dataTable.Columns.Add("bomb_deaths", typeof(int));
-        dataTable.Columns.Add("jumps", typeof(int));
-        dataTable.Columns.Add("money_spent", typeof(int));
-        dataTable.Columns.Add("equipment_value", typeof(int));
-        dataTable.Columns.Add("items_purchased", typeof(int));
-        dataTable.Columns.Add("items_picked_up", typeof(int));
-        dataTable.Columns.Add("round_start_money", typeof(int));
-        dataTable.Columns.Add("round_end_money", typeof(int));
-        dataTable.Columns.Add("equipment_value_start", typeof(int));
-        dataTable.Columns.Add("equipment_value_end", typeof(int));
-        dataTable.Columns.Add("enemies_flashed", typeof(int));
-        dataTable.Columns.Add("teammates_flashed", typeof(int));
-        dataTable.Columns.Add("effective_flashes", typeof(int));
-        dataTable.Columns.Add("effective_he_grenades", typeof(int));
-        dataTable.Columns.Add("effective_molotovs", typeof(int));
-        dataTable.Columns.Add("flash_waste", typeof(int));
-        dataTable.Columns.Add("multi_kill_nades", typeof(int));
-        dataTable.Columns.Add("nade_kills", typeof(int));
-        dataTable.Columns.Add("entry_kills", typeof(int));
-        dataTable.Columns.Add("entry_deaths", typeof(int));
-        dataTable.Columns.Add("entry_kill_attempts", typeof(int));
-        dataTable.Columns.Add("entry_kill_attempt_wins", typeof(int));
-        dataTable.Columns.Add("trade_kills", typeof(int));
-        dataTable.Columns.Add("traded_deaths", typeof(int));
-        dataTable.Columns.Add("high_impact_kills", typeof(int));
-        dataTable.Columns.Add("low_impact_kills", typeof(int));
-        dataTable.Columns.Add("multi_kills", typeof(int));
-        dataTable.Columns.Add("multi_kill_2", typeof(int));
-        dataTable.Columns.Add("multi_kill_3", typeof(int));
-        dataTable.Columns.Add("multi_kill_4", typeof(int));
-        dataTable.Columns.Add("multi_kill_5", typeof(int));
-        dataTable.Columns.Add("opening_duels_won", typeof(int));
-        dataTable.Columns.Add("opening_duels_lost", typeof(int));
-        dataTable.Columns.Add("revenges", typeof(int));
-        dataTable.Columns.Add("clutches_won", typeof(int));
-        dataTable.Columns.Add("clutches_lost", typeof(int));
-        dataTable.Columns.Add("clutch_kills", typeof(int));
-        dataTable.Columns.Add("clutch_points", typeof(decimal));
-        dataTable.Columns.Add("mvps_eliminations", typeof(int));
-        dataTable.Columns.Add("mvps_bomb", typeof(int));
-        dataTable.Columns.Add("mvps_hostage", typeof(int));
-        dataTable.Columns.Add("headshots_hit", typeof(int));
-        dataTable.Columns.Add("chest_hits", typeof(int));
-        dataTable.Columns.Add("stomach_hits", typeof(int));
-        dataTable.Columns.Add("arm_hits", typeof(int));
-        dataTable.Columns.Add("leg_hits", typeof(int));
-        dataTable.Columns.Add("kd_ratio", typeof(decimal));
-        dataTable.Columns.Add("headshot_percentage", typeof(decimal));
-        dataTable.Columns.Add("accuracy_percentage", typeof(decimal));
-        dataTable.Columns.Add("kast_percentage", typeof(decimal));
-        dataTable.Columns.Add("average_damage_per_round", typeof(decimal));
-        dataTable.Columns.Add("hltv_rating", typeof(decimal));
-        dataTable.Columns.Add("impact_rating", typeof(decimal));
-        dataTable.Columns.Add("survival_rating", typeof(decimal));
-        dataTable.Columns.Add("utility_score", typeof(decimal));
-        dataTable.Columns.Add("noscope_kills", typeof(int));
-        dataTable.Columns.Add("thru_smoke_kills", typeof(int));
-        dataTable.Columns.Add("attacker_blind_kills", typeof(int));
-        dataTable.Columns.Add("flash_assisted_kills", typeof(int));
-        dataTable.Columns.Add("wallbang_kills", typeof(int));
-        dataTable.Columns.Add("pings", typeof(int));
-        dataTable.Columns.Add("footsteps", typeof(int));
-        dataTable.Columns.Add("round_swing", typeof(decimal));
-        dataTable.Columns.Add("team_kills", typeof(int));
-        dataTable.Columns.Add("suicides", typeof(int));
-        dataTable.Columns.Add("clutch_1v1_attempts", typeof(int));
-        dataTable.Columns.Add("clutch_1v1_wins", typeof(int));
-        dataTable.Columns.Add("clutch_1v2_attempts", typeof(int));
-        dataTable.Columns.Add("clutch_1v2_wins", typeof(int));
-        dataTable.Columns.Add("clutch_1v3_attempts", typeof(int));
-        dataTable.Columns.Add("clutch_1v3_wins", typeof(int));
-        dataTable.Columns.Add("clutch_1v4_attempts", typeof(int));
-        dataTable.Columns.Add("clutch_1v4_wins", typeof(int));
-        dataTable.Columns.Add("clutch_1v5_attempts", typeof(int));
-        dataTable.Columns.Add("clutch_1v5_wins", typeof(int));
-        dataTable.Columns.Add("kill_reward", typeof(int));
-        dataTable.Columns.Add("cash_earned", typeof(int));
-        dataTable.Columns.Add("money_saved", typeof(int));
-        dataTable.Columns.Add("live_time", typeof(int));
-        dataTable.Columns.Add("team_damage", typeof(int));
-        dataTable.Columns.Add("multi_kill_1", typeof(int));
-        dataTable.Columns.Add("ct_kills", typeof(int));
-        dataTable.Columns.Add("t_kills", typeof(int));
-        dataTable.Columns.Add("ct_deaths", typeof(int));
-        dataTable.Columns.Add("t_deaths", typeof(int));
-        dataTable.Columns.Add("ct_damage", typeof(int));
-        dataTable.Columns.Add("t_damage", typeof(int));
-        dataTable.Columns.Add("ct_first_kills", typeof(int));
-        dataTable.Columns.Add("t_first_kills", typeof(int));
-        dataTable.Columns.Add("ct_first_deaths", typeof(int));
-        dataTable.Columns.Add("t_first_deaths", typeof(int));
-        dataTable.Columns.Add("rounds_survived", typeof(int));
-        dataTable.Columns.Add("rounds_traded", typeof(int));
-        dataTable.Columns.Add("ct_rounds_won", typeof(int));
-        dataTable.Columns.Add("t_rounds_won", typeof(int));
-        dataTable.Columns.Add("pistol_rounds_played", typeof(int));
-        dataTable.Columns.Add("pistol_rounds_won", typeof(int));
-        dataTable.Columns.Add("pistol_round_kills", typeof(int));
-        dataTable.Columns.Add("kill_distance_total", typeof(decimal));
-        dataTable.Columns.Add("longest_kill", typeof(decimal));
-
-        foreach (var s in snapshots)
-        {
-            dataTable.Rows.Add(
-                s.SteamId, s.Name, s.Kills, s.Deaths, s.Assists, s.Headshots, s.DamageDealt, s.DamageTaken, s.DamageArmor,
-                s.ShotsFired, s.ShotsHit, s.Mvps, s.Score, s.RoundsPlayed, s.RoundsWon, s.KASTRounds, s.TotalSpawns, s.PlaytimeSeconds,
-                s.CtRounds, s.TRounds, s.GrenadesThrown, s.FlashesThrown, s.SmokesThrown, s.MolotovsThrown,
-                s.HeGrenadesThrown, s.DecoysThrown, s.PlayersBlinded, s.TimesBlinded,
-                s.FlashAssists, s.TotalBlindTime, s.TotalBlindTimeInflicted, s.UtilityDamageDealt, s.UtilityDamageTaken,
-                s.BombPlants, s.BombDefuses, s.BombExplosions, s.BombPlantAttempts, s.BombPlantAborts, s.BombDefuseAttempts,
-                s.BombDefuseAborts, s.BombDefuseWithKit, s.BombDefuseWithoutKit, s.BombDrops, s.BombPickups,
-                s.DefuserPickups, s.ClutchDefuses, s.TotalPlantTime, s.TotalDefuseTime,
-                s.BombKills, s.BombDeaths, s.Jumps,
-                s.MoneySpent, s.EquipmentValue, s.ItemsPurchased, s.ItemsPickedUp,
-                s.RoundStartMoney, s.RoundEndMoney, s.EquipmentValueStart, s.EquipmentValueEnd,
-                s.EnemiesFlashed, s.TeammatesFlashed, s.EffectiveFlashes, s.EffectiveHEGrenades,
-                s.EffectiveMolotovs, s.FlashWaste, s.MultiKillNades, s.NadeKills,
-                s.EntryKills, s.EntryDeaths, s.EntryKillAttempts, s.EntryKillAttemptWins,
-                s.TradeKills, s.TradedDeaths, s.HighImpactKills, s.LowImpactKills, s.MultiKills,
-                s.MultiKill2, s.MultiKill3, s.MultiKill4, s.MultiKill5, s.OpeningDuelsWon, s.OpeningDuelsLost,
-                s.Revenges, s.ClutchesWon, s.ClutchesLost, s.ClutchKills, s.ClutchPoints, s.MvpsEliminations, s.MvpsBomb, s.MvpsHostage,
-                s.HeadshotsHit, s.ChestHits, s.StomachHits, s.ArmHits, s.LegHits,
-                s.KDRatio, s.HeadshotPercentage, s.AccuracyPercentage, s.KASTPercentage,
-                s.AverageDamagePerRound, s.HLTVRating, s.ImpactRating, s.SurvivalRating, s.UtilityScore,
-                s.NoscopeKills, s.ThruSmokeKills, s.AttackerBlindKills, s.FlashAssistedKills, s.WallbangKills,
-                s.Pings, s.Footsteps, s.RoundSwing,
-                s.TeamKills, s.Suicides,
-                s.Clutch1v1Attempts, s.Clutch1v1Wins, s.Clutch1v2Attempts, s.Clutch1v2Wins, s.Clutch1v3Attempts, s.Clutch1v3Wins,
-                s.Clutch1v4Attempts, s.Clutch1v4Wins, s.Clutch1v5Attempts, s.Clutch1v5Wins,
-                s.KillReward, s.CashEarned, s.MoneySaved, s.LiveTime,
-                s.TeamDamage, s.MultiKill1, s.CtKills, s.TKills, s.CtDeaths, s.TDeaths, s.CtDamage, s.TDamage,
-                s.CtFirstKills, s.TFirstKills, s.CtFirstDeaths, s.TFirstDeaths,
-                s.RoundsSurvived, s.RoundsTraded, s.CtRoundsWon, s.TRoundsWon,
-                s.PistolRoundsPlayed, s.PistolRoundsWon, s.PistolRoundKills, s.KillDistanceTotal, s.LongestKill
-            );
-        }
-
+        // Bulk copy into a temporary copy of the table, then merge on the server.
+        var dataTable = ToDataTable(LifetimeColumns, snapshots);
         await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_player_stats LIKE player_stats;", cancellationToken).ConfigureAwait(false);
 
         var bulkCopy = new MySqlBulkCopy(connection)
@@ -657,9 +554,7 @@ public sealed class StatsRepository : IStatsRepository
             DestinationTableName = "temp_player_stats",
             BulkCopyTimeout = (int)ResiliencePolicies.AttemptTimeout.TotalSeconds
         };
-        // Map by destination column name so DataTable column order can never silently misalign the copy.
         AddColumnMappingsByName(bulkCopy, dataTable);
-
         EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, cancellationToken).ConfigureAwait(false));
 
         // Parent rows must exist before the FK-constrained merge into player_stats.
@@ -667,84 +562,15 @@ public sealed class StatsRepository : IStatsRepository
             "INSERT INTO players (steam_id, name) SELECT steam_id, name FROM temp_player_stats AS src " +
             "ON DUPLICATE KEY UPDATE name = src.name, last_seen = CURRENT_TIMESTAMP;", cancellationToken).ConfigureAwait(false);
 
-        const string mergeSql = """
-            INSERT INTO player_stats
-            SELECT * FROM temp_player_stats AS src
-            ON DUPLICATE KEY UPDATE
-                name = src.name, kills = src.kills, deaths = src.deaths, assists = src.assists,
-                headshots = src.headshots, damage_dealt = src.damage_dealt, damage_taken = src.damage_taken,
-                damage_armor = src.damage_armor, shots_fired = src.shots_fired, shots_hit = src.shots_hit,
-                mvps = src.mvps, score = src.score, rounds_played = src.rounds_played,
-                rounds_won = src.rounds_won, kast_rounds = src.kast_rounds,
-                total_spawns = src.total_spawns, playtime_seconds = src.playtime_seconds,
-                ct_rounds = src.ct_rounds, t_rounds = src.t_rounds, 
-                grenades_thrown = src.grenades_thrown,
-                flashes_thrown = src.flashes_thrown, smokes_thrown = src.smokes_thrown, molotovs_thrown = src.molotovs_thrown,
-                he_grenades_thrown = src.he_grenades_thrown, decoys_thrown = src.decoys_thrown,
-                players_blinded = src.players_blinded,
-                times_blinded = src.times_blinded, flash_assists = src.flash_assists,
-                total_blind_time = src.total_blind_time, total_blind_time_inflicted = src.total_blind_time_inflicted,
-                utility_damage_dealt = src.utility_damage_dealt, utility_damage_taken = src.utility_damage_taken,
-                bomb_plants = src.bomb_plants, bomb_defuses = src.bomb_defuses, bomb_explosions = src.bomb_explosions,
-                bomb_plant_attempts = src.bomb_plant_attempts, bomb_plant_aborts = src.bomb_plant_aborts,
-                bomb_defuse_attempts = src.bomb_defuse_attempts, bomb_defuse_aborts = src.bomb_defuse_aborts,
-                bomb_defuse_with_kit = src.bomb_defuse_with_kit, bomb_defuse_without_kit = src.bomb_defuse_without_kit,
-                bomb_drops = src.bomb_drops, bomb_pickups = src.bomb_pickups,
-                defuser_pickups = src.defuser_pickups,
-                clutch_defuses = src.clutch_defuses, total_plant_time = src.total_plant_time,
-                total_defuse_time = src.total_defuse_time, bomb_kills = src.bomb_kills, bomb_deaths = src.bomb_deaths,
-                jumps = src.jumps,
-                money_spent = src.money_spent, equipment_value = src.equipment_value,
-                items_purchased = src.items_purchased, items_picked_up = src.items_picked_up,
-                round_start_money = src.round_start_money, round_end_money = src.round_end_money,
-                equipment_value_start = src.equipment_value_start, equipment_value_end = src.equipment_value_end,
-                enemies_flashed = src.enemies_flashed, teammates_flashed = src.teammates_flashed,
-                effective_flashes = src.effective_flashes,
-                effective_he_grenades = src.effective_he_grenades, effective_molotovs = src.effective_molotovs,
-                flash_waste = src.flash_waste, multi_kill_nades = src.multi_kill_nades, nade_kills = src.nade_kills,
-                entry_kills = src.entry_kills, entry_deaths = src.entry_deaths,
-                entry_kill_attempts = src.entry_kill_attempts, entry_kill_attempt_wins = src.entry_kill_attempt_wins,
-                trade_kills = src.trade_kills, traded_deaths = src.traded_deaths,
-                high_impact_kills = src.high_impact_kills, low_impact_kills = src.low_impact_kills,
-                multi_kills = src.multi_kills, multi_kill_2 = src.multi_kill_2, multi_kill_3 = src.multi_kill_3,
-                multi_kill_4 = src.multi_kill_4, multi_kill_5 = src.multi_kill_5,
-                opening_duels_won = src.opening_duels_won,
-                opening_duels_lost = src.opening_duels_lost, revenges = src.revenges,
-                clutches_won = src.clutches_won, clutches_lost = src.clutches_lost,
-                clutch_kills = src.clutch_kills, clutch_points = src.clutch_points,
-                mvps_eliminations = src.mvps_eliminations, mvps_bomb = src.mvps_bomb, mvps_hostage = src.mvps_hostage,
-                headshots_hit = src.headshots_hit, chest_hits = src.chest_hits, stomach_hits = src.stomach_hits,
-                arm_hits = src.arm_hits, leg_hits = src.leg_hits,
-                kd_ratio = src.kd_ratio, headshot_percentage = src.headshot_percentage,
-                accuracy_percentage = src.accuracy_percentage, kast_percentage = src.kast_percentage,
-                average_damage_per_round = src.average_damage_per_round, hltv_rating = src.hltv_rating,
-                impact_rating = src.impact_rating, survival_rating = src.survival_rating,
-                utility_score = src.utility_score,
-                noscope_kills = src.noscope_kills, thru_smoke_kills = src.thru_smoke_kills,
-                attacker_blind_kills = src.attacker_blind_kills, flash_assisted_kills = src.flash_assisted_kills,
-                wallbang_kills = src.wallbang_kills, pings = src.pings, footsteps = src.footsteps,
-                round_swing = src.round_swing,
-                team_kills = src.team_kills, suicides = src.suicides,
-                clutch_1v1_attempts = src.clutch_1v1_attempts, clutch_1v1_wins = src.clutch_1v1_wins,
-                clutch_1v2_attempts = src.clutch_1v2_attempts, clutch_1v2_wins = src.clutch_1v2_wins,
-                clutch_1v3_attempts = src.clutch_1v3_attempts, clutch_1v3_wins = src.clutch_1v3_wins,
-                clutch_1v4_attempts = src.clutch_1v4_attempts, clutch_1v4_wins = src.clutch_1v4_wins,
-                clutch_1v5_attempts = src.clutch_1v5_attempts, clutch_1v5_wins = src.clutch_1v5_wins,
-                kill_reward = src.kill_reward, cash_earned = src.cash_earned, money_saved = src.money_saved,
-                live_time = src.live_time,
-                team_damage = src.team_damage, multi_kill_1 = src.multi_kill_1,
-                ct_kills = src.ct_kills, t_kills = src.t_kills, ct_deaths = src.ct_deaths, t_deaths = src.t_deaths,
-                ct_damage = src.ct_damage, t_damage = src.t_damage,
-                ct_first_kills = src.ct_first_kills, t_first_kills = src.t_first_kills,
-                ct_first_deaths = src.ct_first_deaths, t_first_deaths = src.t_first_deaths,
-                rounds_survived = src.rounds_survived, rounds_traded = src.rounds_traded,
-                ct_rounds_won = src.ct_rounds_won, t_rounds_won = src.t_rounds_won,
-                pistol_rounds_played = src.pistol_rounds_played, pistol_rounds_won = src.pistol_rounds_won,
-                pistol_round_kills = src.pistol_round_kills,
-                kill_distance_total = src.kill_distance_total, longest_kill = src.longest_kill;
-            """;
+        await ExecuteAsync(connection, LifetimeMergeSql(), cancellationToken).ConfigureAwait(false);
+    }
 
-        await ExecuteAsync(connection, mergeSql, cancellationToken).ConfigureAwait(false);
+    private static DataTable ToDataTable<T>(IReadOnlyList<Column<T>> columns, IReadOnlyList<T> rows)
+    {
+        var dataTable = new DataTable();
+        foreach (var column in columns) dataTable.Columns.Add(column.Name, column.ClrType);
+        foreach (var row in rows) dataTable.Rows.Add(columns.Select(column => column.Value(row)).ToArray());
+        return dataTable;
     }
 
     private static Task<int> ExecuteAsync(MySqlConnection connection, string sql, CancellationToken cancellationToken) =>

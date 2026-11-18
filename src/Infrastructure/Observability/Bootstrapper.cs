@@ -16,9 +16,6 @@ public static class Bootstrapper
         new LoggerConfiguration()
             .MinimumLevel.Is(GetSerilogLevel(config.LogLevel))
             .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
-            // AddResiliencePipeline turns Polly's telemetry on, which logs every database call at Information
-            // ("Resilience pipeline executed"); the pipeline's own retry and breaker callbacks log the failures.
-            .MinimumLevel.Override("Polly", LogEventLevel.Warning)
             .Enrich.FromLogContext()
             .Enrich.WithProperty("Version", Plugin.Version)
             .WriteTo.Console()

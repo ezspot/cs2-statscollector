@@ -76,6 +76,36 @@ public class SchemaTests
     }
 
     [Fact]
+    public void LifetimeColumnsAreThePlayerStatsTableAndTheMergeUpdatesThemAll()
+    {
+        var columns = StatsRepository.LifetimeColumns.Select(c => c.Name).ToList();
+        // updated_at is the server's; everything else is written, so a column added to init.sql alone fails here.
+        Assert.Equal(Tables["player_stats"].Where(c => c != "updated_at").Order(), columns.Order());
+
+        var sql = StatsRepository.LifetimeMergeSql();
+        Assert.Contains($"INSERT INTO player_stats ({string.Join(", ", columns)})", sql);
+        Assert.Contains($"SELECT {string.Join(", ", columns)} FROM temp_player_stats AS src", sql);
+        var update = sql[sql.IndexOf("ON DUPLICATE KEY UPDATE", StringComparison.Ordinal)..];
+        foreach (var column in columns.Where(c => c != "steam_id")) Assert.Contains($" {column} = src.{column}", update);
+        Assert.DoesNotContain(" steam_id = src.steam_id", update);
+    }
+
+    [Fact]
+    public void EveryLifetimeColumnWritesTheSnapshotValueOfItsName()
+    {
+        // Build gives every parameter its own value, so a column that reads another property fails here.
+        var snapshot = DeltaTests.Build(1);
+        var properties = typeof(PlayerSnapshot).GetProperties().ToDictionary(p => p.Name.ToLowerInvariant());
+        foreach (var column in StatsRepository.LifetimeColumns)
+        {
+            var property = properties[column.Name.Replace("_", "")];
+            Assert.Equal(property.GetValue(snapshot), column.Value(snapshot));
+            // The blind times are floats stored as DECIMAL.
+            Assert.Equal(property.PropertyType == typeof(float) ? typeof(decimal) : property.PropertyType, column.ClrType);
+        }
+    }
+
+    [Fact]
     public void LifetimeRowMapsOntoPlayerStatsColumns()
     {
         // Dapper matches snake_case columns to the row's properties by dropping the underscores and ignoring case.

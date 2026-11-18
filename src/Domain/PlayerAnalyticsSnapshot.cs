@@ -41,7 +41,6 @@ public sealed record PlayerAnalyticsSnapshot(
     decimal SurvivalRating,
     decimal UtilityScore,
     decimal ClutchPoints,
-    int FlashAssistedKills,
     int WallbangKills,
     string IdempotencyKey
 );

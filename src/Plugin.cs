@@ -5,7 +5,6 @@ using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using Polly;
 using Serilog;
 using statsCollector.Config;
 using statsCollector.Domain;
@@ -134,11 +133,8 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton(_cancellationTokenSource);
 
-        services.AddResiliencePipeline("database", (builder, context) =>
-        {
-            var logger = context.ServiceProvider.GetRequiredService<ILogger<Plugin>>();
-            builder.AddPipeline(ResiliencePolicies.CreateDatabasePipeline(logger));
-        });
+        // One pipeline for every database call: both writers and the join-time reads share its circuit breaker.
+        services.AddSingleton(provider => ResiliencePolicies.CreateDatabasePipeline(provider.GetRequiredService<ILogger<Plugin>>()));
 
         services.AddSingleton<IConnectionFactory, ConnectionFactory>();
         services.AddSingleton<ISchemaInitializer, SchemaInitializer>();
@@ -208,8 +204,9 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             // thread, and with the database down every step would otherwise wait out its own timeout. The wait ends 3 s
             // after the budget: what the budget's cancellation sets off normally finishes inside it. That is the stats
             // writer's and then the position writer's command in flight, each cancelled through a connection that may
-            // take CancellationTimeout = 1 s, and then the container's disposal. A step that overruns both (a connect
-            // ignores the token) finishes in the background, still on that token, so it is not disposed.
+            // take CancellationTimeout = 1 s, the stats writer's spill (PersistenceChannel waits up to 2 s for it), and
+            // the container's disposal. A step that overruns both finishes in the background, still on that token, so
+            // it is not disposed.
             var budget = TimeSpan.FromSeconds(7);
             var wait = budget + TimeSpan.FromSeconds(3);
             if (!CleanupAsync(new CancellationTokenSource(budget).Token).Wait(wait))
@@ -242,6 +239,11 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             }
 
             _logger.LogInformation("statsCollector cleanup complete.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Expected with the database down; the writers have logged what they kept and what they lost.
+            _logger.LogWarning("statsCollector cleanup ran out of time before everything was written.");
         }
         catch (Exception ex)
         {

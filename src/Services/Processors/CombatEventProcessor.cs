@@ -417,7 +417,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
             if (_lastKillAt[victimIndex] != default && tradedSteamId != attackerState.SteamId &&
                 (now - _lastKillAt[victimIndex]).TotalSeconds <= tradeWindowSeconds)
             {
-                _playerSessions.MutatePlayer(attackerState.SteamId, stats => { stats.Combat.TradeKills++; stats.Round.DidTradeThisRound = true; });
+                _playerSessions.MutatePlayer(attackerState.SteamId, stats => stats.Combat.TradeKills++);
                 if (tradedSteamId != 0) _playerSessions.MutatePlayer(tradedSteamId, stats => { stats.Combat.TradedDeaths++; stats.Round.WasTradedThisRound = true; });
                 _lastVictimOf[victimIndex] = 0;
                 _lastKillAt[victimIndex] = default;
@@ -452,11 +452,7 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                 stats.Round.HadAssistThisRound = true;
                 stats.Combat.Assists++;
                 stats.CurrentTeam = assisterState.Team;
-                if (flashAssisted)
-                {
-                    stats.Utility.FlashAssists++;
-                    stats.Round.WasFlashedForKill = true;
-                }
+                if (flashAssisted) stats.Utility.FlashAssists++;
             });
         }
     }

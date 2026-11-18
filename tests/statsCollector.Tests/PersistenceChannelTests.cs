@@ -29,7 +29,7 @@ public class PersistenceChannelTests
         await channel.FlushAsync();
         await channel.StopAsync(CancellationToken.None);
 
-        Assert.Equal(["void m1 >=5", "rounds[m1 r4 k9, m1 r5 k27, m2 r5 k36]"], log);
+        Assert.Equal(["void m1 >=5", "rounds[m1 r4 k1, m1 r5 k3, m2 r5 k4]"], log);
     }
 
     [Fact]
@@ -62,7 +62,7 @@ public class PersistenceChannelTests
         await second.StopAsync(CancellationToken.None);
 
         Assert.False(File.Exists(path), "spill file removed once replayed");
-        Assert.Equal(["round m1 #1", "rounds[m1 r1 k9]"], log);
+        Assert.Equal(["round m1 #1", "rounds[m1 r1 k1]"], log);
     }
 
     [Fact]
@@ -120,6 +120,25 @@ public class PersistenceChannelTests
         Assert.Equal(1, repo.Attempts);
         var spilled = JsonSerializer.Deserialize<List<List<StatsUpdate>>>(File.ReadAllText(path))!;
         Assert.Equal(new RoundStartUpdate("m1", 1), Assert.Single(Assert.Single(spilled)));
+    }
+
+    // A cancelled command takes a moment to end (its KILL QUERY needs a connection). The stop gives up waiting when
+    // its budget runs out; were it to return then, a server exiting right after the unload would lose the buffer.
+    [Fact]
+    public async Task StopReturnsOnlyAfterAWorkerThatIsSlowToStopHasSpilled()
+    {
+        var repo = new HungRepo { CancelLag = TimeSpan.FromMilliseconds(300) };
+        var path = NewSpillPath();
+        var channel = NewChannel(repo, path);
+        channel.TryWrite(new RoundStartUpdate("m1", 1));
+        await channel.StartAsync(CancellationToken.None);
+        await repo.Writing.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        using var budget = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => channel.StopAsync(budget.Token));
+
+        Assert.True(channel.ExecuteTask!.IsCompleted);
+        Assert.True(File.Exists(path));
     }
 
     [Fact]
@@ -189,7 +208,7 @@ public class PersistenceChannelTests
         Path.Combine(Directory.CreateTempSubdirectory("statscollector-tests").FullName, "pending_stats.json");
 
     private static PlayerSnapshot Round(int round, int scale, string matchUuid = "m1") =>
-        DeltaTests.Build(scale, matchUuid) with { RoundNumber = round };
+        DeltaTests.Build(scale, matchUuid) with { RoundNumber = round, Kills = scale };
 
     private sealed class FakeRepo(List<string> log) : IStatsRepository
     {
@@ -226,12 +245,22 @@ public class PersistenceChannelTests
     {
         public readonly TaskCompletionSource Writing = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public int Attempts;
+        // How long a write takes to end once it is cancelled.
+        public TimeSpan CancelLag;
 
         private async Task Hang(CancellationToken ct)
         {
             Interlocked.Increment(ref Attempts);
             Writing.TrySetResult();
-            await Task.Delay(Timeout.Infinite, ct);
+            try
+            {
+                await Task.Delay(Timeout.Infinite, ct);
+            }
+            catch (OperationCanceledException) when (CancelLag > TimeSpan.Zero)
+            {
+                await Task.Delay(CancelLag);
+                throw;
+            }
         }
 
         public Task UpsertPlayersAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken ct) => Hang(ct);

@@ -234,7 +234,6 @@ public sealed class MatchStatsService(
             MolotovsThrown = D(s => s.MolotovsThrown),
             HeGrenadesThrown = D(s => s.HeGrenadesThrown),
             DecoysThrown = D(s => s.DecoysThrown),
-            PlayersBlinded = D(s => s.PlayersBlinded),
             TimesBlinded = D(s => s.TimesBlinded),
             FlashAssists = D(s => s.FlashAssists),
             UtilityDamageDealt = D(s => s.UtilityDamageDealt),
@@ -273,7 +272,6 @@ public sealed class MatchStatsService(
             NoscopeKills = D(s => s.NoscopeKills),
             ThruSmokeKills = D(s => s.ThruSmokeKills),
             AttackerBlindKills = D(s => s.AttackerBlindKills),
-            FlashAssistedKills = D(s => s.FlashAssistedKills),
             WallbangKills = D(s => s.WallbangKills),
             Revenges = D(s => s.Revenges),
             ClutchesWon = D(s => s.ClutchesWon),
@@ -418,7 +416,6 @@ public sealed class MatchStatsService(
             SurvivalRating: cur.SurvivalRating,
             UtilityScore: cur.UtilityScore,
             ClutchPoints: cur.ClutchPoints,
-            FlashAssistedKills: cur.FlashAssistedKills,
             WallbangKills: cur.WallbangKills,
             IdempotencyKey: $"{matchUuid}_{cur.SteamId}_Analytics");
     }
