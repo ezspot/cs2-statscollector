@@ -8,11 +8,7 @@ public sealed class PlayerStats
 {
     private bool _isDirty;
     private long _version;
-    public bool IsDirty
-    {
-        get => _isDirty;
-        private set => _isDirty = value;
-    }
+    public bool IsDirty => _isDirty;
 
     public long Version => _version;
     public void MarkDirty()
@@ -29,6 +25,9 @@ public sealed class PlayerStats
     // When this player's session started; used to derive playtime. Settable so a seeded lifetime
     // playtime can shift the origin backwards.
     public DateTime SessionStartUtc { get; private set; } = DateTime.UtcNow;
+
+    // A held session that continues on reconnect moves its origin forward past the time away, which is not playtime.
+    public void ExcludeFromPlaytime(TimeSpan away) => SessionStartUtc += away;
 
     // True once this session has been seeded from the persisted lifetime row, so seeding never runs
     // twice (e.g. if player_connect_full fires more than once).

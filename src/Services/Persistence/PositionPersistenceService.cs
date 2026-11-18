@@ -155,7 +155,13 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
 
     public async Task StopAsync(TimeSpan timeout, CancellationToken cancellationToken)
     {
-        if (!_started) return;
+        if (!_started)
+        {
+            // Startup never got this far (the database was not reachable): what was queued has nowhere to go.
+            if (_channel.Reader.Count > 0)
+                _logger.LogWarning("Stopped before position persistence started; {Count} queued position events were not written.", _channel.Reader.Count);
+            return;
+        }
 
         _logger.LogInformation("Stopping PositionPersistenceService...");
         _channel.Writer.Complete();

@@ -70,6 +70,9 @@ public class SchemaTests
             Assert.Contains($" {column} = t.{column}", update);
         foreach (var column in keys.Append("match_uuid"))
             Assert.DoesNotContain($" {column} = t.{column}", update);
+        // Several versions of one key can share a batch: applied in staging order, the last one is kept.
+        Assert.InRange(sql.IndexOf("ORDER BY t.row_id", StringComparison.Ordinal),
+            sql.IndexOf("JOIN matches m", StringComparison.Ordinal), sql.IndexOf("ON DUPLICATE KEY UPDATE", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -94,6 +97,31 @@ public class SchemaTests
         foreach (var column in new[] { "kd_ratio", "impact_rating", "survival_rating", "utility_score" })
             Assert.Contains($"{column} DECIMAL(8,3) DEFAULT 0", TableDdl("player_stats"));
     }
+
+    // The analytics row is a plain INSERT: strict mode rejects a value its column cannot hold (error 1264, a data error
+    // that is never retried), so the row was dropped whenever a ratio outgrew the narrower analytics column.
+    [Fact]
+    public void AnalyticsRatiosHoldWhatPlayerStatsHolds()
+    {
+        var analytics = DecimalColumns("player_advanced_analytics");
+        var lifetime = DecimalColumns("player_stats");
+        var shared = analytics.Keys.Intersect(lifetime.Keys).ToList();
+        Assert.Contains("kd_ratio", shared);
+        foreach (var column in shared)
+        {
+            var (precision, scale) = analytics[column];
+            var (lifetimePrecision, lifetimeScale) = lifetime[column];
+            Assert.True(precision - scale >= lifetimePrecision - lifetimeScale && scale >= lifetimeScale,
+                $"{column} is DECIMAL({precision},{scale}) in player_advanced_analytics but DECIMAL({lifetimePrecision},{lifetimeScale}) in player_stats");
+        }
+        // Ratios without a player_stats column of the same name.
+        foreach (var column in new[] { "impact_score", "utility_impact_score", "utility_usage_per_round" })
+            Assert.Equal((8, 3), analytics[column]);
+    }
+
+    private static Dictionary<string, (int Precision, int Scale)> DecimalColumns(string table) =>
+        Regex.Matches(TableDdl(table), @"^\s*(\w+) DECIMAL\((\d+),(\d+)\)", RegexOptions.Multiline)
+            .ToDictionary(m => m.Groups[1].Value, m => (int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value)));
 
     [Fact]
     public void RoundRowReadsTheRoundFromTheDelta()

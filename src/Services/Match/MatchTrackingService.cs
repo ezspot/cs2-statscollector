@@ -4,7 +4,7 @@ using statsCollector.Domain;
 
 namespace statsCollector.Services;
 
-public record MatchContext(string MatchUuid, string MapName);
+public record MatchContext(string MatchUuid);
 
 public interface IMatchTrackingService
 {
@@ -46,7 +46,7 @@ public sealed class MatchTrackingService : IMatchTrackingService
         lock (_lock)
         {
             previousUuid = _currentMatch?.MatchUuid;
-            _currentMatch = new MatchContext(uuid, mapName);
+            _currentMatch = new MatchContext(uuid);
         }
 
         if (previousUuid is not null)

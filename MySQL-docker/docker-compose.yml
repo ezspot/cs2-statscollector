@@ -32,7 +32,10 @@ services:
       - ../database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       # TCP, not the socket: the entrypoint's temporary init server (which runs init.sql) answers on the socket only.
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 --protocol=tcp -uroot -p\"$$(cat /run/secrets/mysql_root_password)\" --silent"]
+      # No credentials: mysqladmin ping exits 0 whenever the server answers, "Access denied" included, and root exists
+      # only as root@localhost, which a TCP login never matches (skip_name_resolve). Passing the password only put it
+      # on a command line.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--protocol=tcp", "--silent"]
       interval: 10s
       timeout: 5s
       retries: 5

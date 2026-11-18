@@ -14,16 +14,25 @@ A CounterStrikeSharp plugin for CS2 that collects detailed player statistics int
 - **Resilience** — Polly v8 pipeline (retry + circuit breaker + timeout) wraps every repository operation. Writes that
   fail while the database is unreachable, restarting or read-only (or missing a column or grant) stay buffered and are
   written once it recovers; a write whose own data is rejected is logged and dropped instead of blocking the queue.
-  Batches still unwritten when the plugin unloads are spilled to `pending_stats.json` in the plugin directory and
-  replayed at the next start; the file is removed only once they are written, so a crash during the replay loses
-  nothing. A file that cannot be read is renamed `pending_stats.json.unreadable-<UTC time>` and left for inspection.
+  The log says when the buffered writes have reached the database. Each database statement gives up within about 6 s,
+  also on a server that stopped answering (an attempt runs a few statements, so it can take longer; the startup schema
+  of `AutoCreateSchema` has 30 s), and an unload holds the game thread for about 10 s at most.
+  Batches still unwritten when the plugin unloads, the one cut off mid-write included, are spilled to
+  `pending_stats.json` in the plugin directory and replayed at the next start; the file is removed as soon as they are
+  written, before anything newer is, so a crash during the replay neither loses them nor replays them over newer
+  totals. Against a server that stopped answering, the spill is written once the statement in flight gives up, which
+  can be after the unload returned: a process that exits at once loses it, and a plugin loaded again within those
+  seconds misses it (that instance can delete or replace the file, or a later start replays it over newer totals),
+  so reload a plugin only while the database answers. A file that cannot be read is renamed
+  `pending_stats.json.unreadable-<UTC time>` and left for inspection.
   Position events (heatmaps) are not spilled: those still buffered at unload are counted in a warning and lost.
   At startup the plugin checks the server's `local_infile` and logs a critical message
   with the fix when it is off (every bulk write needs it).
 - **Bots** — bots count in the round state (alive counts, first kill, trades, clutch odds) but get no stats of their
   own: a human's kills, damage and team kills on bots count, and a bot's kill is recorded as a death, not a suicide.
-- **Restarts** — `mp_restartgame` after rounds were played ends the recorded match and starts a new one; the
-  aborted round is not written.
+- **Restarts** — `mp_restartgame` after rounds were played ends the recorded match and starts a new one. The
+  aborted round gets no per-round row, but what was done in it stays: in the lifetime totals, in the ended match's
+  row, and in the position tables. Restart between rounds, not during one.
 - **Bulk writes** — player and position batches are written with `MySqlBulkCopy` into a temporary table, then merged.
 - **Scrim management** — lobby/ready-up, captain assignment, map vote, player picking, knife round + side selection.
   After the change to the voted map, the knife round or match waits in warmup until the picked players are back
@@ -36,7 +45,8 @@ A CounterStrikeSharp plugin for CS2 that collects detailed player statistics int
 ## Requirements
 - CounterStrikeSharp v1.0.379+ on the server (.NET 10; the plugin is built against v1.0.379 and does not load on older
   cores). CS2 1.41.9.2+ crashes cores before v1.0.378 when a client connects, and CounterStrikeSharp v1.0.375+ needs
-  Metamod:Source 2.x build 1467+.
+  Metamod:Source 2.x build 1467+. Use v1.0.380 or newer on current CS2: it carries the gamedata fix for the CS2
+  1.41.9.7 update, and a fix for timers removed during a timer callback.
 - .NET 10 SDK (to build)
 - MySQL 8.4 LTS or 9.7 LTS (8.0 and 9.6 are out of support), with `local_infile=ON` — see *Database prerequisites*
 - For `.restore`: start the CS2 server with `-allow_round_backup_files` (required for round backups since the
@@ -107,7 +117,12 @@ The bundled Docker stack already satisfies these. For your own MySQL server:
 ```
 For a remote MySQL host use `VerifyCA` with `DatabaseSslCa` set to the server's CA certificate (for the Docker
 stack, a copy of the container's `/var/lib/mysql/ca.pem`; its auto-generated certificate fails `VerifyFull`'s
-hostname check), or `VerifyFull` with a certificate issued for `DatabaseHost`. `None` only works over loopback:
+hostname check), or `VerifyFull` with a certificate issued for `DatabaseHost`. The plugin does not load when
+`DatabaseSslCa` is set with another mode: `Required` encrypts but checks no certificate, so the CA would be ignored
+and the password sent to whoever answers. In `VerifyCA` and `VerifyFull` MySqlConnector also serves the verified
+server's `LOAD DATA LOCAL` requests for files by name (under `Required` it sends only the plugin's own bulk data), so
+that server can read any file the CS2 process can: use them only with a database host you trust like the game server
+itself. `None` only works over loopback:
 MySQL's default `caching_sha2_password` rejects non-TLS remote logins after every server restart.
 See `config.sample.json` for the full set of options (persistence, trade window, clutch weighting, scrim settings).
 
@@ -159,7 +174,7 @@ Several CS2 servers (target: up to ~5) can run this plugin against one MySQL dat
 
 - **Player identity** is the SteamID64 (`player_stats.steam_id`, primary key) — globally unique, so a player has exactly one lifetime row no matter which server they play on.
 - **Match identity** is a per-server generated UUID (`matches.match_uuid`, `UNIQUE`); the integer `matches.id` is assigned by the database. No cross-server collisions, so match UUIDs do not need to be a primary key.
-- **Lifetime stats are seeded once the client is validated** — when a player joins (and Steam has validated them, or at once on a LAN server), their existing `player_stats` row is loaded off the game thread and added to whatever the session has already counted, then written back. Since a Steam account can only be on one server at a time there is no write race on a row, and moving between servers never overwrites history with a single session. The exception is a database outage: snapshots a server buffers while MySQL is down are written when it recovers, and can overwrite newer totals if the player has since played on another server. A player who leaves while the database is unreachable keeps their session in memory until it has been seeded, and it is written then (their playtime ends at the disconnect).
+- **Lifetime stats are seeded once the client is validated** — when a player joins (and Steam has validated them, or at once on a LAN server), their existing `player_stats` row is loaded off the game thread and added to whatever the session has already counted, then written back. Since a Steam account can only be on one server at a time there is no write race on a row, and moving between servers never overwrites history with a single session. The exception is a database outage: snapshots a server buffers while MySQL is down are written when it recovers, and can overwrite newer totals if the player has since played on another server. A player who leaves while the database is unreachable keeps their session in memory until it has been seeded, and it is written then (their playtime ends at the disconnect; a reconnect in the meantime continues the session without the time away). Only the lifetime row comes out right in that case: what a player did before their seed landed is missing from the match and round rows, and the session of a player still unseeded at an unload is lost (the unload logs how many).
 - **Per-match rows** (`match_player_stats`, `match_weapon_stats`, `rounds`, position tables) are immutable per `(match_id, …)`, so every server records its own matches independently.
 
 > **Connection budget:** connections are not per player. Each server holds at most **10** (its two background writers plus one short read per joining player), normally two. MySQL's default `max_connections` of 151 covers ten servers.

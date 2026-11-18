@@ -26,6 +26,8 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
     private Serilog.Core.Logger? _serilog;
 
     private IPluginLifecycleService? _lifecycle;
+    // Never disposed: Dispose drops the registrations that CancelAsync (Unload) may still be running on the pool, and
+    // without a timer it holds nothing to release.
     private readonly CancellationTokenSource _cancellationTokenSource = new();
     private Task? _initializationTask;
 
@@ -198,11 +200,20 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             (_serviceProvider?.GetService<IScrimManager>() as IDisposable)?.Dispose();
             (_serviceProvider?.GetService<IPauseService>() as IDisposable)?.Dispose();
 
-            _cancellationTokenSource.Cancel();
+            // Not Cancel: it runs the token's callbacks right here, and a database read in flight registered one that
+            // opens a connection to kill its query (seconds against a hung server). CancelAsync marks the token at once
+            // and runs them on the thread pool.
+            _ = _cancellationTokenSource.CancelAsync();
             // One budget for the whole cleanup (startup wait, final flushes, container disposal): this blocks the game
-            // thread, and with the database down every step would otherwise wait out its own timeout.
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            CleanupAsync(timeout.Token).GetAwaiter().GetResult();
+            // thread, and with the database down every step would otherwise wait out its own timeout. The wait ends 3 s
+            // after the budget: what the budget's cancellation sets off normally finishes inside it. That is the stats
+            // writer's and then the position writer's command in flight, each cancelled through a connection that may
+            // take CancellationTimeout = 1 s, and then the container's disposal. A step that overruns both (a connect
+            // ignores the token) finishes in the background, still on that token, so it is not disposed.
+            var budget = TimeSpan.FromSeconds(7);
+            var wait = budget + TimeSpan.FromSeconds(3);
+            if (!CleanupAsync(new CancellationTokenSource(budget).Token).Wait(wait))
+                _logger.LogWarning("statsCollector cleanup did not finish within {Seconds} s; it continues in the background.", wait.TotalSeconds);
         }
         catch (Exception ex)
         {
@@ -255,7 +266,6 @@ public sealed class Plugin(ILogger<Plugin> logger) : BasePlugin, IPluginConfig<P
             }
             finally
             {
-                _cancellationTokenSource.Dispose();
                 _serilog?.Dispose();
             }
         }

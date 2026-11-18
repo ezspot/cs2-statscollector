@@ -71,16 +71,8 @@ public sealed class StatsRepository : IStatsRepository
         await _resiliencePipeline.ExecuteAsync(async ct =>
         {
             _logger.LogDebug("Starting bulk upsert for {Count} players", snapshotList.Count);
-            try
-            {
-                await UpsertPlayersCoreAsync(snapshotList, ct).ConfigureAwait(false);
-                _logger.LogInformation("Successfully completed bulk upsert for {Count} players", snapshotList.Count);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Bulk upsert players failed for {Count} players", snapshotList.Count);
-                throw;
-            }
+            await UpsertPlayersCoreAsync(snapshotList, ct).ConfigureAwait(false);
+            _logger.LogInformation("Successfully completed bulk upsert for {Count} players", snapshotList.Count);
         }, cancellationToken);
     }
 
@@ -246,7 +238,7 @@ public sealed class StatsRepository : IStatsRepository
 
         await _resiliencePipeline.ExecuteAsync(async ct =>
         {
-            await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
 
             var dataTable = new DataTable();
             foreach (var column in columns) dataTable.Columns.Add(column.Name, column.ClrType);
@@ -255,7 +247,10 @@ public sealed class StatsRepository : IStatsRepository
             var staging = $"temp_{table}_uuid";
             await ExecuteAsync(connection, $"CREATE TEMPORARY TABLE {staging} (row_id INT AUTO_INCREMENT PRIMARY KEY, {string.Join(", ", columns.Select(c => $"{c.Name} {c.SqlType}"))});", ct).ConfigureAwait(false);
 
-            var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = staging };
+            // The connection's DefaultCommandTimeout does not reach LOAD DATA: MySqlBulkCopy runs it with
+            // CommandTimeout = BulkCopyTimeout, 0 (no timeout) unless set, so a server that stopped answering held the
+            // copy until the socket died. Every bulk copy sets it.
+            var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = staging, BulkCopyTimeout = (int)ResiliencePolicies.AttemptTimeout.TotalSeconds };
             AddColumnMappingsByName(bulkCopy, dataTable);
             EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
 
@@ -284,6 +279,9 @@ public sealed class StatsRepository : IStatsRepository
         return unwritten.Count;
     }
 
+    // A batch can hold several versions of one key (a round row is written three times per round, and an outage queues
+    // them together). Each later row of a key overwrites the earlier one, so the rows go in the order they were staged
+    // (row_id) and the last version is kept, whatever order the join would return them in.
     internal static string MergeSql(string table, IReadOnlyList<string> columns, string[] keyColumns)
     {
         var staging = $"temp_{table}_uuid";
@@ -294,6 +292,7 @@ public sealed class StatsRepository : IStatsRepository
             SELECT m.id, {string.Join(", ", data.Select(c => $"t.{c}"))}
             FROM {staging} t
             JOIN matches m ON t.match_uuid = m.match_uuid
+            ORDER BY t.row_id
             ON DUPLICATE KEY UPDATE {string.Join(", ", updates)};
             """;
     }
@@ -305,7 +304,7 @@ public sealed class StatsRepository : IStatsRepository
 
         await _resiliencePipeline.ExecuteAsync(async ct =>
         {
-            await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
 
             // Ensure parent rows exist for the steam_id FK before inserting analytics.
             await connection.ExecuteAsync(new CommandDefinition(
@@ -454,13 +453,9 @@ public sealed class StatsRepository : IStatsRepository
         }
     }
 
-    private async Task UpsertPlayersCoreAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
+    private async Task UpsertPlayersCoreAsync(IReadOnlyList<PlayerSnapshot> snapshots, CancellationToken cancellationToken)
     {
-        var snapshotList = snapshots.ToList();
-
-        if (snapshotList.Count == 0) return;
-
-        await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await _connectionFactory.CreateConnectionAsync(cancellationToken).ConfigureAwait(false);
 
         // High-performance pattern for player stats (many columns):
         // 1. Create a DataTable matching the full schema
@@ -619,7 +614,7 @@ public sealed class StatsRepository : IStatsRepository
         dataTable.Columns.Add("kill_distance_total", typeof(decimal));
         dataTable.Columns.Add("longest_kill", typeof(decimal));
 
-        foreach (var s in snapshotList)
+        foreach (var s in snapshots)
         {
             dataTable.Rows.Add(
                 s.SteamId, s.Name, s.Kills, s.Deaths, s.Assists, s.Headshots, s.DamageDealt, s.DamageTaken, s.DamageArmor,
@@ -659,7 +654,8 @@ public sealed class StatsRepository : IStatsRepository
 
         var bulkCopy = new MySqlBulkCopy(connection)
         {
-            DestinationTableName = "temp_player_stats"
+            DestinationTableName = "temp_player_stats",
+            BulkCopyTimeout = (int)ResiliencePolicies.AttemptTimeout.TotalSeconds
         };
         // Map by destination column name so DataTable column order can never silently misalign the copy.
         AddColumnMappingsByName(bulkCopy, dataTable);
@@ -749,8 +745,6 @@ public sealed class StatsRepository : IStatsRepository
             """;
 
         await ExecuteAsync(connection, mergeSql, cancellationToken).ConfigureAwait(false);
-
-        _logger.LogInformation("Successfully completed high-performance bulk update for {Count} players using MySqlBulkCopy", snapshotList.Count);
     }
 
     private static Task<int> ExecuteAsync(MySqlConnection connection, string sql, CancellationToken cancellationToken) =>

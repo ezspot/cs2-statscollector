@@ -47,11 +47,14 @@ public sealed class SchemaInitializer(
             var connectionString = _config.BuildConnectionString(includeDatabase: false);
             await using var connection = new MySqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            // The connection string limits each command to the pipeline's attempt timeout. These two run outside the
+            // pipeline, and DDL can wait on a metadata lock, so they keep MySqlConnector's default of 30 s (the whole
+            // schema is one command).
             await connection.ExecuteAsync(new CommandDefinition(
                 $"CREATE DATABASE IF NOT EXISTS `{databaseName}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
-                cancellationToken: cancellationToken)).ConfigureAwait(false);
+                commandTimeout: 30, cancellationToken: cancellationToken)).ConfigureAwait(false);
             await connection.ChangeDatabaseAsync(databaseName, cancellationToken).ConfigureAwait(false);
-            await connection.ExecuteAsync(new CommandDefinition(script, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            await connection.ExecuteAsync(new CommandDefinition(script, commandTimeout: 30, cancellationToken: cancellationToken)).ConfigureAwait(false);
             _logger.LogInformation("Database schema ensured (AutoCreateSchema).");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

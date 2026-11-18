@@ -2,7 +2,6 @@ using System.Numerics;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Events;
-using Microsoft.Extensions.Logging;
 using statsCollector.Config;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
@@ -16,7 +15,6 @@ public sealed class UtilityEventProcessor : IEventProcessor
     private static readonly TimeSpan InfernoAssociationWindow = TimeSpan.FromSeconds(3);
 
     private readonly IPlayerSessionService _playerSessions;
-    private readonly ILogger<UtilityEventProcessor> _logger;
     private readonly IPositionPersistenceService _positionPersistence;
     private readonly IMatchTrackingService _matchTracker;
     private readonly PluginConfig _config;
@@ -29,7 +27,6 @@ public sealed class UtilityEventProcessor : IEventProcessor
 
     public UtilityEventProcessor(
         IPlayerSessionService playerSessions,
-        ILogger<UtilityEventProcessor> logger,
         IPositionPersistenceService positionPersistence,
         IMatchTrackingService matchTracker,
         PluginConfig config,
@@ -37,7 +34,6 @@ public sealed class UtilityEventProcessor : IEventProcessor
         ICombatEventProcessor combat)
     {
         _playerSessions = playerSessions;
-        _logger = logger;
         _positionPersistence = positionPersistence;
         _matchTracker = matchTracker;
         _config = config;
@@ -79,207 +75,159 @@ public sealed class UtilityEventProcessor : IEventProcessor
 
     private void HandleGrenadeThrown(EventGrenadeThrown @event)
     {
-        try
+        var player = @event.GetPlayerOrDefault("userid");
+        var state = PlayerControllerState.From(player);
+        if (!state.IsValid || state.IsBot) return;
+
+        var type = ParseUtilityType(@event.GetStringValue("weapon", string.Empty));
+        if (type == UtilityType.Unknown) return;
+
+        _pendingGrenades.Add(new PendingGrenade(state.SteamId, state.Team, type, state.GrenadeThrowPosition));
+        _playerSessions.MutatePlayer(state.SteamId, stats =>
         {
-            var player = @event.GetPlayerOrDefault("userid");
-            var state = PlayerControllerState.From(player);
-            if (!state.IsValid || state.IsBot) return;
-
-            var type = ParseUtilityType(@event.GetStringValue("weapon", string.Empty));
-            if (type == UtilityType.Unknown) return;
-
-            _pendingGrenades.Add(new PendingGrenade(state.SteamId, state.Team, type, state.GrenadeThrowPosition));
-            _playerSessions.MutatePlayer(state.SteamId, stats =>
+            switch (type)
             {
-                switch (type)
-                {
-                    case UtilityType.Flash: stats.Utility.FlashbangsThrown++; break;
-                    case UtilityType.Smoke: stats.Utility.SmokesThrown++; break;
-                    case UtilityType.Molotov: stats.Utility.MolotovsThrown++; break;
-                    case UtilityType.HeGrenade: stats.Utility.HeGrenadesThrown++; break;
-                    case UtilityType.Decoy: stats.Utility.DecoysThrown++; break;
-                }
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error handling grenade thrown event");
-        }
+                case UtilityType.Flash: stats.Utility.FlashbangsThrown++; break;
+                case UtilityType.Smoke: stats.Utility.SmokesThrown++; break;
+                case UtilityType.Molotov: stats.Utility.MolotovsThrown++; break;
+                case UtilityType.HeGrenade: stats.Utility.HeGrenadesThrown++; break;
+                case UtilityType.Decoy: stats.Utility.DecoysThrown++; break;
+            }
+        });
     }
 
     private void HandlePlayerBlind(EventPlayerBlind @event)
     {
-        try
+        var victim = @event.GetPlayerOrDefault("userid");
+        var victimState = PlayerControllerState.From(victim);
+        var attackerState = PlayerControllerState.From(@event.GetPlayerOrDefault("attacker"));
+        var blindDuration = @event.GetFloatValue("blind_duration", 0f);
+        // The engine blinds dead players and spectators in range too; that flashes nobody.
+        if (victimState.Health <= 0 || victimState.Team is not (PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist)) return;
+
+        if (!victimState.IsBot)
         {
-            var victim = @event.GetPlayerOrDefault("userid");
-            var victimState = PlayerControllerState.From(victim);
-            var attackerState = PlayerControllerState.From(@event.GetPlayerOrDefault("attacker"));
-            var blindDuration = @event.GetFloatValue("blind_duration", 0f);
-            // The engine blinds dead players and spectators in range too; that flashes nobody.
-            if (victimState.Health <= 0 || victimState.Team is not (PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist)) return;
-
-            if (!victimState.IsBot)
+            _playerSessions.MutatePlayer(victimState.SteamId, stats =>
             {
-                _playerSessions.MutatePlayer(victimState.SteamId, stats =>
-                {
-                    stats.Utility.TotalBlindTime += blindDuration;
-                    stats.Utility.TimesBlinded++;
-                });
-            }
-
-            if (!attackerState.IsValid || attackerState.IsBot || attackerState.SteamId == victimState.SteamId) return;
-
-            var pending = FindPending(attackerState.SteamId, UtilityType.Flash, @event.GetIntValue("entityid"));
-            pending?.RecordAffected(victimState, (int)victim!.Index);
-
-            _playerSessions.MutatePlayer(attackerState.SteamId, stats =>
-            {
-                if (!victimState.IsValid) return;
-                if (attackerState.Team != victimState.Team)
-                {
-                    stats.Utility.EnemiesBlinded++;
-                    stats.Utility.TotalBlindTimeInflicted += blindDuration;
-                }
-                else
-                {
-                    stats.Utility.TeammatesBlinded++;
-                }
+                stats.Utility.TotalBlindTime += blindDuration;
+                stats.Utility.TimesBlinded++;
             });
         }
-        catch (Exception ex)
+
+        if (!attackerState.IsValid || attackerState.IsBot || attackerState.SteamId == victimState.SteamId) return;
+
+        var pending = FindPending(attackerState.SteamId, UtilityType.Flash, @event.GetIntValue("entityid"));
+        pending?.RecordAffected(victimState, (int)victim!.Index);
+
+        _playerSessions.MutatePlayer(attackerState.SteamId, stats =>
         {
-            _logger.LogError(ex, "Error handling player blind event");
-        }
+            if (!victimState.IsValid) return;
+            if (attackerState.Team != victimState.Team)
+            {
+                stats.Utility.EnemiesBlinded++;
+                stats.Utility.TotalBlindTimeInflicted += blindDuration;
+            }
+            else
+            {
+                stats.Utility.TeammatesBlinded++;
+            }
+        });
     }
 
     private void HandlePlayerHurt(EventPlayerHurt @event)
     {
-        try
-        {
-            var victim = @event.GetPlayerOrDefault("userid");
-            var attackerState = PlayerControllerState.From(@event.GetPlayerOrDefault("attacker"));
-            var victimState = PlayerControllerState.From(victim);
-            if (!attackerState.IsValid || attackerState.IsBot || !victimState.IsValid) return;
+        // Nearly every hurt is a gun hit: rule those out before reading either player.
+        var type = ParseUtilityType(@event.GetStringValue("weapon", string.Empty));
+        if (type is not (UtilityType.HeGrenade or UtilityType.Molotov)) return;
 
-            var type = ParseUtilityType(@event.GetStringValue("weapon", string.Empty));
-            if (type is not (UtilityType.HeGrenade or UtilityType.Molotov)) return;
+        var victim = @event.GetPlayerOrDefault("userid");
+        var attackerState = PlayerControllerState.From(@event.GetPlayerOrDefault("attacker"));
+        var victimState = PlayerControllerState.From(victim);
+        if (!attackerState.IsValid || attackerState.IsBot || !victimState.IsValid) return;
 
-            var pending = FindPending(attackerState.SteamId, type, 0);
-            if (pending is null) return;
-            pending.RecordAffected(victimState, (int)victim!.Index);
-            if (victimState.Team != pending.OwnerTeam)
-            {
-                // Overkill is not damage: a lethal 98 on a 20 HP player removed 20, as ADR counts it.
-                pending.Damage += _combat.GetHealthRemoved((int)victim!.Index, @event.GetIntValue("dmg_health"));
-            }
-        }
-        catch (Exception ex)
+        var pending = FindPending(attackerState.SteamId, type, 0);
+        if (pending is null) return;
+        pending.RecordAffected(victimState, (int)victim!.Index);
+        if (victimState.Team != pending.OwnerTeam)
         {
-            _logger.LogError(ex, "Error handling utility damage event");
+            // Overkill is not damage: a lethal 98 on a 20 HP player removed 20, as ADR counts it.
+            pending.Damage += _combat.GetHealthRemoved((int)victim!.Index, @event.GetIntValue("dmg_health"));
         }
     }
 
     private void TrackDetonation(GameEvent @event, UtilityType type)
     {
-        try
-        {
-            var state = PlayerControllerState.From(@event.GetPlayerOrDefault("userid"));
-            if (!state.IsValid || state.IsBot) return;
+        var state = PlayerControllerState.From(@event.GetPlayerOrDefault("userid"));
+        if (!state.IsValid || state.IsBot) return;
 
-            // Oldest first: two same-type grenades in flight detonate in throw order.
-            var pending = _pendingGrenades.FirstOrDefault(grenade =>
-                grenade.OwnerSteamId == state.SteamId && grenade.Type == type && !grenade.Detonated);
-            if (pending is null)
-            {
-                pending = new PendingGrenade(state.SteamId, state.Team, type, state.GrenadeThrowPosition);
-                _pendingGrenades.Add(pending);
-            }
-
-            pending.EntityId = @event.GetIntValue("entityid");
-            pending.LandPosition = new Vector3(
-                @event.GetFloatValue("x"),
-                @event.GetFloatValue("y"),
-                @event.GetFloatValue("z"));
-            pending.DetonatedAt = _timeProvider.GetUtcNow().UtcDateTime;
-            pending.LifecycleStartedAt = pending.DetonatedAt;
-            pending.LifecycleStartEvent = @event.EventName;
-            if (type is UtilityType.HeGrenade or UtilityType.Flash or UtilityType.Decoy)
-            {
-                pending.LifecycleEndedAt = pending.DetonatedAt;
-                pending.LifecycleEndEvent = @event.EventName;
-            }
-            pending.Detonated = true;
-        }
-        catch (Exception ex)
+        // Oldest first: two same-type grenades in flight detonate in throw order.
+        var pending = _pendingGrenades.FirstOrDefault(grenade =>
+            grenade.OwnerSteamId == state.SteamId && grenade.Type == type && !grenade.Detonated);
+        if (pending is null)
         {
-            _logger.LogError(ex, "Error handling {UtilityType} detonation", type);
+            pending = new PendingGrenade(state.SteamId, state.Team, type, state.GrenadeThrowPosition);
+            _pendingGrenades.Add(pending);
         }
+
+        pending.EntityId = @event.GetIntValue("entityid");
+        pending.LandPosition = new Vector3(
+            @event.GetFloatValue("x"),
+            @event.GetFloatValue("y"),
+            @event.GetFloatValue("z"));
+        pending.DetonatedAt = _timeProvider.GetUtcNow().UtcDateTime;
+        pending.LifecycleStartedAt = pending.DetonatedAt;
+        pending.LifecycleStartEvent = @event.EventName;
+        if (type is UtilityType.HeGrenade or UtilityType.Flash or UtilityType.Decoy)
+        {
+            pending.LifecycleEndedAt = pending.DetonatedAt;
+            pending.LifecycleEndEvent = @event.EventName;
+        }
+        pending.Detonated = true;
     }
 
     private void HandleSmokeExpired(EventSmokegrenadeExpired @event)
     {
-        try
-        {
-            var owner = PlayerControllerState.From(@event.Userid);
-            var pending = FindPending(owner.SteamId, UtilityType.Smoke, @event.Entityid);
-            if (pending is null) return;
+        var owner = PlayerControllerState.From(@event.Userid);
+        var pending = FindPending(owner.SteamId, UtilityType.Smoke, @event.Entityid);
+        if (pending is null) return;
 
-            pending.LandPosition = new Vector3(@event.X, @event.Y, @event.Z);
-            FinalizePending(pending, @event.EventName);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error handling smoke grenade expiration");
-        }
+        pending.LandPosition = new Vector3(@event.X, @event.Y, @event.Z);
+        FinalizePending(pending, @event.EventName);
     }
 
     private void HandleInfernoStarted(EventInfernoStartburn @event)
     {
-        try
-        {
-            if (@event.Entityid == 0) return;
+        if (@event.Entityid == 0) return;
 
-            var position = new Vector3(@event.X, @event.Y, @event.Z);
-            var cutoff = _timeProvider.GetUtcNow().UtcDateTime - InfernoAssociationWindow;
-            var pending = _pendingGrenades
-                .Where(grenade => grenade.Type == UtilityType.Molotov && grenade.Detonated &&
-                                  !grenade.Finalized && grenade.EntityId == 0 && grenade.DetonatedAt >= cutoff)
-                .OrderBy(grenade => Vector3.DistanceSquared(grenade.LandPosition, position))
-                .FirstOrDefault();
-            if (pending is null || Vector3.DistanceSquared(pending.LandPosition, position) > InfernoAssociationRadiusSquared) return;
+        var position = new Vector3(@event.X, @event.Y, @event.Z);
+        var cutoff = _timeProvider.GetUtcNow().UtcDateTime - InfernoAssociationWindow;
+        var pending = _pendingGrenades
+            .Where(grenade => grenade.Type == UtilityType.Molotov && grenade.Detonated &&
+                              !grenade.Finalized && grenade.EntityId == 0 && grenade.DetonatedAt >= cutoff)
+            .OrderBy(grenade => Vector3.DistanceSquared(grenade.LandPosition, position))
+            .FirstOrDefault();
+        if (pending is null || Vector3.DistanceSquared(pending.LandPosition, position) > InfernoAssociationRadiusSquared) return;
 
-            pending.EntityId = @event.Entityid;
-            pending.LandPosition = position;
-            pending.LifecycleStartedAt = _timeProvider.GetUtcNow().UtcDateTime;
-            pending.LifecycleStartEvent = @event.EventName;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error handling inferno start");
-        }
+        pending.EntityId = @event.Entityid;
+        pending.LandPosition = position;
+        pending.LifecycleStartedAt = _timeProvider.GetUtcNow().UtcDateTime;
+        pending.LifecycleStartEvent = @event.EventName;
     }
 
     private void HandleInfernoEnded(GameEvent @event)
     {
-        try
-        {
-            var entityId = @event.GetIntValue("entityid");
-            if (entityId == 0) return;
+        var entityId = @event.GetIntValue("entityid");
+        if (entityId == 0) return;
 
-            var pending = _pendingGrenades.LastOrDefault(grenade =>
-                grenade.Type == UtilityType.Molotov && grenade.EntityId == entityId && !grenade.Finalized);
-            if (pending is null) return;
+        var pending = _pendingGrenades.LastOrDefault(grenade =>
+            grenade.Type == UtilityType.Molotov && grenade.EntityId == entityId && !grenade.Finalized);
+        if (pending is null) return;
 
-            pending.LandPosition = new Vector3(
-                @event.GetFloatValue("x"),
-                @event.GetFloatValue("y"),
-                @event.GetFloatValue("z"));
-            FinalizePending(pending, @event.EventName);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error handling inferno end");
-        }
+        pending.LandPosition = new Vector3(
+            @event.GetFloatValue("x"),
+            @event.GetFloatValue("y"),
+            @event.GetFloatValue("z"));
+        FinalizePending(pending, @event.EventName);
     }
 
     private PendingGrenade? FindPending(ulong ownerSteamId, UtilityType type, int entityId)

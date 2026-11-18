@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Dapper;
 using MySqlConnector;
+using statsCollector.Infrastructure;
 using statsCollector.Infrastructure.Database;
 using Polly;
 using Polly.Registry;
@@ -40,7 +41,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
 
         await _resiliencePipeline.ExecuteAsync(async ct =>
         {
-            await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
 
             var dataTable = new DataTable();
             dataTable.Columns.Add("match_uuid", typeof(string));
@@ -80,7 +81,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
                 "CREATE TEMPORARY TABLE temp_kill_positions_uuid (row_id INT AUTO_INCREMENT PRIMARY KEY, match_uuid VARCHAR(64), killer_steam_id BIGINT UNSIGNED, victim_steam_id BIGINT UNSIGNED, killer_x FLOAT, killer_y FLOAT, killer_z FLOAT, victim_x FLOAT, victim_y FLOAT, victim_z FLOAT, weapon_used VARCHAR(100), is_headshot TINYINT(1), is_wallbang TINYINT(1), distance FLOAT, killer_team INT, victim_team INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);",
                 ct).ConfigureAwait(false);
 
-            var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_kill_positions_uuid" };
+            var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_kill_positions_uuid", BulkCopyTimeout = (int)ResiliencePolicies.AttemptTimeout.TotalSeconds };
             StatsRepository.AddColumnMappingsByName(bulkCopy, dataTable);
             StatsRepository.EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
 
@@ -119,7 +120,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
 
         await _resiliencePipeline.ExecuteAsync(async ct =>
         {
-            await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
 
             var dataTable = new DataTable();
             dataTable.Columns.Add("match_uuid", typeof(string));
@@ -145,7 +146,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
 
             await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_death_positions_uuid (row_id INT AUTO_INCREMENT PRIMARY KEY, match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, x FLOAT, y FLOAT, z FLOAT, cause_of_death VARCHAR(100), is_headshot TINYINT(1), team INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);", ct).ConfigureAwait(false);
 
-            var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_death_positions_uuid" };
+            var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_death_positions_uuid", BulkCopyTimeout = (int)ResiliencePolicies.AttemptTimeout.TotalSeconds };
             StatsRepository.AddColumnMappingsByName(bulkCopy, dataTable);
             StatsRepository.EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
 
@@ -172,7 +173,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
 
         await _resiliencePipeline.ExecuteAsync(async ct =>
         {
-            await using var connection = (MySqlConnection)await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
+            await using var connection = await _connectionFactory.CreateConnectionAsync(ct).ConfigureAwait(false);
 
             var dataTable = new DataTable();
             dataTable.Columns.Add("match_uuid", typeof(string));
@@ -209,7 +210,7 @@ public sealed class PositionTrackingService : IPositionTrackingService
 
             await ExecuteAsync(connection, "CREATE TEMPORARY TABLE temp_utility_positions_uuid (row_id INT AUTO_INCREMENT PRIMARY KEY, match_uuid VARCHAR(64), steam_id BIGINT UNSIGNED, throw_x FLOAT, throw_y FLOAT, throw_z FLOAT, land_x FLOAT, land_y FLOAT, land_z FLOAT, utility_type INT, entity_id INT, lifecycle_start_event VARCHAR(32), lifecycle_end_event VARCHAR(32), lifecycle_duration_ms INT UNSIGNED, opponents_affected INT, teammates_affected INT, damage INT, map_name VARCHAR(100), round_number INT, round_time_seconds INT);", ct).ConfigureAwait(false);
 
-            var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_utility_positions_uuid" };
+            var bulkCopy = new MySqlBulkCopy(connection) { DestinationTableName = "temp_utility_positions_uuid", BulkCopyTimeout = (int)ResiliencePolicies.AttemptTimeout.TotalSeconds };
             StatsRepository.AddColumnMappingsByName(bulkCopy, dataTable);
             StatsRepository.EnsureBulkCopySucceeded(await bulkCopy.WriteToServerAsync(dataTable, ct).ConfigureAwait(false));
 

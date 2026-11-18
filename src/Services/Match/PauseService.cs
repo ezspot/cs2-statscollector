@@ -36,7 +36,7 @@ public sealed class PauseService(
 
             if (type == PauseType.Tactical)
             {
-                if (_tacticalPausesUsed[team] >= (_config.Scrim.MaxTacticalPauses > 0 ? _config.Scrim.MaxTacticalPauses : 4))
+                if (_tacticalPausesUsed[team] >= _config.Scrim.MaxTacticalPauses)
                 {
                     // The command callback runs on the game thread; printing now avoids holding the controller for a
                     // later frame, when the player may be gone.
@@ -95,8 +95,7 @@ public sealed class PauseService(
             {
                 _tacticalPausesUsed[_requestingTeam]++;
 
-                var duration = _config.Scrim.TacticalPauseDuration > 0 ? _config.Scrim.TacticalPauseDuration : 30;
-                _pauseTimer = new CounterStrikeSharp.API.Modules.Timers.Timer(duration, () =>
+                _pauseTimer = new CounterStrikeSharp.API.Modules.Timers.Timer(_config.Scrim.TacticalPauseDuration, () =>
                 {
                     // CounterStrikeSharp frees the timer after this callback; a later Kill of the stale pointer could
                     // hit another timer allocated at the same address.

@@ -54,9 +54,8 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     {
         _eventHandler.RegisterEvents(plugin);
 
-        var autoSaveInterval = Math.Max(30, _config.AutoSaveSeconds);
-        // BasePlugin.Dispose kills it at unload.
-        plugin.AddTimer(autoSaveInterval, SaveAllStats, CounterStrikeSharp.API.Modules.Timers.TimerFlags.REPEAT);
+        // PluginConfig.Validate keeps the interval within 30-300 s. BasePlugin.Dispose kills the timer at unload.
+        plugin.AddTimer(_config.AutoSaveSeconds, SaveAllStats, CounterStrikeSharp.API.Modules.Timers.TimerFlags.REPEAT);
 
         _logger.LogInformation("Plugin lifecycle initialized.");
     }
@@ -112,6 +111,11 @@ public sealed class PluginLifecycleService : IPluginLifecycleService
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         SaveAllStats();
+        // Unseeded sessions are never saved (a snapshot without the lifetime row would overwrite the career totals);
+        // counted so the loss shows in the log.
+        var unseeded = _playerSessions.GetActiveSteamIds().Count(id => !_playerSessions.WithPlayer(id, s => s.LifetimeSeeded, true));
+        if (unseeded > 0)
+            _logger.LogWarning("{Count} players' stats since they joined are not saved: their lifetime totals were never read from the database.", unseeded);
 
         if (_matchTracker.CurrentMatch != null)
         {

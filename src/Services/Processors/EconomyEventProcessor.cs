@@ -1,7 +1,6 @@
 using System;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
-using Microsoft.Extensions.Logging;
 using statsCollector.Domain;
 using statsCollector.Infrastructure;
 
@@ -10,14 +9,10 @@ namespace statsCollector.Services;
 public sealed class EconomyEventProcessor : IEventProcessor
 {
     private readonly IPlayerSessionService _playerSessions;
-    private readonly ILogger<EconomyEventProcessor> _logger;
 
-    public EconomyEventProcessor(
-        IPlayerSessionService playerSessions,
-        ILogger<EconomyEventProcessor> logger)
+    public EconomyEventProcessor(IPlayerSessionService playerSessions)
     {
         _playerSessions = playerSessions;
-        _logger = logger;
     }
 
     public void RegisterEvents(IEventDispatcher dispatcher)
@@ -28,40 +23,26 @@ public sealed class EconomyEventProcessor : IEventProcessor
 
     private void HandleItemPurchase(EventItemPurchase @event)
     {
-        try
-        {
-            var player = @event.GetPlayerOrDefault("userid");
-            if (player == null) return;
+        var player = @event.GetPlayerOrDefault("userid");
+        if (player == null) return;
 
-            var playerState = PlayerControllerState.From(player);
-            if (!playerState.IsValid || playerState.IsBot) return;
+        var playerState = PlayerControllerState.From(player);
+        if (!playerState.IsValid || playerState.IsBot) return;
 
-            var weapon = @event.GetStringValue("weapon", string.Empty) ?? string.Empty;
-
-            _playerSessions.MutatePlayer(playerState.SteamId, stats => stats.Economy.ItemsPurchased++);
-
-            _logger.LogTrace("Player {SteamId} purchased {Weapon}", playerState.SteamId, weapon);
-        }
-        catch (Exception ex) { _logger.LogError(ex, "Error processing item purchase event"); }
+        _playerSessions.MutatePlayer(playerState.SteamId, stats => stats.Economy.ItemsPurchased++);
     }
 
     private void HandleItemPickup(EventItemPickup @event)
     {
-        try
+        var player = @event.GetPlayerOrDefault("userid");
+        var playerState = PlayerControllerState.From(player);
+
+        if (!playerState.IsValid || playerState.IsBot) return;
+
+        _playerSessions.MutatePlayer(playerState.SteamId, stats =>
         {
-            var player = @event.GetPlayerOrDefault("userid");
-            var playerState = PlayerControllerState.From(player);
-
-            if (!playerState.IsValid || playerState.IsBot) return;
-
-            var item = @event.GetStringValue("item", string.Empty);
-            _playerSessions.MutatePlayer(playerState.SteamId, stats =>
-            {
-                stats.Economy.ItemsPickedUp++;
-            });
-            _logger.LogTrace("Player {SteamId} picked up {Item}", playerState.SteamId, item);
-        }
-        catch (Exception ex) { _logger.LogError(ex, "Error processing item pickup event"); }
+            stats.Economy.ItemsPickedUp++;
+        });
     }
 
 }

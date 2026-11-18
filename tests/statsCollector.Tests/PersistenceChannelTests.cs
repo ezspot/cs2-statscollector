@@ -10,7 +10,8 @@ using Xunit;
 namespace statsCollector.Tests;
 
 /// <summary>The stats channel: a restore's void drops the voided rounds' rows queued before it in the same batch; what an
-/// outage leaves unwritten survives a restart on disk; every update kind round-trips through JSON.</summary>
+/// outage or a stop leaves unwritten survives a restart on disk and is not replayed once anything newer is written;
+/// every update kind round-trips through JSON.</summary>
 public class PersistenceChannelTests
 {
     [Fact]
@@ -62,6 +63,63 @@ public class PersistenceChannelTests
 
         Assert.False(File.Exists(path), "spill file removed once replayed");
         Assert.Equal(["round m1 #1", "rounds[m1 r1 k9]"], log);
+    }
+
+    [Fact]
+    public async Task SpillIsRemovedBeforeNewerBatchesAreWrittenNotWhenTheBufferEmpties()
+    {
+        var log = new List<string>();
+        var repo = new FakeRepo(log) { Outage = true };
+        var path = NewSpillPath();
+
+        var first = NewChannel(repo, path);
+        first.TryWrite(new RoundStartUpdate("m1", 1));
+        await first.StartAsync(CancellationToken.None);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => first.StopAsync(CancellationToken.None));
+
+        // Restored during the outage; two newer batches are buffered behind it.
+        var second = NewChannel(repo, path);
+        await second.StartAsync(CancellationToken.None);
+        second.TryWrite(new RoundStartUpdate("m1", 2));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => second.FlushAsync());
+        second.TryWrite(new RoundStartUpdate("m1", 3));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => second.FlushAsync());
+
+        // Back, but the last batch still fails: the restored one and the next are written.
+        repo.Refused = "round m1 #3";
+        repo.Outage = false;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => second.FlushAsync());
+        Assert.Equal(["round m1 #1", "round m1 #2"], log);
+
+        // A crash now (never stopped, so no new spill) must not replay the restored batch over the newer one.
+        Assert.False(File.Exists(path), "spill file removed once its batches are written");
+        var replayed = new List<string>();
+        var third = NewChannel(new FakeRepo(replayed), path);
+        await third.StartAsync(CancellationToken.None);
+        await third.FlushAsync();
+        await third.StopAsync(CancellationToken.None);
+        Assert.Empty(replayed);
+    }
+
+    [Fact]
+    public async Task StopSpillsTheBatchItCutsOffInsteadOfWritingItAgain()
+    {
+        var repo = new HungRepo();
+        var path = NewSpillPath();
+        var channel = NewChannel(repo, path);
+        channel.TryWrite(new RoundStartUpdate("m1", 1));
+        await channel.StartAsync(CancellationToken.None);
+        await repo.Writing.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // The unload budget runs out while the worker waits on the database.
+        using var budget = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => channel.StopAsync(budget.Token));
+        // Well before the 10 s a second write would hang for.
+        await channel.ExecuteTask!.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, repo.Attempts);
+        var spilled = JsonSerializer.Deserialize<List<List<StatsUpdate>>>(File.ReadAllText(path))!;
+        Assert.Equal(new RoundStartUpdate("m1", 1), Assert.Single(Assert.Single(spilled)));
     }
 
     [Fact]
@@ -136,10 +194,12 @@ public class PersistenceChannelTests
     private sealed class FakeRepo(List<string> log) : IStatsRepository
     {
         public volatile bool Outage;
+        // An entry the database keeps refusing while the others go through.
+        public volatile string? Refused;
 
         private Task Record(string entry)
         {
-            if (Outage) throw new IOException("db down");
+            if (Outage || entry == Refused) throw new IOException("db down");
             lock (log) log.Add(entry);
             return Task.CompletedTask;
         }
@@ -158,6 +218,35 @@ public class PersistenceChannelTests
         public Task UpdateRoundEconomyAsync(string matchUuid, int roundNumber, RoundEconomy economy, CancellationToken ct) => Record($"round {matchUuid} #{roundNumber} economy");
         public Task OfficiallyEndRoundAsync(string matchUuid, int roundNumber, CancellationToken ct) => Record($"round {matchUuid} #{roundNumber} official end");
         public Task VoidRoundsAsync(string matchUuid, int fromRound, CancellationToken ct) => Record($"void {matchUuid} >={fromRound}");
+        public Task CheckLocalInfileAsync(CancellationToken ct) => Task.CompletedTask;
+    }
+
+    // Every write waits until it is cancelled, like one against a server that accepts and never answers.
+    private sealed class HungRepo : IStatsRepository
+    {
+        public readonly TaskCompletionSource Writing = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int Attempts;
+
+        private async Task Hang(CancellationToken ct)
+        {
+            Interlocked.Increment(ref Attempts);
+            Writing.TrySetResult();
+            await Task.Delay(Timeout.Infinite, ct);
+        }
+
+        public Task UpsertPlayersAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken ct) => Hang(ct);
+        public Task<LifetimePlayerStatsRow?> GetLifetimePlayerStatsAsync(ulong steamId, CancellationToken ct) => Task.FromResult<LifetimePlayerStatsRow?>(null);
+        public Task UpsertMatchSummariesAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken ct) => Hang(ct);
+        public Task UpsertMatchWeaponStatsAsync(IEnumerable<PlayerSnapshot> snapshots, CancellationToken ct) => Hang(ct);
+        public Task UpsertPlayerAnalyticsAsync(IEnumerable<PlayerAnalyticsSnapshot> snapshots, CancellationToken ct) => Hang(ct);
+        public Task UpsertPlayerRoundStatsAsync(IEnumerable<PlayerSnapshot> roundDeltas, CancellationToken ct) => Hang(ct);
+        public Task StartMatchAsync(string mapName, string matchUuid, CancellationToken ct) => Hang(ct);
+        public Task EndMatchAsync(string matchUuid, CancellationToken ct) => Hang(ct);
+        public Task StartRoundAsync(string matchUuid, int roundNumber, CancellationToken ct) => Hang(ct);
+        public Task EndRoundAsync(string matchUuid, int roundNumber, int winnerTeam, int winReason, RoundBombInfo bomb, CancellationToken ct) => Hang(ct);
+        public Task UpdateRoundEconomyAsync(string matchUuid, int roundNumber, RoundEconomy economy, CancellationToken ct) => Hang(ct);
+        public Task OfficiallyEndRoundAsync(string matchUuid, int roundNumber, CancellationToken ct) => Hang(ct);
+        public Task VoidRoundsAsync(string matchUuid, int fromRound, CancellationToken ct) => Hang(ct);
         public Task CheckLocalInfileAsync(CancellationToken ct) => Task.CompletedTask;
     }
 }

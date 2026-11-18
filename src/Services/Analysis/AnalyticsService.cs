@@ -8,13 +8,7 @@ namespace statsCollector.Services;
 public interface IAnalyticsService
 {
     decimal CalculateHLTVRating(PlayerStats stats);
-    decimal CalculateImpactRating(PlayerStats stats);
-    decimal CalculateKASTPercentage(PlayerStats stats);
     decimal CalculateADR(PlayerStats stats);
-    decimal CalculateKDRatio(PlayerStats stats);
-    decimal CalculateHeadshotPercentage(PlayerStats stats);
-    decimal CalculateAccuracyPercentage(PlayerStats stats);
-    decimal CalculateUtilityScore(PlayerStats stats);
     decimal CalculatePerformanceScore(PlayerStats stats);
     string GetPlayerRank(decimal performanceScore);
     decimal CalculateHltv2Rating(int kills, int assists, int deaths, int rounds, decimal kastPercent, decimal adr);
@@ -34,7 +28,7 @@ public sealed class AnalyticsService : IAnalyticsService
             CalculateADR(stats));
     }
 
-    public decimal CalculateImpactRating(PlayerStats stats)
+    private decimal CalculateImpactRating(PlayerStats stats)
     {
         if (stats.Round.RoundsPlayed == 0) return 0m;
 
@@ -46,7 +40,7 @@ public sealed class AnalyticsService : IAnalyticsService
         return Math.Min(2.0m, (multiKillImpact + clutchImpact + openingImpact + mvpImpact) / stats.Round.RoundsPlayed);
     }
 
-    public decimal CalculateKASTPercentage(PlayerStats stats)
+    private decimal CalculateKASTPercentage(PlayerStats stats)
     {
         return stats.Round.RoundsPlayed > 0 ? (decimal)stats.Round.KASTRounds / stats.Round.RoundsPlayed * 100m : 0m;
     }
@@ -56,22 +50,22 @@ public sealed class AnalyticsService : IAnalyticsService
         return stats.Round.RoundsPlayed > 0 ? (decimal)stats.Combat.DamageDealt / stats.Round.RoundsPlayed : 0m;
     }
 
-    public decimal CalculateKDRatio(PlayerStats stats)
+    private decimal CalculateKDRatio(PlayerStats stats)
     {
         return stats.Combat.Deaths > 0 ? (decimal)stats.Combat.Kills / stats.Combat.Deaths : stats.Combat.Kills;
     }
 
-    public decimal CalculateHeadshotPercentage(PlayerStats stats)
+    private decimal CalculateHeadshotPercentage(PlayerStats stats)
     {
         return stats.Combat.Kills > 0 ? (decimal)stats.Combat.Headshots / stats.Combat.Kills * 100m : 0m;
     }
 
-    public decimal CalculateAccuracyPercentage(PlayerStats stats)
+    private decimal CalculateAccuracyPercentage(PlayerStats stats)
     {
         return stats.Combat.ShotsFired > 0 ? Math.Min(100m, (decimal)stats.Combat.ShotsHit / stats.Combat.ShotsFired * 100m) : 0m;
     }
 
-    public decimal CalculateUtilityScore(PlayerStats stats)
+    private decimal CalculateUtilityScore(PlayerStats stats)
     {
         if (stats.Round.RoundsPlayed == 0) return 0m;
         var rounds = (decimal)stats.Round.RoundsPlayed;

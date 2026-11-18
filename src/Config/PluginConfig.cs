@@ -102,6 +102,12 @@ public sealed class PluginConfig : BasePluginConfig
             // for a free one.
             MaximumPoolSize = 10,
             ConnectionTimeout = (uint)ResiliencePolicies.AttemptTimeout.TotalSeconds,
+            // The pipeline's timeout only asks for a cancel, a KILL QUERY sent over a new connection: against a server
+            // that stopped answering, the query ran on to DefaultCommandTimeout + CancellationTimeout (30 s + 2 s by
+            // default). Here a command's own timeout is the attempt timeout and its socket is closed a second later;
+            // CancellationTimeout also bounds how long opening the KILL QUERY connection blocks the cancelling thread.
+            DefaultCommandTimeout = (uint)ResiliencePolicies.AttemptTimeout.TotalSeconds,
+            CancellationTimeout = 1,
             AllowLoadLocalInfile = true,
             SslCa = DatabaseSslCa ?? string.Empty,
             // An empty value passes validation; it must not fall back to Preferred, which accepts plaintext.
@@ -146,6 +152,11 @@ public sealed class PluginConfig : BasePluginConfig
             throw new ArgumentException("MaxTacticalPauses must be between 1 and 10");
         if (Scrim.TacticalPauseDuration is < 5 or > 600)
             throw new ArgumentException("TacticalPauseDuration must be between 5 and 600 seconds");
+        // MySqlConnector checks the server's certificate against the CA only in these modes. Under Required (the
+        // default) it accepts any certificate, so a configured CA verified nothing and the password went to whoever
+        // terminated TLS.
+        if (!string.IsNullOrWhiteSpace(DatabaseSslCa) && DatabaseSslMode is not ("VerifyCA" or "VerifyFull"))
+            throw new ArgumentException($"DatabaseSslCa is set but DatabaseSslMode {DatabaseSslMode} does not check the server's certificate against it; set DatabaseSslMode to VerifyCA (or VerifyFull).");
         if (!string.IsNullOrWhiteSpace(DatabaseSslCa) && !File.Exists(DatabaseSslCa))
             throw new ArgumentException($"DatabaseSslCa file not found: {DatabaseSslCa}");
     }

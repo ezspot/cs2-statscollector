@@ -3,7 +3,7 @@
 Get up and running fast. For full details, see [README.md](README.md).
 
 ## Prerequisites
-- CounterStrikeSharp v1.0.379+ (.NET 10) with Metamod:Source 2.x build 1467+
+- CounterStrikeSharp v1.0.379+ (.NET 10; v1.0.380+ on CS2 1.41.9.7 and later) with Metamod:Source 2.x build 1467+
 - .NET 10 SDK to build
 - MySQL 8.4 LTS or 9.7 LTS with `local_infile=ON`
 - CS2 server with admin access, started with `-allow_round_backup_files` if you use `.restore`

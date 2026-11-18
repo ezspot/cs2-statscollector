@@ -54,6 +54,21 @@ public class PlayerSessionServiceTests
     }
 
     [Fact]
+    public async Task ReconnectDoesNotCountTheTimeAwayAsPlaytime()
+    {
+        var (service, sessionId) = Connect();
+        service.MarkDisconnected(SteamId);
+
+        await Task.Delay(1500);
+        service.EnsurePlayer(PlayerControllerState.From(null) with { SteamId = SteamId, PlayerName = "p" });
+        service.HydrateLifetime(SteamId, sessionId, null);
+
+        // Connected for a few milliseconds in all; the 1.5 s away is not playtime.
+        Assert.True(service.TryGetSnapshot(SteamId, out var snapshot));
+        Assert.Equal(0, snapshot.PlaytimeSeconds);
+    }
+
+    [Fact]
     public void SeededSessionIsRemovedAtDisconnect()
     {
         var (service, sessionId) = Connect();

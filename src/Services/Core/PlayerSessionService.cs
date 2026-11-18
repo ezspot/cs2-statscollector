@@ -68,7 +68,8 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
         wrapper.Lock.EnterWriteLock();
         try
         {
-            // A reconnect before a held session's seed caught up continues that session.
+            // A reconnect before a held session's seed caught up continues that session, without the time away.
+            if (wrapper.DisconnectedUtc is { } leftUtc) wrapper.Stats.ExcludeFromPlaytime(DateTime.UtcNow - leftUtc);
             wrapper.DisconnectedUtc = null;
             if (wrapper.Stats.Name != player.PlayerName)
             {

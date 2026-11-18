@@ -79,8 +79,12 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
     private readonly IStatsRepository _repository;
     private readonly Queue<List<StatsUpdate>> _failedBatches = new();
     private readonly string _spillPath;
-    // The spill file holds batches still in _failedBatches; it is removed once they are written. Worker thread only.
-    private bool _spillPending;
+    // How many batches restored from the spill file are still at the head of _failedBatches. Nothing newer is written
+    // while any is there, so the file is removed as soon as the last of them leaves the head. Only this instance's
+    // restore sets it, so without a restore here nothing is deleted. ponytail: one file, no owner; an older instance
+    // whose unload ran over can spill after this one restored, and that spill is deleted with this one's (one instance
+    // owning the file, e.g. through an exclusive lock, would close it). Worker thread only.
+    private int _restoredBatches;
     private const long MaxBufferSize = 50 * 1024 * 1024;
     private long _currentBufferSize;
     // Open from construction: the channel buffers writes made before the worker's first read.
@@ -191,23 +195,11 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                 }
             }
 
-            if (batch.Count > 0 && _failedBatches.Count > 0)
-            {
-                // An outage is on: retrying now would spend the unload budget before the spill below gets its turn.
-                BufferFailedBatch([.. batch]);
-            }
-            else if (batch.Count > 0)
-            {
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                try
-                {
-                    await ProcessBatchAsync(batch, timeout.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    BufferFailedBatch([.. batch]);
-                }
-            }
+            // Kept on disk, not written again: the stop's flush wrote what it could, so this is the batch the stop cut
+            // off mid-write or an update that raced the flush, and another write would run past the unload (a reload
+            // in that window would miss the spill). Behind the buffered batches, it is replayed in order at the next
+            // start, before anything newer.
+            if (batch.Count > 0) BufferFailedBatch([.. batch]);
             SpillFailedBatches();
         }
     }
@@ -215,11 +207,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
     // What an outage left in the retry buffer at unload is kept on disk and written at the next start.
     private void SpillFailedBatches()
     {
-        if (_failedBatches.Count == 0)
-        {
-            RemoveWrittenSpill();
-            return;
-        }
+        if (_failedBatches.Count == 0) return;
         var updates = _failedBatches.Sum(batch => batch.Count);
         try
         {
@@ -258,12 +246,14 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
             return;
         }
 
-        // The file stays until these batches are written: a crash during the replay must not lose them. Writing a
-        // batch again after a crash is harmless, because nothing newer is written before the whole buffer is.
-        _spillPending = true;
+        // The file stays until these batches have left the head of the buffer: a crash during the replay must not lose
+        // them, and writing one again after a crash is harmless, as nothing newer is written before them.
         foreach (var batch in batches) BufferFailedBatch(batch);
+        // The buffer was empty before: all it holds came from the file.
+        _restoredBatches = _failedBatches.Count;
         _logger.LogInformation("Restored {Batches} unwritten persistence batches ({Updates} updates) from {Path}.",
             batches.Count, batches.Sum(batch => batch.Count), _spillPath);
+        if (_restoredBatches == 0) RemoveWrittenSpill();
         await ProcessRetryQueueAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -428,8 +418,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
         var estimatedSize = batch.Count * 1024L;
         while (_failedBatches.Count > 0 && _currentBufferSize + estimatedSize > MaxBufferSize)
         {
-            var oldest = _failedBatches.Dequeue();
-            _currentBufferSize -= oldest.Count * 1024L;
+            var oldest = DequeueFailedBatch();
             _logger.LogCritical("Persistence retry buffer full. Dropped the oldest batch of {Count} updates.", oldest.Count);
         }
 
@@ -448,8 +437,7 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
             try
             {
                 await WriteAsync(batch, cancellationToken).ConfigureAwait(false);
-                _failedBatches.Dequeue();
-                _currentBufferSize -= batch.Count * 1024L;
+                DequeueFailedBatch();
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -462,18 +450,27 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
             }
         }
 
-        if (_failedBatches.Count == 0) RemoveWrittenSpill();
+        // Once per recovery, so the log shows that the buffered updates reached the database.
+        if (batchesToProcess > 0 && _failedBatches.Count == 0)
+            _logger.LogInformation("The persistence retry buffer is empty again: its batches are written, apart from any dropped as logged.");
+    }
+
+    // For a head batch that is written, dropped as unwritable, or evicted.
+    private List<StatsUpdate> DequeueFailedBatch()
+    {
+        var batch = _failedBatches.Dequeue();
+        _currentBufferSize -= batch.Count * 1024L;
+        if (_restoredBatches > 0 && --_restoredBatches == 0) RemoveWrittenSpill();
+        return batch;
     }
 
     // Before anything newer is written: replayed after that, the file's lifetime snapshots would overwrite newer totals.
     private void RemoveWrittenSpill()
     {
-        if (!_spillPending) return;
-        _spillPending = false;
         try
         {
             File.Delete(_spillPath);
-            _logger.LogInformation("The unwritten updates kept in {Path} are written; removed the file.", _spillPath);
+            _logger.LogInformation("The updates restored from {Path} are written, apart from any dropped as logged; removed the file.", _spillPath);
         }
         catch (Exception ex)
         {
