@@ -47,17 +47,4 @@ public sealed class UtilityStats
     public int EffectiveFlashes { get => _effectiveFlashes; set { _effectiveFlashes = value; _markDirty(); } }
     public int EffectiveHEGrenades { get => _effectiveHeGrenades; set { _effectiveHeGrenades = value; _markDirty(); } }
     public int EffectiveMolotovs { get => _effectiveMolotovs; set { _effectiveMolotovs = value; _markDirty(); } }
-
-    public void Reset()
-    {
-        _flashbangsThrown = _smokesThrown = _heGrenadesThrown = _molotovsThrown = _decoysThrown = 0;
-        _utilityDamage = _enemiesBlinded = _teammatesBlinded = 0;
-        _flashAssists = _wastedFlashes = 0;
-        _timesBlinded = 0;
-        _totalBlindTime = 0f;
-        _totalBlindTimeInflicted = 0f;
-        _utilityDamageTaken = 0;
-        _effectiveFlashes = _effectiveHeGrenades = _effectiveMolotovs = 0;
-        _markDirty();
-    }
 }

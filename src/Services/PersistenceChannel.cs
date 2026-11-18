@@ -79,6 +79,8 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
     private readonly IStatsRepository _repository;
     private readonly Queue<List<StatsUpdate>> _failedBatches = new();
     private readonly string _spillPath;
+    // The spill file holds batches still in _failedBatches; it is removed once they are written. Worker thread only.
+    private bool _spillPending;
     private const long MaxBufferSize = 50 * 1024 * 1024;
     private long _currentBufferSize;
     // Open from construction: the channel buffers writes made before the worker's first read.
@@ -213,7 +215,11 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
     // What an outage left in the retry buffer at unload is kept on disk and written at the next start.
     private void SpillFailedBatches()
     {
-        if (_failedBatches.Count == 0) return;
+        if (_failedBatches.Count == 0)
+        {
+            RemoveWrittenSpill();
+            return;
+        }
         var updates = _failedBatches.Sum(batch => batch.Count);
         try
         {
@@ -235,14 +241,26 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
         try
         {
             batches = JsonSerializer.Deserialize<List<List<StatsUpdate>>>(File.ReadAllText(_spillPath)) ?? [];
-            File.Delete(_spillPath);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Could not read the unwritten updates kept in {Path}; the file is left in place.", _spillPath);
+            // Moved aside: the next spill would otherwise replace it, and with it the only copy of those updates.
+            var unreadable = $"{_spillPath}.unreadable-{DateTime.UtcNow:yyyyMMdd'T'HHmmss'Z'}";
+            try
+            {
+                File.Move(_spillPath, unreadable);
+                _logger.LogError(ex, "Could not read the unwritten updates kept in {Path}; moved it to {Unreadable}.", _spillPath, unreadable);
+            }
+            catch (Exception moveEx)
+            {
+                _logger.LogError(ex, "Could not read the unwritten updates kept in {Path}, nor move it aside ({MoveError}).", _spillPath, moveEx.Message);
+            }
             return;
         }
 
+        // The file stays until these batches are written: a crash during the replay must not lose them. Writing a
+        // batch again after a crash is harmless, because nothing newer is written before the whole buffer is.
+        _spillPending = true;
         foreach (var batch in batches) BufferFailedBatch(batch);
         _logger.LogInformation("Restored {Batches} unwritten persistence batches ({Updates} updates) from {Path}.",
             batches.Count, batches.Sum(batch => batch.Count), _spillPath);
@@ -442,6 +460,24 @@ public sealed class PersistenceChannel : BackgroundService, IPersistenceChannel
                 _logger.LogWarning(ex, "Persistence retry remains unavailable; preserving buffered update order.");
                 break;
             }
+        }
+
+        if (_failedBatches.Count == 0) RemoveWrittenSpill();
+    }
+
+    // Before anything newer is written: replayed after that, the file's lifetime snapshots would overwrite newer totals.
+    private void RemoveWrittenSpill()
+    {
+        if (!_spillPending) return;
+        _spillPending = false;
+        try
+        {
+            File.Delete(_spillPath);
+            _logger.LogInformation("The unwritten updates kept in {Path} are written; removed the file.", _spillPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogCritical(ex, "Could not remove {Path} after writing its updates. Delete it before the next start, or they are written again over newer totals.", _spillPath);
         }
     }
 }

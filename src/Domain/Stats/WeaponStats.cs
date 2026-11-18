@@ -45,15 +45,4 @@ public sealed class WeaponStats
         byWeapon[weapon] = byWeapon.GetValueOrDefault(weapon, 0) + amount;
         _markDirty();
     }
-
-    public void Reset()
-    {
-        _killsByWeapon.Clear();
-        _headshotsByWeapon.Clear();
-        _shotsByWeapon.Clear();
-        _hitsByWeapon.Clear();
-        _damageByWeapon.Clear();
-        _deathsByWeapon.Clear();
-        _markDirty();
-    }
 }

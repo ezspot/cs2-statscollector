@@ -35,13 +35,4 @@ public sealed class EconomyStats
     public int KillReward { get => _killReward; set { _killReward = value; _markDirty(); } }
     public int CashEarned { get => _cashEarned; set { _cashEarned = value; _markDirty(); } }
     public int MoneySaved { get => _moneySaved; set { _moneySaved = value; _markDirty(); } }
-
-    public void Reset()
-    {
-        _moneySpent = _equipmentValue = _itemsPurchased = _itemsPickedUp = 0;
-        _roundStartMoney = _roundEndMoney = 0;
-        _equipmentValueStart = _equipmentValueEnd = 0;
-        _killReward = _cashEarned = _moneySaved = 0;
-        _markDirty();
-    }
 }

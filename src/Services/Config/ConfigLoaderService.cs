@@ -48,11 +48,6 @@ public class ConfigLoaderService : IConfigLoaderService
 
         _logger.LogInformation("Loading config file: {Path}", configPath);
         var lines = await File.ReadAllLinesAsync(configPath);
-        await ExecuteLinesAsync(lines);
-    }
-
-    public Task ExecuteLinesAsync(string[] lines)
-    {
         _scheduler.Schedule(() =>
         {
             foreach (var line in lines)
@@ -64,7 +59,6 @@ public class ConfigLoaderService : IConfigLoaderService
                 Server.ExecuteCommand(trimmedLine);
             }
         });
-        return Task.CompletedTask;
     }
 
     public bool IsPlayerWhitelisted(ulong steamId)

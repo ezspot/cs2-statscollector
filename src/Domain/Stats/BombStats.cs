@@ -46,14 +46,4 @@ public sealed class BombStats
     public int ClutchDefuses { get => _clutchDefuses; set { _clutchDefuses = value; _markDirty(); } }
     public int TotalPlantTime { get => _totalPlantTime; set { _totalPlantTime = value; _markDirty(); } }
     public int TotalDefuseTime { get => _totalDefuseTime; set { _totalDefuseTime = value; _markDirty(); } }
-
-    public void Reset()
-    {
-        _bombPlants = _bombDefuses = _bombExplosions = _bombPlantAttempts = _bombDefuseAttempts = 0;
-        _bombPlantAborts = _bombDefuseAborts = _bombDefuseWithKit = _bombDefuseWithoutKit = 0;
-        _bombDrops = _bombPickups = _defuserPickups = 0;
-        _bombKills = _bombDeaths = _clutchDefuses = 0;
-        _totalPlantTime = _totalDefuseTime = 0;
-        _markDirty();
-    }
 }

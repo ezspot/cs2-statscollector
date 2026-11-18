@@ -47,6 +47,13 @@ public class PersistenceChannelTests
         Assert.True(File.Exists(path), "spilled on stop");
         Assert.Empty(log);
 
+        // A start while the database is still down replays nothing; it then crashes (never stopped, so it never spills
+        // again). The file must outlive it.
+        var crashed = NewChannel(new FakeRepo([]) { Outage = true }, path);
+        await crashed.StartAsync(CancellationToken.None);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => crashed.FlushAsync());
+        Assert.True(File.Exists(path), "kept until its batches are written");
+
         repo.Outage = false;
         var second = NewChannel(repo, path);
         await second.StartAsync(CancellationToken.None);
@@ -55,6 +62,22 @@ public class PersistenceChannelTests
 
         Assert.False(File.Exists(path), "spill file removed once replayed");
         Assert.Equal(["round m1 #1", "rounds[m1 r1 k9]"], log);
+    }
+
+    [Fact]
+    public async Task UnreadableSpillIsMovedAsideInsteadOfOverwritten()
+    {
+        var path = NewSpillPath();
+        File.WriteAllText(path, "{ not json");
+
+        var channel = NewChannel(new FakeRepo([]) { Outage = true }, path);
+        channel.TryWrite(new RoundStartUpdate("m1", 1));
+        await channel.StartAsync(CancellationToken.None);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => channel.StopAsync(CancellationToken.None));
+
+        var aside = Assert.Single(Directory.GetFiles(Path.GetDirectoryName(path)!, "pending_stats.json.unreadable-*"));
+        Assert.Equal("{ not json", File.ReadAllText(aside));
+        Assert.True(File.Exists(path), "this run's spill is written next to it");
     }
 
     [Fact]

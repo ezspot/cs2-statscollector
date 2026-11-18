@@ -2,7 +2,7 @@ using statsCollector.Infrastructure;
 
 namespace statsCollector.Services;
 
-public record RoundContext(int RoundNumber, DateTime RoundStartUtc, int CtAliveAtStart, int TAliveAtStart, bool IsPistolRound = false);
+public record RoundContext(int RoundNumber, DateTime RoundStartUtc);
 
 public interface IEventProcessor
 {

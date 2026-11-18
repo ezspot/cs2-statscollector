@@ -12,6 +12,11 @@ namespace statsCollector.Infrastructure;
 
 public static class ResiliencePolicies
 {
+    // How long one database attempt may take. The connection string uses it too: MySqlConnector's OpenAsync ignores
+    // cancellation while it waits for the server's greeting and gives up only at its ConnectionTimeout (15 s by
+    // default), so against a server that accepts and never answers this timeout alone did not end the attempt.
+    public static readonly TimeSpan AttemptTimeout = TimeSpan.FromSeconds(5);
+
     // Failures a later attempt can fix: connectivity (MySqlConnector reports a dropped connection with ErrorCode
     // None and an IO/socket inner exception; a drop while sending escapes as the raw IOException or SocketException),
     // too many connections, deadlocks and lock waits. A deterministic error (bad SQL, missing column or privilege,
@@ -21,9 +26,11 @@ public static class ResiliencePolicies
         (ex.IsTransient && ex.InnerException is not AuthenticationException) ||
         ex.InnerException is IOException or SocketException;
 
-    // A failure that clears by itself: an unreachable or restarting database, or the breaker it opened.
+    // A failure that clears by itself: an unreachable, restarting or unresponsive database (what the pipeline below
+    // retries, its per-attempt timeout included), or the breaker it opened.
     public static bool IsOutage(Exception ex) =>
-        ex is BrokenCircuitException or IOException or SocketException || (ex is MySqlException mysql && IsTransient(mysql));
+        ex is BrokenCircuitException or TimeoutRejectedException or TimeoutException or IOException or SocketException ||
+        (ex is MySqlException mysql && IsTransient(mysql));
 
     // Whether a failed write is worth keeping for later. Only an error in the write's own data fails the same way
     // however often it is retried. Everything else may clear: an outage, a restart, a failover's read-only window, an
@@ -107,7 +114,7 @@ public static class ResiliencePolicies
             })
             .AddTimeout(new TimeoutStrategyOptions
             {
-                Timeout = TimeSpan.FromSeconds(5),
+                Timeout = AttemptTimeout,
                 Name = "DatabaseTimeout"
             })
             .Build();

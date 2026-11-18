@@ -15,7 +15,10 @@ A CounterStrikeSharp plugin for CS2 that collects detailed player statistics int
   fail while the database is unreachable, restarting or read-only (or missing a column or grant) stay buffered and are
   written once it recovers; a write whose own data is rejected is logged and dropped instead of blocking the queue.
   Batches still unwritten when the plugin unloads are spilled to `pending_stats.json` in the plugin directory and
-  replayed at the next start. At startup the plugin checks the server's `local_infile` and logs a critical message
+  replayed at the next start; the file is removed only once they are written, so a crash during the replay loses
+  nothing. A file that cannot be read is renamed `pending_stats.json.unreadable-<UTC time>` and left for inspection.
+  Position events (heatmaps) are not spilled: those still buffered at unload are counted in a warning and lost.
+  At startup the plugin checks the server's `local_infile` and logs a critical message
   with the fix when it is off (every bulk write needs it).
 - **Bots** — bots count in the round state (alive counts, first kill, trades, clutch odds) but get no stats of their
   own: a human's kills, damage and team kills on bots count, and a bot's kill is recorded as a death, not a suicide.

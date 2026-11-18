@@ -171,11 +171,16 @@ public sealed class PositionPersistenceService : IPositionPersistenceService
         }
         catch (OperationCanceledException)
         {
-            _logger.LogWarning("Position persistence stop was canceled. {Pending} queued items may be unflushed.", _channel.Reader.Count);
             if (_linkedCts is not null)
             {
                 await _linkedCts.CancelAsync().ConfigureAwait(false);
             }
+            // Position events are not kept across a restart. During an outage most of them wait in the retry buffer.
+            _logger.LogWarning("Position persistence stopped before catching up: {Queued} queued and {Buffered} buffered position events were not written, nor the rest of a batch (up to 100) being written then.",
+                _channel.Reader.Count, _retryQueue.Count);
+            if (_pendingVoid is { } pending)
+                _logger.LogWarning("The restore void of rounds {FromRound}+ of match {Match} was not applied; those rounds' position rows stay next to the replayed ones.",
+                    pending.FromRound, pending.MatchUuid);
         }
         finally
         {

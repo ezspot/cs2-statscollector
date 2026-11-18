@@ -81,16 +81,4 @@ public sealed class RoundStats
         _wasFlashedForKill = false;
         _markDirty();
     }
-
-    public void Reset()
-    {
-        _roundsPlayed = _roundsWon = _kastRounds = 0;
-        _aliveOnTeamAtRoundStart = _aliveEnemyAtRoundStart = 0;
-        _jumps = _totalSpawns = 0;
-        _roundNumber = _ctRounds = _tRounds = 0;
-        _liveTime = 0;
-        _roundsSurvived = _roundsTraded = _ctRoundsWon = _tRoundsWon = 0;
-        _pistolRoundsPlayed = _pistolRoundsWon = 0;
-        ResetRoundFlags();
-    }
 }

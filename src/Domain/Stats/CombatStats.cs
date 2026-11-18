@@ -186,32 +186,4 @@ public sealed class CombatStats
         if (meters > _longestKill) _longestKill = meters;
         _markDirty();
     }
-
-    public void Reset()
-    {
-        _kills = _deaths = _assists = _headshots = 0;
-        _damageDealt = _damageTaken = _shotsHit = _shotsFired = 0;
-        _damageArmor = _score = 0;
-        _mvps = 0;
-        _wallbangKills = _noscopes = 0;
-        _throughSmokeKills = _blindKills = 0;
-        _firstKills = _firstDeaths = _tradeKills = _tradedDeaths = 0;
-        _clutchKills = _clutchesWon = _clutchesLost = 0;
-        _revenges = 0;
-        _multiKill2 = _multiKill3 = _multiKill4 = _multiKill5 = 0;
-        _entryKills = _entryDeaths = _entryKillAttempts = _entryKillAttemptWins = 0;
-        _mvpsEliminations = _mvpsBomb = _mvpsHostage = 0;
-        _clutchPoints = 0;
-        _headshotsHit = _chestHits = _stomachHits = _armHits = _legHits = 0;
-        _lowImpactKills = 0;
-        _multiKillNades = _nadeKills = _highImpactKills = 0;
-        _roundSwing = _currentRoundSwing = 0;
-        _teamKills = _suicides = _teamDamage = _multiKill1 = _pistolRoundKills = 0;
-        _ctKills = _tKills = _ctDeaths = _tDeaths = _ctDamage = _tDamage = 0;
-        _ctFirstKills = _tFirstKills = _ctFirstDeaths = _tFirstDeaths = 0;
-        _killDistanceTotal = _longestKill = 0m;
-        Array.Clear(_clutchAttempts);
-        Array.Clear(_clutchWins);
-        _markDirty();
-    }
 }

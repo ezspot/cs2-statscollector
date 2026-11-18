@@ -265,7 +265,7 @@ public sealed class MatchFlowHandler : IGameHandler
             else if (player.TeamNum == (int)PlayerTeam.Terrorist) tAlive++;
         }
 
-        var context = new RoundContext(_currentRoundNumber, roundStartUtc, ctAlive, tAlive, isPistolRound);
+        var context = new RoundContext(_currentRoundNumber, roundStartUtc);
         foreach (var processor in _processors)
         {
             processor.OnRoundStart(context);

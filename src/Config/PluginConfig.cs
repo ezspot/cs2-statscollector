@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging;
 using CounterStrikeSharp.API.Core;
 using Microsoft.Extensions.Configuration;
 using MySqlConnector;
+using statsCollector.Infrastructure;
 
 namespace statsCollector.Config;
 
@@ -100,6 +101,7 @@ public sealed class PluginConfig : BasePluginConfig
             // borrows one for a single primary-key read. Ten covers the writers plus a join burst; further opens wait
             // for a free one.
             MaximumPoolSize = 10,
+            ConnectionTimeout = (uint)ResiliencePolicies.AttemptTimeout.TotalSeconds,
             AllowLoadLocalInfile = true,
             SslCa = DatabaseSslCa ?? string.Empty,
             // An empty value passes validation; it must not fall back to Preferred, which accepts plaintext.

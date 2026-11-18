@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using Polly.Timeout;
 using statsCollector.Config;
 using statsCollector.Services;
 using Xunit;
@@ -43,6 +44,23 @@ public class PositionPersistenceTests
         Check(log.Any(e => e == "kills[30]"), "outage row written after recovery");
     }
 
+    [Fact]
+    public async Task VoidThatTimesOutHoldsTheReplayedRowsBackInsteadOfBeingAbandoned()
+    {
+        var log = new List<string>();
+        var repo = new FakeRepo(log) { VoidTimesOut = true };
+        var svc = new PositionPersistenceService(repo, NullLogger<PositionPersistenceService>.Instance, new PluginConfig());
+        await svc.StartAsync(CancellationToken.None);
+
+        svc.VoidRounds("m1", 5);
+        svc.TryEnqueue(Kill(5, 10));
+        await Task.Delay(500);
+
+        // Given up, the void would have let the replay's row through while the voided rounds' rows stay.
+        Assert.Empty(log);
+        await svc.StopAsync(TimeSpan.FromMilliseconds(100), CancellationToken.None);
+    }
+
     private static void Check(bool ok, string what) => Assert.True(ok, what);
 
     static KillPositionEvent Kill(int round, int id) =>
@@ -61,9 +79,12 @@ public class PositionPersistenceTests
         }
         public Task BulkTrackDeathPositionsAsync(IEnumerable<DeathPositionEvent> events, CancellationToken ct = default) => Task.CompletedTask;
         public Task BulkTrackUtilityPositionsAsync(IEnumerable<UtilityPositionEvent> events, CancellationToken ct = default) => Task.CompletedTask;
+        public volatile bool VoidTimesOut;
         public Task VoidRoundPositionsAsync(string matchUuid, int fromRound, CancellationToken ct = default)
         {
             if (Outage) throw new IOException("db down");
+            // What the pipeline throws once its per-attempt timeout has elapsed on every retry.
+            if (VoidTimesOut) throw new TimeoutRejectedException();
             lock (log) log.Add($"void {matchUuid} >={fromRound}");
             return Task.CompletedTask;
         }

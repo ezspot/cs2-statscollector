@@ -65,7 +65,7 @@ public class CounterTests
     }
 
     [Fact]
-    public void LifetimeRowSeedsSnapshotAndResets()
+    public void LifetimeRowSeedsSnapshot()
     {
         var seeded = new PlayerStats { SteamId = 76561198000000001, Name = "seed" };
         seeded.Combat.LongestKill = 50m;
@@ -92,13 +92,6 @@ public class CounterTests
         // The fields before the appended blocks are still aligned.
         Assert.Equal(("None", 76561198000000001UL, "m1"), (snap.TopWeaponByKills, snap.SteamId, snap.MatchUuid));
         Assert.Empty(snap.WeaponHeadshots);
-
-        seeded.Combat.Reset();
-        seeded.Economy.Reset();
-        seeded.Round.Reset();
-        Assert.Equal(0, seeded.Combat.Clutch1v2Attempts + seeded.Combat.TeamKills + seeded.Economy.KillReward + seeded.Round.LiveTime +
-            seeded.Combat.TeamDamage + seeded.Combat.CtKills + seeded.Round.RoundsSurvived + seeded.Round.PistolRoundsWon + seeded.Combat.MultiKill1);
-        Assert.Equal(0m, seeded.Combat.KillDistanceTotal + seeded.Combat.LongestKill);
     }
 
     [Fact]
