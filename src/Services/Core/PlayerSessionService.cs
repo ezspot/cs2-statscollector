@@ -27,11 +27,17 @@ public interface IPlayerSessionService
     void MarkDisconnected(ulong steamId);
 
     /// <summary>Removes a session that is marked disconnected and seeded, returning its final snapshot. False while
-    /// the session is unseeded, when the player is back, or when it is already gone.</summary>
+    /// the session is unseeded or <see cref="HoldDisconnected"/> is set, when the player is back, or when it is
+    /// already gone.</summary>
     bool TryRemoveDisconnected(ulong steamId, out PlayerSnapshot snapshot, string? matchUuid = null);
 
-    /// <summary>True while a session is kept after its player left (see <see cref="MarkDisconnected"/>).</summary>
+    /// <summary>True while a session is kept after its player left: until it is seeded, or until the round they left
+    /// in is over (see <see cref="HoldDisconnected"/>).</summary>
     bool IsHeld(ulong steamId);
+
+    /// <summary>Set while a round is being played: <see cref="TryRemoveDisconnected"/> then keeps the session of a
+    /// player who left, so the round ends for them when it ends for everyone: counted, with its result and its row.</summary>
+    bool HoldDisconnected { get; set; }
     void MutatePlayer(ulong steamId, Action<PlayerStats> mutation);
     T WithPlayer<T>(ulong steamId, Func<PlayerStats, T> accessor, T defaultValue = default!);
     void ForEachPlayer(Action<PlayerStats> action);
@@ -54,6 +60,10 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
     }
 
     public event Action<ulong, long>? PlayerSessionCreated;
+
+    // Written on the game thread, read by a seed on a pool thread as well.
+    private volatile bool _holdDisconnected;
+    public bool HoldDisconnected { get => _holdDisconnected; set => _holdDisconnected = value; }
 
     public void EnsurePlayer(PlayerControllerState player)
     {
@@ -150,21 +160,28 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
         {
             // The disconnect handler and the seed loop can both get here: removing this wrapper (not whatever a
             // reconnect put under the key) under its lock lets exactly one of them take the snapshot.
-            if (wrapper.DisconnectedUtc is not { } leftUtc || !wrapper.Stats.LifetimeSeeded ||
+            if (HoldDisconnected || wrapper.DisconnectedUtc is null || !wrapper.Stats.LifetimeSeeded ||
                 !_playerStats.TryRemove(new KeyValuePair<ulong, PlayerStatsWrapper>(steamId, wrapper)))
             {
                 return false;
             }
 
-            // Playtime ended at the disconnect, not when the seed caught up.
-            var taken = _analytics.CreateSnapshot(wrapper.Stats, matchUuid);
-            snapshot = taken with { PlaytimeSeconds = taken.PlaytimeSeconds - (int)(DateTime.UtcNow - leftUtc).TotalSeconds };
+            snapshot = Snapshot(wrapper, matchUuid);
             return true;
         }
         finally
         {
             wrapper.Lock.ExitWriteLock();
         }
+    }
+
+    // Under the wrapper's lock. A kept session's playtime ended when its player left, whoever writes it and whenever.
+    private PlayerSnapshot Snapshot(PlayerStatsWrapper wrapper, string? matchUuid)
+    {
+        var snapshot = _analytics.CreateSnapshot(wrapper.Stats, matchUuid);
+        return wrapper.DisconnectedUtc is { } leftUtc
+            ? snapshot with { PlaytimeSeconds = snapshot.PlaytimeSeconds - (int)(DateTime.UtcNow - leftUtc).TotalSeconds }
+            : snapshot;
     }
 
     public void MutatePlayer(ulong steamId, Action<PlayerStats> mutation)
@@ -233,7 +250,7 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
 
                 if (!onlyDirty || wrapper.Stats.IsDirty)
                 {
-                    snapshots.Add(_analytics.CreateSnapshot(wrapper.Stats, matchUuid));
+                    snapshots.Add(Snapshot(wrapper, matchUuid));
                 }
             }
             finally
@@ -265,7 +282,7 @@ public sealed class PlayerSessionService : IPlayerSessionService, IDisposable
                     return false;
                 }
 
-                snapshot = _analytics.CreateSnapshot(wrapper.Stats, matchUuid);
+                snapshot = Snapshot(wrapper, matchUuid);
                 return true;
             }
             finally

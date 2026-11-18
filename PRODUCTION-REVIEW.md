@@ -1,12 +1,13 @@
 # Production-readiness review
 
 **Audited revision** `eeffb44` (18 November 2026); every file:line below refers to it unless another revision is named.
-The fixes in the first table are commit `e79ef9c`, apart from the row marked follow-up. The follow-up is the change after
-`e79ef9c`: it removes what was kept only for compatibility (the plugin is not in production) and fixes one defect found
-by running the plugin on a live CS2 server. During play nothing in the plugin approaches a tick: the largest managed cost
-on one tick is a round end (about 0.2 ms against a 15.6 ms tick at 64 Hz), and on the live server no tick exceeded 200 ms
-outside the unloads against a frozen database. The operational risks were at unload with a hung database, in the spill
-file's lifetime, and in rows the database rejects.
+The fixes in the first table are commit `e79ef9c`, apart from the rows marked follow-up. The follow-up (`ba72500`)
+removes what was kept only for compatibility (the plugin is not in production) and fixes one defect found by running the
+plugin on a live CS2 server. The second follow-up, uncommitted when this was written, fixes four defects found with a
+player on that server. During play nothing in the plugin approaches a tick: the largest managed cost on one tick is a
+round end (about 0.2 ms against a 15.6 ms tick at 64 Hz), and on the live server no tick exceeded 200 ms outside the
+unloads against a frozen database. The operational risks were at unload with a hung database, in the spill file's
+lifetime, and in rows the database rejects.
 
 ## Baseline
 
@@ -35,18 +36,20 @@ file's lifetime, and in rows the database rejects.
 | Low · medium | After an outage, one batch can hold several versions of a row (a round row is written three times); which version won depended on the join's row order. | `StatsRepository.cs:287-299`. | `ORDER BY t.row_id`: the last staged version wins. |
 | Low · high | A held session that continues on reconnect counted the time away as playtime. | `src/Services/Core/PlayerSessionService.cs:71-72`. | The session's start moves forward by the time away. |
 | Low · high | Game-thread waste per event: Utility's `player_hurt` read both players before discarding gun damage; `weapon_fire` built a full snapshot per shot; purchases read strings only for disabled trace logs. | `src/Services/Processors/UtilityEventProcessor.cs:159-165`, `CombatEventProcessor.cs:570-571`, `EconomyEventProcessor.cs:39,43,57,62`. Each snapshot measured 0.69–1.11 µs and 0.9–1.2 KB. | Filter first; direct checks equivalent to the snapshot's validity; trace reads removed. |
+| Medium · high in code, not yet seen live (second follow-up, found with a player on the live server) | A player joins or reconnects during freeze time. The round was not counted as played for them and got no `player_round_stats` row, while its kills and deaths went into the lifetime and match totals (seen: a death in an uncounted round; a match row of 7 kills in "1 round"). | The engine puts a returning player back on their team before the session exists, so no `player_team` or `round_start` set `CurrentTeam` (`src/Services/Handlers/PlayerLifecycleHandler.cs:187-196`, `MatchFlowHandler.cs:330` at `ba72500`); and round starts were recorded only at `round_start` (`src/Services/Match/RoundBackupService.cs:74-81`). | The freeze end sets the team of every session on a side and adds the sessions missing from the round's recorded start. Unit test for the second part; the fix was deployed but no player joined again to confirm it. |
+| Medium · high in code, not yet seen live (second follow-up) | `mp_restartgame` mid-round. The aborted round's kills stayed in lifetime totals, in the ended match's row and in the position tables (seen with a player: 3 kills of an abandoned round kept). | `MatchFlowHandler.cs:373-375` at `ba72500` returned on a restart; engine order confirmed: `round_officially_ended` without `round_end`. | A restart while a round is live (after its freeze end, before its `round_end`) rolls that round back as a restore does, before the match is finalized. A restart in freeze time or after the match ended rolls nothing back. |
+| Low-Medium · high in code, not yet seen live (second follow-up, found with a player on the live server) | A player leaves mid-round. Their kills and deaths of that round stayed in the lifetime and match totals, but the round was not counted as played and had no round row (seen: 12 kills over "3 rounds" where 4 were played, kills per round 4.0). | `PlayerLifecycleHandler.cs:144-166` at `ba72500` removed the session at the disconnect; the round end counts rounds only for sessions that exist (`MatchFlowHandler.cs:326-360`). | Decided: the round counts, complete. While a round is being played a leaver's session is kept until that round is over, so the round end counts it for them like for everyone else (played, won or lost, side, KAST, a round row) and only then writes their match and lifetime rows; they count as not having survived it, and playtime ends at the disconnect. Coming back before the round ends continues the session. A restart that abandons the round rolls it back for them too. When the last player on the server leaves, nothing is kept: an empty server may hibernate without ending the round, so everyone who left during it is written at once, with the round not counted (as before). Unit tests for the kept session, its playtime and that rollback; the two event handlers that decide it have none. |
+| Low · high in code, not yet seen live (second follow-up, found with a player on the live server) | A match finalized after a reconnect wrote `top_weapon_by_kills` "None" (weapon totals restart with the session), replacing the value written at the disconnect. | `src/Services/Analysis/AnalyticsService.cs` (`topWeapon`), `MatchStatsService.BuildAnalyticsSnapshot` at `ba72500`. | The match's analytics row takes the top weapon from the match's weapon kills, which carry the earlier session. Unit test. |
 
 ## Open, in priority order
 
 | Severity · confidence | Trigger → consequence | Evidence at eeffb44 | Smallest corrective action |
 |---|---|---|---|
-| Medium · high (engine sequence confirmed on the live server) | `mp_restartgame` mid-round. The aborted round stays in lifetime totals, in the ended match's row, in the position tables, and its `rounds` row stays open (seen: `end_time` NULL). | `src/Services/Handlers/MatchFlowHandler.cs:388` returns on a restart; `:148-153` finalizes from current totals; `src/Services/Match/RoundBackupService.cs:122-127` drops the round starts without rolling back. Engine order on a restart: `cs_pre_restart`, `round_officially_ended` (no `round_end`), `round_prestart`, `round_start`, and `round_announce_match_start` at the freeze end. | Roll the interrupted round back as a restore does (`RollBackStats`) before finalizing, and only when that round's freeze end was seen: a restart after the match has ended also fires `round_officially_ended` without a `round_end`. Needs a run with human players, whose stats are what it rolls back. README states the limitation. |
 | Medium · high | Plugin reload during a scrim (DLL replace hot-reloads). Nothing is recorded until an admin runs `.scrim recover`; the match continues under a new UUID; a tactical pause loses its auto-unpause and the knife side choice its deadline. CounterStrikeSharp also reloads on its own when a plugin file changes (see the live-server run). | `src/Services/Match/ScrimManager.cs:47` starts Idle; `src/Infrastructure/EventDispatcher.cs:52-55` drops events when not Live; `src/Plugin.cs:120-122` starts a new match. | On load, recover automatically when `scrim_state.json` says KnifeRound/Live on the current map; otherwise warn in chat. Until then, deploy between matches. |
 | Medium · high | A phase cfg is missing or misnamed (Linux is case-sensitive). The loader warns and reports success, and the match goes live with knife settings (`mp_maxmoney 0`, no C4). | `src/Services/Config/ConfigLoaderService.cs:43-47`; `ScrimManager.cs:82,290-291`. | Throw for a missing file and keep the scrim in its phase; check all five files at startup. |
 | Medium · high | A position write commits and its acknowledgement is lost (or the 5 s timeout fires after the commit). The retry adds a second kill, death or utility point. Measured 1 event → 2 rows. | `PositionTrackingService.cs:87-111,152-163,216-233`; `init.sql:392-463` has no event identity. | `event_id BINARY(16) NULL` with a UNIQUE key on the three tables, a GUID set at capture, and a dedupe on merge. Edit init.sql in place. |
 | Medium · high | A player acts before their lifetime row has been read (slow database, startup). Lifetime is right, but that play is missing from the match and round rows; a player who leaves before the seed gets no match row; a session still unseeded at unload is lost (now logged). Test case: stored 7 kills plus 1 early kill gives lifetime 8 but match 0 instead of 1. | `src/Services/Handlers/PlayerLifecycleHandler.cs:69-78`; `src/Services/Match/MatchStatsService.cs:69-86,116`. | Needs a design: keep the unseeded session's raw totals at match and round start and adjust them by the stored row when the seed lands. A baseline taken from the stored row alone counts an earlier match's play when the seed lands in a later match. |
 | Medium-Low · high | Timestamps after an outage or a spill replay: matches and rounds get the write time, so start = end = replay time. Seen on the live server: a match that ended at 15:24:45 during the freeze has `end_time` 15:28:44. | `StatsRepository.cs:360-416`; the updates carry no event time (`PersistenceChannel.cs:35-60`). | Carry the event's UTC time in the match and round updates and write it inside the existing COALESCE (the spill format gains a field). |
-| Low-Medium · high | A player who joins or reconnects during freeze time plays the round but gets no `player_round_stats` row, so round rows no longer add up to the match. | Round starts are recorded at round_start (`MatchFlowHandler.cs:224`, `RoundBackupService.cs:76-78`); freeze end stamps everyone as playing (`MatchFlowHandler.cs:286-298`). | At freeze end, add seeded sessions missing from that round's record. |
 | Low · high | Remainder of the unload race. If the stats worker needs more than 2 s after the cleanup budget to stop, its spill still lands after Unload returned (not reached on the live server: 0.08–0.09 s before the return). And if a new instance had restored an older spill, removing that one also removes a late one. | `src/Services/PersistenceChannel.cs` (spill, `RemoveWrittenSpill`, `SpillGrace`). | Make one instance own the spill (an exclusive lock file the next worker waits for before restoring). |
 | Low · high | A spill written by a build with renamed or missing snapshot fields replays them as 0 (lifetime columns are overwritten). | `PersistenceChannel.cs:243` default JSON options. | `UnmappedMemberHandling.Disallow` and `RespectRequiredConstructorParameters` when reading; a mismatching file is then moved aside. |
 | Low · high | The retry buffer's "50 MiB" counts 1 KiB per update; real heap is 3.8–4.5 KiB, so the cap is ≈ 186–218 MiB plus a spill built as one string. | `PersistenceChannel.cs:84,428`. | Cap by update count and serialize the spill to a stream. This changes how much is kept in an outage. |
@@ -57,6 +60,8 @@ file's lifetime, and in rows the database rejects.
 | Low · high | `.ready` broadcasts and rewrites `scrim_state.json` on every call, even unchanged; scrim commands use the claimed SteamID. | `ScrimManager.cs:337-371`. | Return early when unchanged; require `AuthorizedSteamID`. |
 | Low · high | When cleanup outlives the unload, late lines are written after the log file was closed (since the follow-up the spill's own lines reach it in the frozen-database case). | `src/Plugin.cs:259`. | Close the logger after the writers have finished. |
 | Low · high (live server) | A stop that is cut short logs "Position persistence stopped before catching up: 0 queued and 0 buffered position events were not written" even when nothing was pending. | `src/Services/Persistence/PositionPersistenceService.cs` (`StopAsync`). | Skip the warning when both counts are 0 and no batch was being written. |
+| Low · high | A player leaves mid-round (their session is now kept to the round's end). That round's engine-side figures are not added for them: money spent, kill reward, score and live time are read from the player's controller at the round end, and it is gone. Kills, deaths, damage and the round's result are complete. | `MatchFlowHandler.Observe` runs only for connected players. | Read the engine counters once more in the disconnect handler, if the controller is still readable there (not checked on a live server). |
+| Low · medium (expected from the server log, not seen with a kept session) | A player leaves mid-round while alive. The engine kills them after the disconnect (logged as a suicide), and the kept session now records it: one death and one suicide for that round. Before, the session was gone and the death was not recorded. | Server log of the live run: `disconnected`, then `committed suicide with "world"`; `CombatEventProcessor.cs:271-281`. | None if a leaver's death should count, as the engine's scoreboard does. To leave it out, skip a self-kill of a session whose player has left. |
 
 Run CounterStrikeSharp v1.0.380 (12 Nov 2026) or later on the server: it carries the gamedata for CS2 1.41.9.7 and fix
 #1484 (removing a timer from inside a timer callback could leave a freed timer in the timer list); `ScrimManager.cs:607-611
@@ -157,6 +162,7 @@ Kept:
 | `dotnet publish -c Release` | 16 files | 12 files: Polly.Core in place of Polly.Extensions, two Microsoft.Extensions DLLs and `live_wingman.cfg` gone |
 | Live server: Unload with the database frozen | 7.03 s blocked; spill written 3.0 s after it returned, its lines missing from the log file | 7.03–7.04 s blocked (two runs); spill on disk 0.08–0.09 s before it returns, lines in the log file |
 | Independent review of the cleanup diff | | no finding that changes recorded data; six leftovers, all fixed |
+| Second follow-up (after `ba72500`) | 0 warnings, 0 errors; 48 passed | 0 warnings, 0 errors; 52 passed. New: `PlayerSeededDuringFreezeTimeGetsARoundStartAtFreezeEnd`, `LeaverIsKeptWhileARoundIsPlayedAndRemovedOnceItIsOver`, `RollingBackARoundEndsTheSessionOfAPlayerWhoLeftDuringIt`, `TopWeaponOfTheMatchCoversTheSessionBeforeAReconnect` (the last three fail without their fix). An independent review of the kept-session change found three defects, all fixed: a kept session written by a rollback or an unload counted the time since its player left as playtime, and an emptied server could keep it unwritten; a player back between the round end and the next round start got a second, empty round row; and a restart while the database was slow dropped the abandoned match's rows |
 
 Database evidence for the first table came from disposable MySQL 9.7.4 and 8.4.13 containers initialized from
 `database/init.sql`, driven by the real repository and writer classes; a TCP proxy simulated a server that stops
@@ -181,11 +187,28 @@ match events, every tick longer than 200 ms and the planted-bomb lookup; `docker
   in the same second. The instance unloaded before its writer started dropped its two queued updates (a match start
   and end) with the warning "Stopped before the database was reachable".
 
+Live-server run with a player (second follow-up, build `ba72500`): the same rig with a game server login token instead
+of LAN mode, `-allow_round_backup_files`, and one human among nine bots for about 13 minutes.
+- Join: Steam validated the player and the session started 3 s later, at `player_connect_full`; the lifetime row was
+  read again at each of two reconnects.
+- Rounds 1 and 2 against the server's own kill log: 8 kills, 4 headshot kills, one trade kill, two 4-kill rounds, the
+  opening kill, both flashbangs (3 and 1 enemies blinded) and the money spent all match; 9 kill positions and 2 utility
+  positions were stored.
+- Round restore (`mp_backup_restore_load_file` for round 3, sent during round 5): lifetime totals went from 17 kills
+  back to the 8 of the end of round 2, with headshots, damage, money, grenades and kill rewards; the round rows and
+  positions of rounds 3 to 5 were removed; playtime kept counting. The replayed round 3 was recorded on top (10 kills,
+  3 rounds).
+- Reconnect: the 11 s away were not counted as playtime. With bots as the only other players the engine restarted the
+  match when the player came back ("Game Commencing"), so a reconnect inside a running match was not exercised.
+- No Error or Warning line from the plugin and no tick over 200 ms during the session.
+- It exposed the four defects fixed in the second follow-up.
+
 Rollout: replace the plugin files between matches. The schema changed, so drop the database and create it again (or
 let `AutoCreateSchema` create it on an empty one); nothing is migrated. A config that sets `DatabaseSslCa` without
 `VerifyCA`/`VerifyFull` no longer loads.
 
-Not verified: everything that needs a human client. Bots have no session, so the live-server run wrote matches and
-rounds but no player, round-stat or position rows. Joins, seeding, reconnects, the scrim flow (`.ready`, the knife
-round, pauses, `.restore`, `.scrim recover`) and the rollback of a restored round ran only in the unit tests and the
-earlier harness. The proxy-driven hang tests ran without TLS so the proxy could see the commands.
+Not verified: the four fixes of the second follow-up on a live server (unit tests and code only; no player joined
+again after them, and the round-end and disconnect handlers themselves have no unit tests); a reconnect inside a running match, which needs a second human; the scrim flow
+(`.ready`, the knife round, pauses, `.restore` as a command, `.scrim recover`), whose commands need players and ran
+only in the unit tests; bomb plants and defuses by a human; and a spill holding player rows (the frozen-database
+unloads ran with bots only). The proxy-driven hang tests ran without TLS so the proxy could see the commands.

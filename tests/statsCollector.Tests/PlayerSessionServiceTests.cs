@@ -68,6 +68,31 @@ public class PlayerSessionServiceTests
         Assert.Equal(0, snapshot.PlaytimeSeconds);
     }
 
+    // A round being played ends for a leaver when it ends for everyone: the session is kept, so the round end counts the
+    // round for them too.
+    [Fact]
+    public async Task LeaverIsKeptWhileARoundIsPlayedAndRemovedOnceItIsOver()
+    {
+        var (service, sessionId) = Connect();
+        service.HydrateLifetime(SteamId, sessionId, null);
+        service.HoldDisconnected = true;
+
+        service.MarkDisconnected(SteamId);
+
+        Assert.False(service.TryRemoveDisconnected(SteamId, out _));
+        Assert.True(service.IsHeld(SteamId));
+        // Whatever writes the kept session (the round end, a rollback, an unload), its playtime ended at the disconnect.
+        await Task.Delay(1500);
+        Assert.Equal(0, service.CaptureSnapshots().Single().PlaytimeSeconds);
+
+        service.MutatePlayer(SteamId, stats => stats.Round.RoundsPlayed++);
+        service.HoldDisconnected = false;
+
+        Assert.True(service.TryRemoveDisconnected(SteamId, out var snapshot));
+        Assert.Equal(1, snapshot.RoundsPlayed);
+        Assert.Empty(service.GetActiveSteamIds());
+    }
+
     [Fact]
     public void SeededSessionIsRemovedAtDisconnect()
     {

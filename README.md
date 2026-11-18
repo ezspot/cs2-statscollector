@@ -32,9 +32,13 @@ A CounterStrikeSharp plugin for CS2 that collects detailed player statistics int
   with the fix when it is off (every bulk write needs it).
 - **Bots** — bots count in the round state (alive counts, first kill, trades, clutch odds) but get no stats of their
   own: a human's kills, damage and team kills on bots count, and a bot's kill is recorded as a death, not a suicide.
-- **Restarts** — `mp_restartgame` after rounds were played ends the recorded match and starts a new one. The
-  aborted round gets no per-round row, but what was done in it stays: in the lifetime totals, in the ended match's
-  row, and in the position tables. Restart between rounds, not during one.
+- **Restarts** — `mp_restartgame` after rounds were played ends the recorded match and starts a new one. A round
+  that was being played when the restart came is rolled back like a restored round: what was done in it leaves the
+  lifetime totals, the ended match's row and the position tables.
+- **Leaving mid-round** — a player who disconnects while a round is being played keeps that round: it is counted for
+  them when it ends, won or lost with their team and as not survived, and their rows are written then. Their playtime
+  ends when they left. When the last player leaves, nobody plays the round out: it is not counted for those who left
+  during it.
 - **Bulk writes** — player and position batches are written with `MySqlBulkCopy` into a temporary table, then merged.
 - **Scrim management** — lobby/ready-up, captain assignment, map vote, player picking, knife round + side selection.
   After the change to the voted map, the knife round or match waits in warmup until the picked players are back

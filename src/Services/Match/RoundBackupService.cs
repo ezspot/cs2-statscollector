@@ -14,6 +14,13 @@ public interface IRoundBackupService
     void Initialize();
     void Reset();
     void CreateSnapshot(int roundNumber);
+
+    /// <summary>Adds the players who were not recorded at the round's start (they joined during the freeze time).</summary>
+    void AddLateJoiners(int roundNumber);
+
+    /// <summary>Rolls every player's stats back to the start of a round that was abandoned. False when the round's
+    /// start is not recorded.</summary>
+    bool RollBackRound(int roundNumber);
     bool RestoreRound(int roundNumber);
 
     /// <summary>Called at round start. If this round was restored (by <see cref="RestoreRound"/>, or the round number
@@ -78,6 +85,32 @@ public sealed class RoundBackupService(
         lock (_rounds) _rounds.TryAdd(roundNumber, start);
 
         _logger.LogDebug("Round {RoundNumber} backup point recorded.", roundNumber);
+    }
+
+    // Called at the freeze end. A session that was not there (or not yet seeded) at round_start plays the round all the
+    // same: someone who joined or came back during the freeze time. Their totals now are what they start it with; without
+    // them the round has no row for that player and a rollback of it leaves them out.
+    public void AddLateJoiners(int roundNumber)
+    {
+        var now = playerSessions.CaptureSnapshots();
+        lock (_rounds)
+        {
+            if (!_rounds.TryGetValue(roundNumber, out var start)) return;
+            var late = now.Where(player => !Array.Exists(start.Players, known => known.SteamId == player.SteamId)).ToArray();
+            if (late.Length > 0) _rounds[roundNumber] = start with { Players = [.. start.Players, .. late] };
+        }
+    }
+
+    // A restart (mp_restartgame) abandons the round being played: its stats go back to its start, as on a restore.
+    public bool RollBackRound(int roundNumber)
+    {
+        RoundStart? start;
+        lock (_rounds)
+        {
+            if (!_rounds.TryGetValue(roundNumber, out start)) return false;
+        }
+        RollBackStats(roundNumber, start);
+        return true;
     }
 
     public bool RestoreRound(int roundNumber)
@@ -151,11 +184,11 @@ public sealed class RoundBackupService(
         }
 
         var restarted = new List<PlayerSnapshot>();
-        var left = new List<PlayerSnapshot>();
         foreach (var totals in start.Players)
         {
             // Time on the server still counts.
-            var playtime = playerSessions.TryGetSnapshot(totals.SteamId, out var now) ? now.PlaytimeSeconds : totals.PlaytimeSeconds;
+            var seeded = playerSessions.TryGetSnapshot(totals.SteamId, out var now);
+            var playtime = seeded ? now.PlaytimeSeconds : totals.PlaytimeSeconds;
             if (!persistenceChannel.TryWrite(new PlayerStatsUpdate(totals with { PlaytimeSeconds = playtime })))
             {
                 _logger.LogError("Could not queue the round {RoundNumber} totals of {SteamId}; their stats keep the voided rounds.", roundNumber, totals.SteamId);
@@ -163,16 +196,19 @@ public sealed class RoundBackupService(
             }
 
             restarted.Add(totals);
-            // A held session (its player left before its seed caught up) is written by the seed, voided rounds included.
-            if (!playerSessions.IsHeld(totals.SteamId) && playerSessions.TryRemovePlayer(totals.SteamId))
+            // A held session that is not seeded yet (its player left before the seed caught up) is written by the seed,
+            // voided rounds included. A seeded one was kept for the end of the round its player left in: these totals
+            // are its last, so it goes without a new session.
+            var held = playerSessions.IsHeld(totals.SteamId);
+            if ((!held || seeded) && playerSessions.TryRemovePlayer(totals.SteamId) && !held)
                 playerSessions.EnsurePlayer(PlayerControllerState.From(null) with { SteamId = totals.SteamId, PlayerName = totals.Name });
-            else
-                left.Add(totals);
         }
 
         matchStats.RestoreBaseline(start.Baseline, restarted);
-        // Their match row was written when they left, voided rounds included.
-        foreach (var totals in left)
+        // The match row as of the round's start. For those who left it replaces the one written then, voided rounds
+        // included; for the others it is there if the match ends (a restart follows at once) before the new session
+        // is seeded, which the match's end would skip.
+        foreach (var totals in restarted)
         {
             if (start.Baseline.TryGetValue(totals.SteamId, out var baseline)) matchStats.RewriteMatchStats(totals, baseline);
         }

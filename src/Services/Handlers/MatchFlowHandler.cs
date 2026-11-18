@@ -30,6 +30,8 @@ public sealed class MatchFlowHandler : IGameHandler
     // warmup) fires round_officially_ended with no round_end and then resets every engine counter.
     private bool _roundEndSeen;
     private bool _matchHadRoundEnd;
+    // Between a tracked round's freeze end and its round_end: a restart then abandons a round that was being played.
+    private bool _roundLive;
     // The engine's per-match counters per player at the last observation: the previous round_end or official round
     // end, or this round_start when there is none. Each observation adds the change since the previous one to the
     // lifetime totals, so points or money awarded after a round ended (exit frags, round-end payouts) count in that
@@ -97,6 +99,7 @@ public sealed class MatchFlowHandler : IGameHandler
     private void OnMapStart(string mapName)
     {
         GameRulesState.Reset();
+        ReleaseLeavers();
         // A map change ends the running match (vote, admin changelevel): write its per-match rows now, or they are
         // lost and its baseline is applied to the next match.
         _matchStats.FinalizeMatch();
@@ -104,6 +107,7 @@ public sealed class MatchFlowHandler : IGameHandler
         _pauseService.Reset();
         _matchStartTotals.Clear();
         _roundEndSeen = false;
+        _roundLive = false;
         _matchHadRoundEnd = false;
         _matchTracker.StartMatch(mapName);
         _scrimManager.HandleMapStart(mapName);
@@ -134,6 +138,7 @@ public sealed class MatchFlowHandler : IGameHandler
         _pauseService.Reset();
         _matchStartTotals.Clear();
         _roundEndSeen = false;
+        _roundLive = false;
         _matchHadRoundEnd = false;
         if (_config.EnableScrim) _scrimManager.HandleMatchEnd();
         _logger.LogInformation("Match ended; per-match statistics finalized.");
@@ -179,6 +184,10 @@ public sealed class MatchFlowHandler : IGameHandler
 
     private HookResult OnRoundStart(EventRoundStart @event, GameEventInfo info)
     {
+        // Whatever ended the last round (also a round end this handler did not track: warmup, a stopped scrim), nobody
+        // is playing it any more.
+        _roundLive = false;
+        ReleaseLeavers();
         if (_config.DeathmatchMode || GameRulesState.IsWarmup) return HookResult.Continue;
         if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live) return HookResult.Continue;
 
@@ -278,6 +287,9 @@ public sealed class MatchFlowHandler : IGameHandler
                 stats.Round.SurvivedThisRound = true;
                 stats.Round.RoundNumber = _currentRoundNumber;
                 stats.Round.IsPistolRound = isPistolRound;
+                // A player who reconnects is put back on their team before their session exists, so no team event or
+                // round start told it; without a team the round end does not count the round for them.
+                stats.CurrentTeam = state.Team;
                 stats.Economy.EquipmentValue = state.EquipmentValue;
                 stats.Economy.EquipmentValueStart = state.EquipmentValue;
                 if (isCt) economy.CtMoney += stats.Economy.RoundStartMoney;
@@ -286,6 +298,9 @@ public sealed class MatchFlowHandler : IGameHandler
         }
         _roundEconomy = (_currentRoundNumber, new RoundEconomy(economy.CtMoney, economy.TMoney, economy.CtEquipment, economy.TEquipment));
         _matchTracker.RecordRoundEconomy(_currentRoundNumber, _roundEconomy.Value.Economy);
+        _roundBackup.AddLateJoiners(_currentRoundNumber);
+        _roundLive = true;
+        _playerSessions.HoldDisconnected = true;
 
         _logger.LogInformation("Round {Round} Freeze End. Timing started.", _currentRoundNumber);
         return HookResult.Continue;
@@ -313,6 +328,7 @@ public sealed class MatchFlowHandler : IGameHandler
 
         _roundEndSeen = true;
         _matchHadRoundEnd = true;
+        _roundLive = false;
         _pauseService.OnRoundEnd();
 
         foreach (var processor in _processors)
@@ -363,6 +379,8 @@ public sealed class MatchFlowHandler : IGameHandler
         _matchTracker.EndRound(_currentRoundNumber, winningTeamInt, winReason, _bombProcessor.RoundBomb);
 
         SaveStats(_currentRoundNumber);
+        // After the round was counted and written for them too.
+        ReleaseLeavers();
         return HookResult.Continue;
     }
 
@@ -370,9 +388,17 @@ public sealed class MatchFlowHandler : IGameHandler
     {
         if (_config.DeathmatchMode || GameRulesState.IsWarmup) return HookResult.Continue;
         if (_config.EnableScrim && _scrimManager.CurrentState is not ScrimState.Live) return HookResult.Continue;
-        // Without a round_end this is a restart (mp_restartgame, the end of warmup): the round was not played out, and
-        // the engine resets its counters next.
-        if (!_roundEndSeen) return HookResult.Continue;
+        // Without a round_end this is a restart (mp_restartgame, the end of warmup, Game Commencing): the round was not
+        // played out, and the engine resets its counters next. What was recorded in a round that was being played goes
+        // back to its start, before the match start that follows finalizes the match from the totals.
+        if (!_roundEndSeen)
+        {
+            if (_roundLive && _roundBackup.RollBackRound(_currentRoundNumber))
+                _logger.LogInformation("Round {Round} was abandoned by a restart; its stats were rolled back.", _currentRoundNumber);
+            _roundLive = false;
+            ReleaseLeavers();
+            return HookResult.Continue;
+        }
 
         var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
         if (!string.IsNullOrWhiteSpace(matchUuid))
@@ -387,6 +413,14 @@ public sealed class MatchFlowHandler : IGameHandler
         });
         SaveStats(_currentRoundNumber);
         return HookResult.Continue;
+    }
+
+    // Sessions kept after their player left during the round (PlayerLifecycleHandler) end here, once the round is over
+    // or abandoned: the match row and the lifetime row a disconnect writes, with the round in them.
+    private void ReleaseLeavers()
+    {
+        _playerSessions.HoldDisconnected = false;
+        _matchStats.FinalizeLeavers();
     }
 
     // The lifetime rows of everyone whose totals changed, and the round's own numbers: the totals now against the totals
@@ -406,7 +440,9 @@ public sealed class MatchFlowHandler : IGameHandler
 
             if (match is null || _roundBackup.GetRoundStart(roundNumber, snapshot.SteamId) is not { } roundStart) continue;
             var round = MatchStatsService.Delta(snapshot, roundStart);
-            if (round.RoundsPlayed == 1) _persistenceChannel.TryWrite(new PlayerRoundStatsUpdate(round));
+            // The session that played the round: one started since (its player left during the round and is back) is
+            // seeded with the round in its totals, but carries none of its flags.
+            if (round.RoundsPlayed == 1 && snapshot.RoundNumber == roundNumber) _persistenceChannel.TryWrite(new PlayerRoundStatsUpdate(round));
         }
     }
 

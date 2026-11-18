@@ -277,7 +277,9 @@ public sealed class CombatEventProcessor : ICombatEventProcessor
                     if (victimTeam == PlayerTeam.CounterTerrorist) stats.Combat.CtDeaths++;
                     else if (victimTeam == PlayerTeam.Terrorist) stats.Combat.TDeaths++;
                     if (isSuicide) stats.Combat.Suicides++;
-                    stats.CurrentTeam = victimTeam;
+                    // Whoever dies is on a side; the engine also kills a player who leaves, possibly after taking them
+                    // off theirs, and the session kept for the round's end must stay on it.
+                    if (victimTeam is PlayerTeam.Terrorist or PlayerTeam.CounterTerrorist) stats.CurrentTeam = victimTeam;
 
                     // Entry Death tracking
                     if (_firstEngagementVictimIndex == victimIndex && killedByEngager)

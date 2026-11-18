@@ -14,7 +14,10 @@ public interface IMatchStatsService
     /// <summary>Captures a baseline for a single player who joined after the match started (and after
     /// their lifetime totals were seeded), so their per-match delta reflects only this match.</summary>
     void EnsureBaseline(ulong steamId);
-    void FinalizePlayer(ulong steamId);
+
+    /// <summary>Ends every session whose player has left and that can be written now: their match row, their lifetime
+    /// row, and the session is removed.</summary>
+    void FinalizeLeavers();
 
     /// <summary>Copy of the per-match baseline, so a round restore can return to it.</summary>
     IReadOnlyDictionary<ulong, PlayerSnapshot> CopyBaseline();
@@ -110,10 +113,11 @@ public sealed class MatchStatsService(
         _logger.LogInformation("Finalized per-match stats for {Count} players in match {Uuid}.", written, match.MatchUuid);
     }
 
-    public void FinalizePlayer(ulong steamId)
+    // The match row of a player who left, from their session's last totals.
+    private void FinalizeLeaver(PlayerSnapshot current, string? matchUuid)
     {
-        var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
-        if (matchUuid is null || !_playerSessions.TryGetSnapshot(steamId, out var current, matchUuid)) return;
+        if (matchUuid is null) return;
+        var steamId = current.SteamId;
 
         PlayerSnapshot? baseline;
         lock (_lock)
@@ -131,6 +135,18 @@ public sealed class MatchStatsService(
         lock (_lock)
         {
             if (_baseline.TryGetValue(steamId, out var kept)) _baseline[steamId] = CarryWeaponTotals(kept, current);
+        }
+    }
+
+    public void FinalizeLeavers()
+    {
+        var matchUuid = _matchTracker.CurrentMatch?.MatchUuid;
+        foreach (var steamId in _playerSessions.GetActiveSteamIds())
+        {
+            // Finalized only once the session is gone: its weapon totals are carried into the baseline a single time.
+            if (!_playerSessions.TryRemoveDisconnected(steamId, out var snapshot, matchUuid)) continue;
+            FinalizeLeaver(snapshot, matchUuid);
+            _persistenceChannel.TryWrite(new PlayerStatsUpdate(snapshot));
         }
     }
 
@@ -182,7 +198,9 @@ public sealed class MatchStatsService(
 
         var delta = BuildMatchDelta(current, baseline, matchUuid, rounds);
         if (engine is { } engineStats) CrossCheck(delta, engineStats);
-        var analytics = BuildAnalyticsSnapshot(current, matchUuid);
+        // The session's weapon totals start over at a reconnect; the match's cover every session of it.
+        var topWeapon = delta.WeaponKills.OrderByDescending(weapon => weapon.Value).FirstOrDefault().Key ?? "None";
+        var analytics = BuildAnalyticsSnapshot(current, matchUuid) with { TopWeaponByKills = topWeapon };
         return _persistenceChannel.TryWrite(new MatchPlayerStatsUpdate(delta, analytics));
     }
 

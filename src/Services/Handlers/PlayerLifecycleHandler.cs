@@ -153,15 +153,22 @@ public sealed class PlayerLifecycleHandler : IGameHandler
         // abort the scrim (the knife round is played after the change to the voted map).
         if (!IsMapChangeDisconnect(@event.Reason)) _scrimManager.HandleDisconnect(steamId);
 
-        var match = _matchTracker.CurrentMatch;
-        _matchStats.FinalizePlayer(steamId);
+        _playerSessions.MarkDisconnected(steamId);
+        // A round is being played and someone is still here to play it out: the session stays until it is over
+        // (MatchFlowHandler), so the round counts for the leaver like for everyone else, with its result and its round
+        // row. They did not survive it.
+        if (_playerSessions.HoldDisconnected && _playerSessions.GetActiveSteamIds().Any(id => !_playerSessions.IsHeld(id)))
+        {
+            _playerSessions.MutatePlayer(steamId, stats => stats.Round.SurvivedThisRound = false);
+            return HookResult.Continue;
+        }
+
+        // ponytail: when the last player leaves mid-round, the round is not counted for those who left during it: an
+        // empty server may hibernate and never end it, and nothing may stay unwritten that long.
+        _playerSessions.HoldDisconnected = false;
         // An unseeded session (its seed is waiting on the database) has nothing persistable yet: it stays, marked,
         // until SeedLifetimeAsync has seeded it and writes it from there.
-        _playerSessions.MarkDisconnected(steamId);
-        if (_playerSessions.TryRemoveDisconnected(steamId, out var snapshot, match?.MatchUuid))
-        {
-            _persistenceChannel.TryWrite(new PlayerStatsUpdate(snapshot));
-        }
+        _matchStats.FinalizeLeavers();
         return HookResult.Continue;
     }
 
@@ -187,7 +194,9 @@ public sealed class PlayerLifecycleHandler : IGameHandler
     private HookResult OnPlayerTeam(EventPlayerTeam @event, GameEventInfo info)
     {
         var player = @event.GetPlayerOrDefault("userid");
-        if (player is { IsBot: false, SteamID: not 0 })
+        // Leaving the server is not a move to another team: a session kept to the end of the round stays on the side
+        // its player was on.
+        if (player is { IsBot: false, SteamID: not 0 } && !@event.Disconnect)
         {
             var team = @event.GetIntValue("team", 0);
             _playerSessions.MutatePlayer(player.SteamID, stats => stats.CurrentTeam = (PlayerTeam)team);
