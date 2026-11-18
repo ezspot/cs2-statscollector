@@ -36,6 +36,7 @@ msbuild.binlog
 
 # Claude Code workspace
 /.claude/
+/.serena/
 
 # ---------------------------------------------------------------------------
 # OS files

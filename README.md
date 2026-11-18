@@ -1,4 +1,4 @@
-# statsCollector v1.0.0
+# statsCollector v1.1.0
 
 A CounterStrikeSharp plugin for CS2 that collects detailed player statistics into MySQL, with non-blocking persistence and a scrim/match management system.
 
